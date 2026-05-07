@@ -61,13 +61,7 @@ def process_universal_thermal_image(image_path, flat_frame, target_shape=(640, 5
         cv2.BORDER_CONSTANT, value=(0, 0, 0)
     )
 
-    # --- Normalize ---
-    normalized = cv2.normalize(
-        padded, None, 0, 255,
-        cv2.NORM_MINMAX, dtype=cv2.CV_8UC3
-    )
-
-    return normalized
+    return padded
 
 
 # =========================

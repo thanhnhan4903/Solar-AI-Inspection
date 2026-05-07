@@ -109,11 +109,12 @@ async def start_analysis(db: Session = Depends(get_db)):
         return {"error": "Chưa tìm thấy file weights/best.pt"}
 
     raw_dir = "data/raw"
+    precalib_dir = "data/precalib"
     results_dir = "data/results"
     os.makedirs(results_dir, exist_ok=True)
 
-    if not os.path.exists(raw_dir) or len(os.listdir(raw_dir)) == 0:
-        return {"error": "Thư mục raw trống. Hãy upload ảnh trước!"}
+    if not os.path.exists(precalib_dir) or len(os.listdir(precalib_dir)) == 0:
+        return {"error": "Thư mục precalib trống. Hãy chạy tiền xử lý trước!"}
 
     # Tạo Batch mới trong DB
     new_batch = models.InspectionBatch(name="Đợt kiểm tra tự động")
@@ -128,7 +129,7 @@ async def start_analysis(db: Session = Depends(get_db)):
     thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
     rgb_images = set([p['rgb'] for p in pairs])
 
-    for filename in os.listdir(raw_dir):
+    for filename in os.listdir(precalib_dir):
         if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
             continue
 
@@ -136,11 +137,10 @@ async def start_analysis(db: Session = Depends(get_db)):
         if filename in rgb_images:
             continue
 
-        img_path = os.path.join(raw_dir, filename)
+        img_path = os.path.join(precalib_dir, filename)
 
         # ========================================
-        # BƯỚC 1: Chạy AI trực tiếp trên ảnh RAW gốc (best.pt)
-        # YOLO tự xử lý resize/letterbox nội bộ, không cần preprocessing
+        # BƯỚC 1: Chạy AI trên ảnh Precalib
         # ========================================
         raw_detections, yolo_result = ai_engine.detect_and_segment(img_path)
         img_h, img_w = yolo_result.orig_shape

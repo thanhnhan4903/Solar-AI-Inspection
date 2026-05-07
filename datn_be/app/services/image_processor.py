@@ -59,10 +59,4 @@ class ImageProcessor:
             cv2.BORDER_CONSTANT, value=(0, 0, 0)
         )
 
-        # 5. --- Normalize (Chuẩn hóa Min-Max tuyến tính) ---
-        normalized = cv2.normalize(
-            padded, None, 0, 255,
-            cv2.NORM_MINMAX, dtype=cv2.CV_8UC3
-        )
-
-        return normalized
+        return padded
