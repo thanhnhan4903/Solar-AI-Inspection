@@ -237,7 +237,30 @@ async def start_analysis(db: Session = Depends(get_db)):
 
 
 # ================================
-# --- KHỐI 6: GIS MOCK DATA ---
+# --- KHỐI 6: CẬP NHẬT TRỌNG SỐ AI ---
+# ================================
+@app.post("/api/v1/update-ai-model")
+async def update_ai_model(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pt"):
+        return {"error": "Chỉ chấp nhận file trọng số định dạng .pt"}
+    
+    weights_dir = "weights"
+    os.makedirs(weights_dir, exist_ok=True)
+    file_path = os.path.join(weights_dir, "best.pt")
+
+    # Lưu đè file trọng số mới
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # Tải lại model vào RAM
+    try:
+        ai_engine.reload_model()
+        return {"message": "Cập nhật trọng số AI thành công và đã load vào hệ thống!"}
+    except Exception as e:
+        return {"error": f"Lỗi khi load model: {str(e)}"}
+
+# ================================
+# --- KHỐI 7: GIS MOCK DATA ---
 # ================================
 @app.get("/api/v1/mock-gis")
 def get_mock_gis():

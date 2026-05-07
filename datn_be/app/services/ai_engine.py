@@ -9,7 +9,12 @@ class AIEngine:
         """
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Không tìm thấy file trọng số tại {model_path}")
+        self.model_path = model_path
         self.model = YOLO(model_path)
+
+    def reload_model(self):
+        """Tải lại model từ file trọng số mới nhất"""
+        self.model = YOLO(self.model_path)
 
     def detect_and_segment(self, image_path: str, conf_threshold=0.25):
         """
