@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+
+# Data folders (Don't upload huge drone images and AI results)
+data/raw/*
+!data/raw/.gitkeep
+data/precalib/*
+!data/precalib/.gitkeep
+data/results/*
+!data/results/.gitkeep
+
+# Weights (If they are larger than 100MB, GitHub will reject the push)
+# Nếu file best.pt nhỏ hơn 100MB và bạn muốn bạn bè có thể tải về chạy được luôn, 
+# bạn có thể bỏ comment dòng bên dưới (hoặc dùng Git LFS).
+# weights/
+
+# OS generated files
+.DS_Store
+Thumbs.db

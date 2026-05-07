@@ -1,0 +1,24 @@
+# Web Framework & Server
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+
+# Database (MySQL)
+sqlalchemy
+pymysql
+cryptography
+
+# AI & Computer Vision
+opencv-python
+ultralytics
+shapely
+numpy
+
+# Metadata & GIS
+exifread
+pyproj
+
+# Reporting
+jinja2
+reportlab

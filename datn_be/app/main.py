@@ -1,0 +1,305 @@
+# app/main.py
+import os
+import cv2
+import shutil
+import numpy as np
+from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from shapely.geometry import Polygon
+
+# Import DB
+from app.core.database import get_db, engine
+from app.models import models
+
+# Import Services
+from app.services.file_handler import FileService
+from app.services.image_processor import ImageProcessor
+from app.services.registration import RegistrationService
+from app.services.ai_engine import AIEngine
+from app.services.analyzer import SolarAnalyzer
+from app.services.report_generator import ReportGenerator
+
+# Khởi tạo bảng Database
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="AI Solar Inspection API")
+
+# ================================
+# ✅ 1. CẤU HÌNH STATIC FILES
+# ================================
+app.mount("/data", StaticFiles(directory="data"), name="data")
+
+# ================================
+# ✅ 2. CẤU HÌNH CORS
+# ================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ================================
+# ✅ 3. LOAD AI MODEL (best.pt)
+# ================================
+WEIGHTS_PATH = "weights/best.pt"
+ai_engine = AIEngine(WEIGHTS_PATH) if os.path.exists(WEIGHTS_PATH) else None
+
+
+@app.get("/")
+def welcome():
+    return {"status": "Online", "message": "Backend Solar AI đã sẵn sàng!"}
+
+
+# ================================
+# --- KHỐI 1: UPLOAD DỮ LIỆU ---
+# ================================
+@app.post("/api/v1/upload-drone-data")
+async def upload_zip(file: UploadFile = File(...)):
+    upload_dir = "data/raw"
+    files = FileService.save_and_extract_zip(file, upload_dir)
+    return {"message": "Đã nhận và giải nén thành công!", "total_files": len(files)}
+
+
+# ================================
+# --- KHỐI 2: TIỀN HIỆU CHỈNH ẢNH NHIỆT (Pre-Calibration) ---
+# ================================
+@app.get("/api/v1/process-thermal")
+async def process_images():
+    raw_dir = "data/raw"
+    output_dir = "data/precalib"
+    os.makedirs(output_dir, exist_ok=True)
+
+    processed_count = 0
+    for filename in os.listdir(raw_dir):
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            result = ImageProcessor.preprocess_thermal(os.path.join(raw_dir, filename))
+            if result is not None:
+                cv2.imwrite(os.path.join(output_dir, filename), result)
+                processed_count += 1
+
+    return {"message": f"Đã tiền hiệu chỉnh xong {processed_count} ảnh!"}
+
+
+# ================================
+# --- KHỐI 3: GHÉP CẶP ẢNH (RGB-THERMAL) ---
+# ================================
+@app.get("/api/v1/match-pairs")
+async def match_images():
+    raw_dir = "data/raw"
+    pairs = RegistrationService.match_thermal_rgb(raw_dir)
+    return {"total_pairs": len(pairs), "pairs": pairs}
+
+
+# ================================
+# --- KHỐI 4-5: CHẠY AI (best.pt) + PHÂN TÍCH + LƯU DB ---
+# Pipeline: Chạy YOLO trực tiếp trên ảnh RAW gốc
+#           → Lưu ảnh annotated vào data/results
+#           → Trích xuất tọa độ, lỗi, tính toán
+# ================================
+@app.post("/api/v1/analyze-all")
+async def start_analysis(db: Session = Depends(get_db)):
+    if ai_engine is None:
+        return {"error": "Chưa tìm thấy file weights/best.pt"}
+
+    raw_dir = "data/raw"
+    results_dir = "data/results"
+    os.makedirs(results_dir, exist_ok=True)
+
+    if not os.path.exists(raw_dir) or len(os.listdir(raw_dir)) == 0:
+        return {"error": "Thư mục raw trống. Hãy upload ảnh trước!"}
+
+    # Tạo Batch mới trong DB
+    new_batch = models.InspectionBatch(name="Đợt kiểm tra tự động")
+    db.add(new_batch)
+    db.commit()
+    db.refresh(new_batch)
+
+    final_report = []
+
+    # Ghép cặp Thermal và RGB
+    pairs = RegistrationService.match_thermal_rgb(raw_dir)
+    thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
+    rgb_images = set([p['rgb'] for p in pairs])
+
+    for filename in os.listdir(raw_dir):
+        if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            continue
+
+        # Bỏ qua ảnh RGB vì AI chỉ chạy trên ảnh Nhiệt
+        if filename in rgb_images:
+            continue
+
+        img_path = os.path.join(raw_dir, filename)
+
+        # ========================================
+        # BƯỚC 1: Chạy AI trực tiếp trên ảnh RAW gốc (best.pt)
+        # YOLO tự xử lý resize/letterbox nội bộ, không cần preprocessing
+        # ========================================
+        raw_detections, yolo_result = ai_engine.detect_and_segment(img_path)
+        img_h, img_w = yolo_result.orig_shape
+
+        # ========================================
+        # BƯỚC 2: Lưu ảnh annotated (YOLO vẽ sẵn) vào data/results
+        # ========================================
+        annotated_img = yolo_result.plot()
+        cv2.imwrite(os.path.join(results_dir, filename), annotated_img)
+
+        # ========================================
+        # BƯỚC 3: Trích xuất & phân tích panel + lỗi
+        # ========================================
+        panels = [d for d in raw_detections if d['class_name'].lower() == 'panel']
+        defects = [d for d in raw_detections if d['class_name'].lower() != 'panel']
+
+        processed_panels = []
+
+        for p in panels:
+            p_poly = p.get('polygon')
+            p_box = p.get('box')
+            p_conf = p.get('confidence', 0)
+
+            if not p_poly or len(p_poly) < 3: continue
+
+            try:
+                p_geom = Polygon(p_poly)
+                if not p_geom.is_valid: continue
+            except: continue
+
+            p_loss = 0
+            p_defects_list = []
+
+            for d in defects:
+                d_poly = d.get('polygon')
+                d_box = d.get('box')
+                if not d_poly or len(d_poly) < 3: continue
+                try:
+                    d_geom = Polygon(d_poly)
+                    if not d_geom.is_valid: continue
+                except: continue
+
+                if p_geom.contains(d_geom.centroid):
+                    loss, _ = SolarAnalyzer.calculate_metrics(p_poly, d_poly, d['class_name'])
+                    p_loss += loss
+                    p_defects_list.append({
+                        "type": d['class_name'],
+                        "loss": loss,
+                        "box": d_box
+                    })
+
+            processed_panels.append({
+                "x": round(p_geom.centroid.x, 2),
+                "y": round(p_geom.centroid.y, 2),
+                "box": p_box,
+                "confidence": round(p_conf, 2),
+                "defects": p_defects_list,
+                "total_panel_loss": min(p_loss, 100.0)
+            })
+
+        # Gán Grid ID (Panel_01, Panel_02...) - trái→phải, trên→dưới
+        final_panels = SolarAnalyzer.assign_grid_ids(processed_panels)
+
+        # Lưu dữ liệu từng tấm pin vào MySQL
+        for p in final_panels:
+            db_panel = models.PanelAnalysis(
+                batch_id=new_batch.id,
+                filename=filename,
+                x_coord=p['x'],
+                y_coord=p['y'],
+                local_id=p['local_id'],
+                defect_type=", ".join(list(set([d['type'] for d in p['defects']]))) if p['defects'] else "Healthy",
+                loss_pct=p['total_panel_loss'],
+                confidence=p.get('confidence', 0.9)
+            )
+            db.add(db_panel)
+
+        final_report.append({
+            "filename": filename,
+            "rgb_image": thermal_to_rgb.get(filename),
+            "image_width": img_w,
+            "image_height": img_h,
+            "total_panels": len(final_panels),
+            "panels": final_panels
+        })
+
+    db.commit()
+
+    return {
+        "message": "AI đã phân tích và lưu dữ liệu thành công!",
+        "batch_id": new_batch.id,
+        "data": final_report
+    }
+
+
+# ================================
+# --- KHỐI 6: GIS MOCK DATA ---
+# ================================
+@app.get("/api/v1/mock-gis")
+def get_mock_gis():
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"id": "PNL-001", "status": "Hotspot", "loss": "15.5%"},
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [106.6297, 10.8231]
+                }
+            }
+        ]
+    }
+
+
+# ================================
+# --- DOWNLOAD BÁO CÁO PDF ---
+# ================================
+@app.get("/api/v1/download-report/{batch_id}")
+async def download_report(batch_id: int, db: Session = Depends(get_db)):
+    panels = db.query(models.PanelAnalysis).filter(models.PanelAnalysis.batch_id == batch_id).all()
+    
+    if not panels:
+        return {"error": "Không tìm thấy dữ liệu báo cáo"}
+
+    report_name = f"Report_Batch_{batch_id}.pdf"
+    report_path = os.path.join("data", report_name)
+    
+    ReportGenerator.generate_inspection_report(batch_id, panels, report_path)
+
+    return FileResponse(path=report_path, filename=report_name, media_type='application/pdf')
+
+
+# ================================
+# --- RESET TOÀN BỘ HỆ THỐNG ---
+# ================================
+@app.post("/api/v1/reset-system")
+async def reset_system(db: Session = Depends(get_db)):
+    # 1. Xóa sạch file trong các thư mục data
+    folders = ["data/raw", "data/precalib", "data/results"] 
+    for folder in folders:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+        os.makedirs(folder, exist_ok=True)
+
+    # Xóa thư mục cũ nếu còn tồn tại
+    old_processed = "data/processed"
+    if os.path.exists(old_processed):
+        shutil.rmtree(old_processed)
+
+    # 2. Xóa sạch dữ liệu trong MySQL
+    try:
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+        db.execute(text("DELETE FROM panel_analyses;"))
+        db.execute(text("DELETE FROM inspection_batches;"))
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+    return {"message": "Hệ thống đã được làm mới hoàn toàn!"}
