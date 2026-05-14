@@ -2,13 +2,39 @@ import React from "react";
 import { ArrowLeft, MapPin, Activity, AlertTriangle, Percent } from "lucide-react";
 import { colors } from "../../constants/theme";
 
-// Ảnh từ results (đã qua YOLO)
-const IMAGE_URL = "http://127.0.0.1:8000/data/results/";
+// Gọi API lấy ảnh cắt 50% có khung xanh
+const PANEL_IMAGE_API = "http://127.0.0.1:8000/api/v1/panel-image";
 
 export default function PanelDetail({ panel, onBack }) {
     if (!panel) return null;
 
     const hasDefects = panel.total_panel_loss > 0;
+
+    // Tính toán lại tọa độ SVG cho ảnh cắt 50%
+    const imgW = panel.imgW || 640;
+    const imgH = panel.imgH || 512;
+    const cropW = Math.floor(imgW * 0.5);
+    const cropH = Math.floor(imgH * 0.5);
+    
+    let cx1 = 0, cy1 = 0;
+    if (panel.box) {
+        const cx = Math.floor((panel.box[0] + panel.box[2]) / 2);
+        const cy = Math.floor((panel.box[1] + panel.box[3]) / 2);
+        cx1 = Math.max(0, cx - Math.floor(cropW / 2));
+        cy1 = Math.max(0, cy - Math.floor(cropH / 2));
+        
+        let cx2 = Math.min(imgW, cx + Math.floor(cropW / 2));
+        let cy2 = Math.min(imgH, cy + Math.floor(cropH / 2));
+        
+        if (cx2 - cx1 < cropW) {
+            if (cx1 === 0) cx2 = Math.min(imgW, cx1 + cropW);
+            if (cx2 === imgW) cx1 = Math.max(0, cx2 - cropW);
+        }
+        if (cy2 - cy1 < cropH) {
+            if (cy1 === 0) cy2 = Math.min(imgH, cy1 + cropH);
+            if (cy2 === imgH) cy1 = Math.max(0, cy2 - cropH);
+        }
+    }
 
     return (
         <div style={{ background: "#fff", borderRadius: 20, padding: 24 }}>
@@ -19,38 +45,29 @@ export default function PanelDetail({ panel, onBack }) {
                 <div>
                     <h2 style={{ marginBottom: 16 }}>{panel.local_id} - Ảnh phân tích chi tiết</h2>
                     <div style={{ borderRadius: 12, overflow: "hidden", background: "#000", position: "relative" }}>
-                        {/* Ảnh YOLO annotated từ results */}
+                        {/* Ảnh đã cắt từ Backend */}
                         <img 
-                            src={`${IMAGE_URL}${panel.sourceFile}?t=${Date.now()}`} 
+                            src={`${PANEL_IMAGE_API}?filename=${panel.sourceFile}&x1=${panel.box[0]}&y1=${panel.box[1]}&x2=${panel.box[2]}&y2=${panel.box[3]}${panel.polygon ? `&polygon=${panel.polygon.flat().join(',')}` : ''}`} 
                             style={{ width: "100%", display: "block" }} 
                             alt="AI Result" 
                         />
-                        {/* SVG overlay: khoanh vàng panel + đỏ cho lỗi */}
+                        {/* SVG overlay: chỉ cần vẽ các lỗi (khung xanh đã được vẽ từ Backend) */}
                         {panel.box && panel.imgW && panel.imgH && (
                             <svg 
                                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}
-                                viewBox={`0 0 ${panel.imgW} ${panel.imgH}`}
+                                viewBox={`0 0 ${cropW} ${cropH}`}
                                 preserveAspectRatio="xMidYMid meet"
                             >
-                                {/* Khung vàng cho panel đang xem */}
-                                <rect 
-                                    x={panel.box[0]} y={panel.box[1]} 
-                                    width={panel.box[2] - panel.box[0]} height={panel.box[3] - panel.box[1]}
-                                    fill="rgba(255,255,0,0.15)" stroke="#FFD700" strokeWidth="3"
-                                />
-                                <text x={panel.box[0] + 4} y={panel.box[1] - 6} fill="#FFD700" fontSize="14" fontWeight="bold">
-                                    {panel.local_id}
-                                </text>
                                 {/* Khung đỏ cho từng lỗi */}
                                 {panel.defects && panel.defects.map((d, i) => (
                                     d.box && (
                                         <g key={i}>
                                             <rect 
-                                                x={d.box[0]} y={d.box[1]} 
+                                                x={d.box[0] - cx1} y={d.box[1] - cy1} 
                                                 width={d.box[2] - d.box[0]} height={d.box[3] - d.box[1]}
                                                 fill="rgba(255,0,0,0.25)" stroke="#FF3333" strokeWidth="2"
                                             />
-                                            <text x={d.box[0] + 2} y={d.box[1] - 4} fill="#FF3333" fontSize="11" fontWeight="bold">
+                                            <text x={d.box[0] - cx1 + 2} y={d.box[1] - cy1 - 4} fill="#FF3333" fontSize="11" fontWeight="bold">
                                                 {d.type}
                                             </text>
                                         </g>
