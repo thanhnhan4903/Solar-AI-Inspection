@@ -46,10 +46,10 @@ class ReportGenerator:
         pdf.set_font("helvetica", "", 8)
         for p in defective_panels:
             if p.loss_pct > 0: # Chỉ liệt kê các tấm có lỗi thực tế
-                pdf.cell(40, 7, str(p.local_id), 1)
+                pdf.cell(40, 7, str(p.panel.local_id), 1)
                 pdf.cell(60, 7, str(p.defect_type), 1)
                 pdf.cell(40, 7, f"{p.loss_pct}%", 1, 0, "C")
-                pdf.cell(50, 7, str(p.filename), 1, 1)
+                pdf.cell(50, 7, str(p.image.filename), 1, 1)
 
         pdf.output(output_path)
         return output_path

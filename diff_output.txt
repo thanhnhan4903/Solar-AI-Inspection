@@ -1,0 +1,658 @@
+--- datn_fe/App.jsx
++++ datn_fe2/App.jsx
+@@ -1,5 +1,4 @@
+-import React, { useState, useEffect } from "react";
+-import { fetchLatestBatch } from "./src/api";
++import React, { useState } from "react";
+ import { Sidebar } from "./src/components/layout/Sidebar";
+ import { colors } from "./src/constants/theme";
+ 
+@@ -22,20 +21,17 @@
+     const [aiResults, setAiResults] = useState([]); 
+     const [currentBatchId, setCurrentBatchId] = useState(null);
+ 
+-    useEffect(() => {
+-        if (isAuth) {
+-            fetchLatestBatch().then(res => {
+-                if (res.data && res.data.batch_id) {
+-                    setAiResults(res.data.data);
+-                    setCurrentBatchId(res.data.batch_id);
+-                }
+-            }).catch(console.error);
+-        }
+-    }, [isAuth]);
++    const [mapFocusTarget, setMapFocusTarget] = useState(null);
+ 
+     const handleLogin = () => { localStorage.setItem("isAuth", "true"); setIsAuth(true); };
+     const handleLogout = () => { localStorage.removeItem("isAuth"); setIsAuth(false); };
+-    const navigate = (p) => { setPage(p); setActivePage(p); };
++    
++    // Hàm điều hướng chung (từ Sidebar)
++    const navigate = (p) => { 
++        if (p !== "ops") setMapFocusTarget(null);
++        setPage(p); 
++        setActivePage(p); 
++    };
+ 
+     if (!isAuth) return <Login onLogin={handleLogin} />;
+ 
+@@ -71,13 +67,20 @@
+                 {page === "detail" && (
+                     <PanelDetail 
+                         panel={selectedPanel} 
++                        data={aiResults}
++                        onSelect={(p) => setSelectedPanel(p)}
+                         onBack={() => navigate("panel")} 
++                        onViewOnMap={(img) => {
++                            setMapFocusTarget(img.filename);
++                            setPage("ops");
++                            setActivePage("ops");
++                        }}
+                     />
+                 )}
+ 
+                 {page === "report" && <ReportPage data={aiResults} batchId={currentBatchId} />}
+ 
+-                {page === "ops" && <UnifiedDashboard data={aiResults} />}
++                {page === "ops" && <UnifiedDashboard data={aiResults} focusTarget={mapFocusTarget} />}
+             </div>
+         </div>
+     );
+
+
+--- datn_fe/src/components/layout/Sidebar.jsx
++++ datn_fe2/src/components/layout/Sidebar.jsx
+@@ -4,7 +4,7 @@
+ 
+ const NAV = [
+     { key: "home", icon: BarChart3, label: "Dashboard" },
+-    { key: "panel", icon: Grid3X3, label: "Panel" },
++    { key: "panel", icon: Grid3X3, label: "Hình ảnh" },
+     { key: "ops", icon: Map, label: "Solar Operations" },
+     { key: "report", icon: BarChart3, label: "Report" },
+ ];
+
+
+--- datn_fe/src/pages/Dashboard/Home.jsx
++++ datn_fe2/src/pages/Dashboard/Home.jsx
+@@ -39,13 +39,7 @@
+             await axios.get("http://127.0.0.1:8000/api/v1/process-thermal");
+ 
+             setStatusText("Đang phân tích AI...");
+-            const analyzeForm = new FormData();
+-            const userStr = localStorage.getItem("user");
+-            if (userStr) {
+-                const user = JSON.parse(userStr);
+-                analyzeForm.append("user_id", user.id);
+-            }
+-            const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all", analyzeForm);
++            const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all");
+             
+             if (onAnalysisComplete) {
+                 onAnalysisComplete(res.data.data, res.data.batch_id);
+@@ -150,7 +144,7 @@
+             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 24 }}>
+                 <KpiCard 
+                     icon={<LayoutGrid size={20} />} 
+-                    label="TOTAL PANELS" 
++                    label="TỔNG SỐ HÌNH ẢNH"
+                     value={totalPanels.toLocaleString()} 
+                     accent={colors.primary} 
+                 />
+
+
+--- datn_fe/src/pages/Panel/PanelDetail.jsx
++++ datn_fe2/src/pages/Panel/PanelDetail.jsx
+@@ -1,113 +1,221 @@
+-import React from "react";
+-import { ArrowLeft, MapPin, Activity, AlertTriangle, Percent } from "lucide-react";
++import React, { useState } from "react";
++import { ArrowLeft, ArrowRight, MapPin, Activity, AlertTriangle, Percent, LayoutGrid, Info, Map as MapIcon } from "lucide-react";
+ import { colors } from "../../constants/theme";
+ 
+-// Gọi API lấy ảnh cắt 50% có khung xanh
+-const PANEL_IMAGE_API = "http://127.0.0.1:8000/api/v1/panel-image";
+-
+-export default function PanelDetail({ panel, onBack }) {
+-    if (!panel) return null;
+-
+-    const hasDefects = panel.total_panel_loss > 0;
+-
+-    // Tính toán lại tọa độ SVG cho ảnh cắt 50%
+-    const imgW = panel.imgW || 640;
+-    const imgH = panel.imgH || 512;
+-    const cropW = Math.floor(imgW * 0.5);
+-    const cropH = Math.floor(imgH * 0.5);
+-    
+-    let cx1 = 0, cy1 = 0;
+-    if (panel.box) {
+-        const cx = Math.floor((panel.box[0] + panel.box[2]) / 2);
+-        const cy = Math.floor((panel.box[1] + panel.box[3]) / 2);
+-        cx1 = Math.max(0, cx - Math.floor(cropW / 2));
+-        cy1 = Math.max(0, cy - Math.floor(cropH / 2));
+-        
+-        let cx2 = Math.min(imgW, cx + Math.floor(cropW / 2));
+-        let cy2 = Math.min(imgH, cy + Math.floor(cropH / 2));
+-        
+-        if (cx2 - cx1 < cropW) {
+-            if (cx1 === 0) cx2 = Math.min(imgW, cx1 + cropW);
+-            if (cx2 === imgW) cx1 = Math.max(0, cx2 - cropW);
++const IMAGE_BASE_API = "http://127.0.0.1:8000/data/precalib/";
++
++export default function PanelDetail({ panel: image, data, onSelect, onBack, onViewOnMap }) {
++    if (!image) return null;
++
++    const [hoveredPanel, setHoveredPanel] = useState(null);
++
++    const imgW = image.image_width || 640;
++    const imgH = image.image_height || 512;
++
++    const handleNext = () => {
++        if (!data || data.length === 0) return;
++        const currentIndex = data.findIndex(img => img.filename === image.filename);
++        if (currentIndex !== -1) {
++            const nextIndex = (currentIndex + 1) % data.length;
++            onSelect({
++                ...data[nextIndex],
++                id: `Hình ${nextIndex + 1}`,
++                status: data[nextIndex].panels.filter(p => p.total_panel_loss > 0).length > 0 ? "defective" : "healthy",
++                faulty_count: data[nextIndex].panels.filter(p => p.total_panel_loss > 0).length
++            });
+         }
+-        if (cy2 - cy1 < cropH) {
+-            if (cy1 === 0) cy2 = Math.min(imgH, cy1 + cropH);
+-            if (cy2 === imgH) cy1 = Math.max(0, cy2 - cropH);
++    };
++
++    const handlePrev = () => {
++        if (!data || data.length === 0) return;
++        const currentIndex = data.findIndex(img => img.filename === image.filename);
++        if (currentIndex !== -1) {
++            const prevIndex = (currentIndex - 1 + data.length) % data.length;
++            onSelect({
++                ...data[prevIndex],
++                id: `Hình ${prevIndex + 1}`,
++                status: data[prevIndex].panels.filter(p => p.total_panel_loss > 0).length > 0 ? "defective" : "healthy",
++                faulty_count: data[prevIndex].panels.filter(p => p.total_panel_loss > 0).length
++            });
+         }
+-    }
++    };
+ 
+     return (
+-        <div style={{ background: "#fff", borderRadius: 20, padding: 24 }}>
+-            <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 8, border: "none", background: "none", color: colors.primary, cursor: "pointer", fontWeight: 600, marginBottom: 20 }}>
+-                <ArrowLeft size={18} /> Quay lại
+-            </button>
+-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 32 }}>
++        <div style={{ background: "#fff", borderRadius: 20, padding: 24, display: "flex", flexDirection: "column", height: "100%" }}>
++            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
++                <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 8, border: "none", background: "none", color: colors.primary, cursor: "pointer", fontWeight: 600 }}>
++                    <ArrowLeft size={18} /> Quay lại
++                </button>
++                <div style={{ display: "flex", gap: 24 }}>
++                    <button onClick={handlePrev} style={{ display: "flex", alignItems: "center", border: "none", background: "none", color: "#1E293B", cursor: "pointer", padding: 0 }}>
++                        <ArrowLeft size={28} />
++                    </button>
++                    <button onClick={handleNext} style={{ display: "flex", alignItems: "center", border: "none", background: "none", color: "#1E293B", cursor: "pointer", padding: 0 }}>
++                        <ArrowRight size={28} />
++                    </button>
++                </div>
++            </div>
++
++            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 32, flex: 1 }}>
++                
++                {/* TRÁI: Khu vực xem ảnh toàn cảnh & Tương tác */}
+                 <div>
+-                    <h2 style={{ marginBottom: 16 }}>{panel.local_id} - Ảnh phân tích chi tiết</h2>
+-                    <div style={{ borderRadius: 12, overflow: "hidden", background: "#000", position: "relative" }}>
+-                        {/* Ảnh đã cắt từ Backend */}
++                    <h2 style={{ marginBottom: 16, marginTop: 0 }}>{image.id} - Bản đồ chi tiết</h2>
++                    <div style={{ borderRadius: 12, overflow: "hidden", background: "#000", position: "relative", minHeight: 400 }}>
+                         <img 
+-                            src={`${PANEL_IMAGE_API}?filename=${panel.sourceFile}&x1=${panel.box[0]}&y1=${panel.box[1]}&x2=${panel.box[2]}&y2=${panel.box[3]}${panel.polygon ? `&polygon=${panel.polygon.flat().join(',')}` : ''}`} 
+-                            style={{ width: "100%", display: "block" }} 
+-                            alt="AI Result" 
++                            src={`${IMAGE_BASE_API}${image.filename}`} 
++                            style={{ width: "100%", display: "block", objectFit: "contain" }} 
++                            alt={image.id} 
+                         />
+-                        {/* SVG overlay: chỉ cần vẽ các lỗi (khung xanh đã được vẽ từ Backend) */}
+-                        {panel.box && panel.imgW && panel.imgH && (
+-                            <svg 
+-                                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+-                                viewBox={`0 0 ${cropW} ${cropH}`}
+-                                preserveAspectRatio="xMidYMid meet"
+-                            >
+-                                {/* Khung đỏ cho từng lỗi */}
+-                                {panel.defects && panel.defects.map((d, i) => (
+-                                    d.box && (
+-                                        <g key={i}>
+-                                            <rect 
+-                                                x={d.box[0] - cx1} y={d.box[1] - cy1} 
+-                                                width={d.box[2] - d.box[0]} height={d.box[3] - d.box[1]}
+-                                                fill="rgba(255,0,0,0.25)" stroke="#FF3333" strokeWidth="2"
+-                                            />
+-                                            <text x={d.box[0] - cx1 + 2} y={d.box[1] - cy1 - 4} fill="#FF3333" fontSize="11" fontWeight="bold">
+-                                                {d.type}
+-                                            </text>
+-                                        </g>
++                        <svg 
++                            style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
++                            viewBox={`0 0 ${imgW} ${imgH}`}
++                            preserveAspectRatio="xMidYMid meet"
++                        >
++                            {image.panels && image.panels.map((p, i) => {
++                                const isHovered = hoveredPanel?.local_id === p.local_id;
++                                const isFaulty = p.total_panel_loss > 0;
++                                
++                                const strokeColor = isFaulty ? "#EF4444" : "#10B981"; // Red if faulty, Green if healthy
++                                const fillColor = isHovered 
++                                    ? (isFaulty ? "rgba(239, 68, 68, 0.4)" : "rgba(16, 185, 129, 0.4)")
++                                    : (isFaulty ? "rgba(239, 68, 68, 0.15)" : "transparent");
++
++                                return p.polygon ? (
++                                    <polygon 
++                                        key={i}
++                                        points={p.polygon.map(pt => pt.join(',')).join(' ')}
++                                        fill={fillColor}
++                                        stroke={strokeColor}
++                                        strokeWidth={isHovered ? 3 : 1.5}
++                                        onMouseEnter={() => setHoveredPanel(p)}
++                                        onMouseLeave={() => setHoveredPanel(null)}
++                                        style={{ cursor: "pointer", transition: "all 0.2s" }}
++                                    />
++                                ) : (
++                                    p.box && (
++                                        <rect
++                                            key={i}
++                                            x={p.box[0]} y={p.box[1]}
++                                            width={p.box[2] - p.box[0]} height={p.box[3] - p.box[1]}
++                                            fill={fillColor}
++                                            stroke={strokeColor}
++                                            strokeWidth={isHovered ? 3 : 1.5}
++                                            onMouseEnter={() => setHoveredPanel(p)}
++                                            onMouseLeave={() => setHoveredPanel(null)}
++                                            style={{ cursor: "pointer", transition: "all 0.2s" }}
++                                        />
+                                     )
+-                                ))}
+-                            </svg>
++                                );
++                            })}
++                        </svg>
++                    </div>
++                    <p style={{ fontSize: 13, color: "#64748b", marginTop: 12, display: "flex", gap: 6, alignItems: "center" }}>
++                        <Info size={14} /> <i>Rê chuột vào từng khung chữ nhật/đa giác trên ảnh để xem thông tin chi tiết của tấm pin đó.</i>
++                    </p>
++                </div>
++
++                {/* PHẢI: Bảng thông tin thay đổi động */}
++                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
++                    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
++                        {!hoveredPanel ? (
++                            // TRẠNG THÁI MẶC ĐỊNH (Khi chưa hover)
++                            <>
++                                <div style={{ padding: 20, background: "#f8fafc", borderRadius: 16, border: "1px solid #e2e8f0" }}>
++                                    <h3 style={{ margin: "0 0 16px 0", color: "#1E293B" }}>Tổng quan {image.id}</h3>
++                                    <div style={{ display: "flex", gap: 20 }}>
++                                        <div style={{ flex: 1 }}>
++                                            <p style={{ margin: "0 0 8px 0", color: "#64748B", fontSize: 13, fontWeight: 600 }}>TỔNG SỐ TẤM PIN</p>
++                                            <p style={{ margin: 0, fontSize: 24, fontWeight: "bold", color: colors.primary }}>{image.total_panels}</p>
++                                        </div>
++                                        <div style={{ flex: 1 }}>
++                                            <p style={{ margin: "0 0 8px 0", color: "#64748B", fontSize: 13, fontWeight: 600 }}>TẤM BỊ LỖI</p>
++                                            <p style={{ margin: 0, fontSize: 24, fontWeight: "bold", color: image.faulty_count > 0 ? colors.danger : colors.success }}>{image.faulty_count}</p>
++                                        </div>
++                                    </div>
++                                </div>
++                                {image.faulty_count > 0 && (
++                                    <div style={{ padding: 20, background: "#FFF5F5", borderRadius: 16, border: "1px solid #FED7D7" }}>
++                                        <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8, color: colors.error }}>
++                                            <AlertTriangle size={18} /> Cảnh báo
++                                        </h4>
++                                        <p style={{ margin: 0, color: "#9B2C2C", fontSize: 14 }}>
++                                            Phát hiện <b>{image.faulty_count}</b> tấm pin có dấu hiệu hư hỏng. Hãy rê chuột vào các khung màu đỏ trên ảnh để kiểm tra.
++                                        </p>
++                                    </div>
++                                )}
++                            </>
++                        ) : (
++                            // TRẠNG THÁI HOVER (Hiển thị chi tiết tấm pin)
++                            <>
++                                <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 16, borderBottom: "1px solid #e2e8f0" }}>
++                                    <LayoutGrid size={24} color={colors.primary} />
++                                    <h3 style={{ margin: 0, color: "#1E293B" }}>Chi tiết {hoveredPanel.local_id.replace("Panel_", "Tấm số ")}</h3>
++                                </div>
++
++                                {/* Tình trạng */}
++                                <div style={{ padding: 20, background: hoveredPanel.total_panel_loss > 0 ? "#FFF5F5" : "#F0FDF4", borderRadius: 16, border: `1px solid ${hoveredPanel.total_panel_loss > 0 ? '#FED7D7' : '#BBF7D0'}` }}>
++                                    <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8, color: hoveredPanel.total_panel_loss > 0 ? colors.error : colors.success }}>
++                                        <Activity size={18} /> Tình trạng
++                                    </h4>
++                                    <div style={{ fontSize: 24, fontWeight: "bold", color: hoveredPanel.total_panel_loss > 0 ? colors.error : colors.success }}>
++                                        {hoveredPanel.total_panel_loss > 0 ? `Lỗi: ${hoveredPanel.total_panel_loss.toFixed(1)}%` : "Bình thường"}
++                                    </div>
++                                </div>
++
++                                {/* Tọa độ bounding box */}
++                                <div style={{ padding: 20, border: "1px solid #e2e8f0", borderRadius: 16 }}>
++                                    <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8 }}><MapPin size={18}/> Tọa độ bounding box</h4>
++                                    <p style={{ margin: "4px 0" }}>X1: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[0]) : 0}</b> px | Y1: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[1]) : 0}</b> px</p>
++                                    <p style={{ margin: "4px 0" }}>X2: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[2]) : 0}</b> px | Y2: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[3]) : 0}</b> px</p>
++                                    {hoveredPanel.confidence && (
++                                        <p style={{ marginTop: 12, color: "#718096", margin: "12px 0 0 0" }}>
++                                            <Percent size={14} style={{ verticalAlign: "middle", marginRight: 4 }}/> Độ tin cậy AI: <b>{(hoveredPanel.confidence * 100).toFixed(0)}%</b>
++                                        </p>
++                                    )}
++                                </div>
++
++                                {/* Danh sách lỗi phát hiện */}
++                                {hoveredPanel.total_panel_loss > 0 && hoveredPanel.defects && hoveredPanel.defects.length > 0 && (
++                                    <div style={{ padding: 20, background: "#FFF5F5", border: "1px solid #FED7D7", borderRadius: 16 }}>
++                                        <h4 style={{ margin: "0 0 12px 0", color: colors.error, display: "flex", alignItems: "center", gap: 8 }}>
++                                            <AlertTriangle size={18}/> Lỗi phát hiện ({hoveredPanel.defects.length})
++                                        </h4>
++                                        {hoveredPanel.defects.map((d, i) => (
++                                            <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: i < hoveredPanel.defects.length - 1 ? "1px solid #FED7D7" : "none" }}>
++                                                <span style={{ fontWeight: 600, color: "#C53030", textTransform: "capitalize" }}>{d.type}</span>
++                                                <span style={{ color: "#E53E3E", fontWeight: 600 }}>-{d.loss.toFixed(2)}%</span>
++                                            </div>
++                                        ))}
++                                    </div>
++                                )}
++                            </>
+                         )}
+                     </div>
+-                </div>
+-                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+-                    {/* Tình trạng */}
+-                    <div style={{ padding: 20, background: "#f8fafc", borderRadius: 16 }}>
+-                        <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8 }}><Activity size={18}/> Tình trạng</h4>
+-                        <div style={{ fontSize: 24, fontWeight: "bold", color: hasDefects ? colors.error : colors.success }}>
+-                            {hasDefects ? `Lỗi: ${panel.total_panel_loss.toFixed(1)}%` : "Bình thường"}
+-                        </div>
+-                    </div>
+-                    {/* Tọa độ bounding box */}
+-                    <div style={{ padding: 20, border: "1px solid #e2e8f0", borderRadius: 16 }}>
+-                        <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8 }}><MapPin size={18}/> Tọa độ bounding box</h4>
+-                        <p>X1: <b>{panel.box ? Math.round(panel.box[0]) : 0}</b> px | Y1: <b>{panel.box ? Math.round(panel.box[1]) : 0}</b> px</p>
+-                        <p>X2: <b>{panel.box ? Math.round(panel.box[2]) : 0}</b> px | Y2: <b>{panel.box ? Math.round(panel.box[3]) : 0}</b> px</p>
+-                        {panel.confidence && (
+-                            <p style={{ marginTop: 8, color: "#718096" }}>
+-                                <Percent size={14} style={{ verticalAlign: "middle" }}/> Confidence: <b>{(panel.confidence * 100).toFixed(0)}%</b>
+-                            </p>
+-                        )}
+-                    </div>
+-                    {/* Danh sách lỗi phát hiện */}
+-                    {hasDefects && panel.defects && panel.defects.length > 0 && (
+-                        <div style={{ padding: 20, background: "#FFF5F5", border: "1px solid #FED7D7", borderRadius: 16 }}>
+-                            <h4 style={{ margin: "0 0 10px 0", color: colors.error, display: "flex", alignItems: "center", gap: 8 }}><AlertTriangle size={18}/> Lỗi phát hiện ({panel.defects.length})</h4>
+-                            {panel.defects.map((d, i) => (
+-                                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: i < panel.defects.length - 1 ? "1px solid #FED7D7" : "none" }}>
+-                                    <span style={{ fontWeight: 600, color: "#C53030" }}>{d.type}</span>
+-                                    <span style={{ color: "#E53E3E", fontWeight: 600 }}>-{d.loss.toFixed(2)}%</span>
+-                                </div>
+-                            ))}
+-                        </div>
+-                    )}
++
++                    <button 
++                        onClick={() => onViewOnMap && onViewOnMap(image)}
++                        style={{ 
++                            marginTop: "auto",
++                            padding: "16px",
++                            border: "2px solid #1E293B",
++                            background: "transparent",
++                            color: "#1E293B",
++                            fontWeight: 700,
++                            fontSize: 14,
++                            cursor: "pointer",
++                            textTransform: "uppercase",
++                            display: "flex",
++                            justifyContent: "center",
++                            alignItems: "center",
++                            gap: 8,
++                            transition: "all 0.2s"
++                        }}
++                        onMouseEnter={e => { e.currentTarget.style.background = "#1E293B"; e.currentTarget.style.color = "#fff"; }}
++                        onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#1E293B"; }}
++                    >
++                        <MapIcon size={18} /> View on Map
++                    </button>
+                 </div>
+             </div>
+         </div>
+
+
+--- datn_fe/src/pages/Panel/PanelPage.jsx
++++ datn_fe2/src/pages/Panel/PanelPage.jsx
+@@ -5,8 +5,8 @@
+ import { ActionButton } from "../../components/ui/ActionButton";
+ import { BadgePill } from "../../components/ui/BadgePill";
+ 
+-// Gọi API lấy ảnh cắt 50% có khung xanh
+-const PANEL_IMAGE_API = "http://127.0.0.1:8000/api/v1/panel-image";
++// Lấy ảnh gốc precalib từ backend
++const IMAGE_BASE_API = "http://127.0.0.1:8000/data/precalib/";
+ 
+ export default function PanelPage({ data, onSelect, onNavigate }) {
+     if (!data || data.length === 0) return <div style={{ textAlign: "center", padding: 100 }}><ActionButton onClick={() => onNavigate("home")}>Vui lòng chạy AI tại Dashboard trước</ActionButton></div>;
+@@ -15,42 +15,46 @@
+     const [statusFilter, setStatusFilter] = useState("all");
+     const [sortBy, setSortBy] = useState("id_asc");
+ 
+-    const allPanels = useMemo(() => {
+-        if (!data) return [];
+-        return data.flatMap(img => img.panels.map(p => ({ 
+-            ...p, 
+-            sourceFile: img.filename,
+-            imgW: img.image_width,
+-            imgH: img.image_height,
+-            status: p.total_panel_loss > 0 ? "defective" : "healthy" 
+-        })));
++    const allImages = useMemo(() => {
++        return data.map((img, index) => {
++            const faultyPanels = img.panels.filter(p => p.total_panel_loss > 0);
++            return {
++                ...img,
++                id: `Hình ${index + 1}`,
++                status: faultyPanels.length > 0 ? "defective" : "healthy",
++                faulty_count: faultyPanels.length
++            };
++        });
+     }, [data]);
+ 
+-    const filteredAndSortedPanels = useMemo(() => {
+-        let result = [...allPanels];
++    const filteredAndSortedImages = useMemo(() => {
++        let result = [...allImages];
+ 
+         if (searchQuery.trim() !== "") {
+-            result = result.filter(p => p.local_id.toLowerCase().includes(searchQuery.toLowerCase()));
++            result = result.filter(img => 
++                img.id.toLowerCase().includes(searchQuery.toLowerCase()) || 
++                img.filename.toLowerCase().includes(searchQuery.toLowerCase())
++            );
+         }
+ 
+         if (statusFilter !== "all") {
+-            result = result.filter(p => p.status === statusFilter);
++            result = result.filter(img => img.status === statusFilter);
+         }
+ 
+         result.sort((a, b) => {
+-            if (sortBy === "id_asc") return a.local_id.localeCompare(b.local_id, undefined, { numeric: true });
+-            if (sortBy === "id_desc") return b.local_id.localeCompare(a.local_id, undefined, { numeric: true });
+-            if (sortBy === "loss_desc") return (b.total_panel_loss || 0) - (a.total_panel_loss || 0);
+-            if (sortBy === "loss_asc") return (a.total_panel_loss || 0) - (b.total_panel_loss || 0);
++            if (sortBy === "id_asc") return a.id.localeCompare(b.id, undefined, { numeric: true });
++            if (sortBy === "id_desc") return b.id.localeCompare(a.id, undefined, { numeric: true });
++            if (sortBy === "loss_desc") return b.faulty_count - a.faulty_count;
++            if (sortBy === "loss_asc") return a.faulty_count - b.faulty_count;
+             return 0;
+         });
+ 
+         return result;
+-    }, [allPanels, searchQuery, statusFilter, sortBy]);
++    }, [allImages, searchQuery, statusFilter, sortBy]);
+ 
+     return (
+         <div>
+-            <PageHeader title="Panel Management" subtitle={`${filteredAndSortedPanels.length} / ${allPanels.length} panels showing`} />
++            <PageHeader title="Quản lý Hình ảnh" subtitle={`Đang hiển thị ${filteredAndSortedImages.length} / ${allImages.length} hình`} />
+             
+             {/* Filter & Sort Bar */}
+             <div style={{ display: "flex", gap: 16, marginBottom: 24, background: "#fff", padding: 16, borderRadius: 16, border: "1px solid #e2e8f0", alignItems: "center" }}>
+@@ -58,7 +62,7 @@
+                     <Search size={18} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#94a3b8" }} />
+                     <input 
+                         type="text" 
+-                        placeholder="Tìm kiếm ID tấm pin..." 
++                        placeholder="Tìm kiếm ID hình ảnh hoặc tên file..." 
+                         value={searchQuery}
+                         onChange={e => setSearchQuery(e.target.value)}
+                         style={{ width: "100%", padding: "10px 10px 10px 38px", borderRadius: 8, border: "1px solid #e2e8f0", outline: "none", fontSize: 14 }}
+@@ -87,28 +91,34 @@
+                     >
+                         <option value="id_asc">ID (A-Z)</option>
+                         <option value="id_desc">ID (Z-A)</option>
+-                        <option value="loss_desc">Mức độ lỗi giảm dần</option>
+-                        <option value="loss_asc">Mức độ lỗi tăng dần</option>
++                        <option value="loss_desc">Số lỗi giảm dần</option>
++                        <option value="loss_asc">Số lỗi tăng dần</option>
+                     </select>
+                 </div>
+             </div>
+-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+-                {filteredAndSortedPanels.map((p, index) => (
+-                    <div key={index} onClick={() => onSelect(p)} style={{ background: "#fff", borderRadius: 16, border: "1px solid #E2E8F0", overflow: "hidden", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }}
+-                        onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 25px rgba(0,0,0,0.1)"; }}
++            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 24 }}>
++                {filteredAndSortedImages.map((img, index) => (
++                    <div key={index} onClick={() => onSelect(img)} style={{ background: "#fff", borderRadius: 16, border: "1px solid #E2E8F0", overflow: "hidden", cursor: "pointer", transition: "transform 0.2s, box-shadow 0.2s" }}
++                        onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-4px)"; e.currentTarget.style.boxShadow = "0 12px 30px rgba(0,0,0,0.1)"; }}
+                         onMouseLeave={e => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}
+                     >
+                         <div style={{ position: "relative", width: "100%", paddingTop: "75%", background: "#000" }}>
+-                            {/* Ảnh đã được cắt 50% và vẽ khung xanh từ Backend */}
++                            {/* Hiển thị toàn cảnh ảnh gốc */}
+                             <img 
+-                                src={`${PANEL_IMAGE_API}?filename=${p.sourceFile}&x1=${p.box[0]}&y1=${p.box[1]}&x2=${p.box[2]}&y2=${p.box[3]}${p.polygon ? `&polygon=${p.polygon.flat().join(',')}` : ''}`} 
++                                src={`${IMAGE_BASE_API}${img.filename}`} 
+                                 style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }} 
+-                                alt={p.local_id} 
++                                alt={img.id} 
+                             />
+                         </div>
+-                        <div style={{ padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+-                            <span style={{ fontWeight: 600, fontSize: 13 }}>{p.local_id}</span>
+-                            <BadgePill type={p.status === "defective" ? "hotspot" : "healthy"} />
++                        <div style={{ padding: "16px 20px" }}>
++                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
++                                <span style={{ fontWeight: 700, fontSize: 15, color: "#1E293B" }}>{img.id}</span>
++                                <BadgePill type={img.status === "defective" ? "hotspot" : "healthy"} />
++                            </div>
++                            <div style={{ fontSize: 13, color: "#64748B", display: "flex", justifyContent: "space-between" }}>
++                                <span>{img.total_panels} tấm pin</span>
++                                {img.faulty_count > 0 && <span style={{ color: colors.error, fontWeight: 600 }}>{img.faulty_count} tấm bị lỗi</span>}
++                            </div>
+                         </div>
+                     </div>
+                 ))}
+
+
+--- datn_fe/src/pages/Report/ReportPage.jsx
++++ datn_fe2/src/pages/Report/ReportPage.jsx
+@@ -36,7 +36,7 @@
+             <PageHeader title="Inspection Report" subtitle={`Fault summary for Batch #${batchId || 'N/A'}`} />
+             
+             <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 16, marginBottom: 20 }}>
+-                <KpiCard icon={<AlertTriangle size={20} />} label="Total Faulty Panels" value={totalFaults} accent={colors.danger} />
++                <KpiCard icon={<AlertTriangle size={20} />} label="HÌNH ẢNH BỊ LỖI" value={totalFaults} accent={colors.danger} />
+                 <KpiCard icon={<Zap size={20} />} label="Avg. Efficiency Loss" value={`${totalFaults > 0 ? (faultyPanels.reduce((a,b) => a + b.total_panel_loss, 0) / totalFaults).toFixed(1) : 0}%`} accent={colors.warning} />
+             </div>
+ 
+@@ -52,7 +52,7 @@
+                         <div key={r.label}>
+                             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                                 <span style={{ fontSize: 14, fontWeight: 500, color: "#0F172A" }}>{r.label}</span>
+-                                <span style={{ fontSize: 14, fontWeight: 700, color: r.color }}>{r.value} tấm</span>
++                                <span style={{ fontSize: 14, fontWeight: 700, color: r.color }}>{r.value} hình</span>
+                             </div>
+                             <div style={{ height: 8, background: "#F1F5F9", borderRadius: 10, overflow: "hidden" }}>
+                                 <div style={{ height: "100%", width: `${totalFaults > 0 ? (r.value / totalFaults) * 100 : 0}%`, background: r.color, borderRadius: 10, transition: "width 1s ease" }} />
+
+
+--- datn_fe/src/pages/Unified/UnifiedDashboard.jsx
++++ datn_fe2/src/pages/Unified/UnifiedDashboard.jsx
+@@ -23,11 +23,19 @@
+ 
+ const IMAGE_BASE_URL = "http://127.0.0.1:8000/data/raw/";
+ 
+-// Fit bounds component
+-function FitBounds({ gridData }) {
++// FitBounds component
++function FitBounds({ gridData, focusTarget }) {
+     const map = useMap();
+     useEffect(() => {
+         if (gridData && gridData.length > 0) {
++            if (focusTarget) {
++                const targetImg = gridData.find(img => img.filename === focusTarget);
++                if (targetImg) {
++                    const [[bY, bX], [tY, tX]] = targetImg.bounds;
++                    map.fitBounds([[bY, bX], [tY, tX]], { padding: [50, 50], maxZoom: 0 });
++                    return;
++                }
++            }
+             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+             gridData.forEach(img => {
+                 const [[bY, bX], [tY, tX]] = img.bounds;
+@@ -38,11 +46,11 @@
+             });
+             map.fitBounds([[minY, minX], [maxY, maxX]], { padding: [50, 50] });
+         }
+-    }, [gridData, map]);
++    }, [gridData, map, focusTarget]);
+     return null;
+ }
+ 
+-export default function UnifiedDashboard({ data }) {
++export default function UnifiedDashboard({ data, focusTarget }) {
+     const [viewMode, setViewMode] = useState('monitor'); // 'monitor' or 'mission'
+     const [searchQuery, setSearchQuery] = useState('');
+     const [statusFilter, setStatusFilter] = useState('All');
+@@ -129,7 +137,7 @@
+                 zoomControl={false}
+                 style={{ width: '100%', height: '100%', background: '#030712' }} // Dark cyber background
+             >
+-                <FitBounds gridData={gridData} />
++                <FitBounds gridData={gridData} focusTarget={focusTarget} />
+ 
+                 {gridData.map((img, i) => (
+                     <React.Fragment key={i}>
+@@ -139,8 +147,20 @@
+                                 bounds={img.bounds} 
+                             />
+                         )}
+-                        {/* Optionally overlay RGB if available, but for the map, Thermal is usually what we inspect */}
+-                        {/* Or draw rectangles for bounding boxes */}
++                        {focusTarget === img.filename && (
++                            <div className="focus-rectangle">
++                                {/* Use simple custom logic to draw a border since react-leaflet Rectangle might need separate import */}
++                                <Polygon 
++                                    positions={[
++                                        [img.bounds[0][0], img.bounds[0][1]],
++                                        [img.bounds[0][0], img.bounds[1][1]],
++                                        [img.bounds[1][0], img.bounds[1][1]],
++                                        [img.bounds[1][0], img.bounds[0][1]]
++                                    ]}
++                                    pathOptions={{ color: '#0ea5e9', weight: 8, fill: false, dashArray: "20, 20" }} 
++                                />
++                            </div>
++                        )}
+                     </React.Fragment>
+                 ))}
+ 
+
+

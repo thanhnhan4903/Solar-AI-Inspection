@@ -4,7 +4,7 @@ import { colors } from "../../constants/theme";
 
 const NAV = [
     { key: "home", icon: BarChart3, label: "Dashboard" },
-    { key: "panel", icon: Grid3X3, label: "Panel" },
+    { key: "panel", icon: Grid3X3, label: "Hình ảnh" },
     { key: "ops", icon: Map, label: "Solar Operations" },
     { key: "report", icon: BarChart3, label: "Report" },
 ];

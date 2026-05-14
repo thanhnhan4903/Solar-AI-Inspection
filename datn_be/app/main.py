@@ -3,7 +3,8 @@ import os
 import cv2
 import shutil
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi import FastAPI, UploadFile, File, Depends, Form
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
@@ -56,6 +57,75 @@ ai_engine = AIEngine(WEIGHTS_PATH) if os.path.exists(WEIGHTS_PATH) else None
 def welcome():
     return {"status": "Online", "message": "Backend Solar AI đã sẵn sàng!"}
 
+# ================================
+# --- AUTHENTICATION ---
+# ================================
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/v1/login")
+async def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == req.username).first()
+    if not user or user.password_hash != req.password:
+        return {"error": "Tài khoản hoặc mật khẩu không chính xác!"}
+    
+    return {
+        "message": "Đăng nhập thành công",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role
+        }
+    }
+
+# ================================
+# --- GET LATEST DATA ---
+# ================================
+@app.get("/api/v1/latest-batch")
+async def get_latest_batch(db: Session = Depends(get_db)):
+    latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
+    if not latest_batch:
+        return {"data": [], "batch_id": None}
+    
+    # Lấy thông tin các ảnh và panel tương tự analyze-all
+    images = db.query(models.Image).filter(models.Image.batch_id == latest_batch.id).all()
+    
+    final_report = []
+    for img in images:
+        ai_results = db.query(models.AiResult).filter(models.AiResult.image_id == img.id).all()
+        
+        panels_data = []
+        for r in ai_results:
+            panel_info = db.query(models.Panel).filter(models.Panel.id == r.panel_id).first()
+            
+            # Phục hồi cấu trúc defects (chỉ có string nên ta tách chuỗi)
+            defects_list = []
+            if r.defect_type and r.defect_type != "Healthy":
+                defect_types = r.defect_type.split(", ")
+                for dt in defect_types:
+                    defects_list.append({"type": dt})
+            
+            panels_data.append({
+                "local_id": panel_info.local_id,
+                "x": panel_info.x_coord,
+                "y": panel_info.y_coord,
+                "total_panel_loss": r.loss_pct,
+                "confidence": r.confidence,
+                "defects": defects_list
+            })
+            
+        final_report.append({
+            "filename": img.filename,
+            "rgb_image": img.filename.replace("_thermal", ""), # Giả lập RGB name
+            "total_panels": len(panels_data),
+            "panels": panels_data
+        })
+        
+    return {
+        "batch_id": latest_batch.id,
+        "data": final_report
+    }
 
 # ================================
 # --- KHỐI 1: UPLOAD DỮ LIỆU ---
@@ -104,7 +174,7 @@ async def match_images():
 #           → Trích xuất tọa độ, lỗi, tính toán
 # ================================
 @app.post("/api/v1/analyze-all")
-async def start_analysis(db: Session = Depends(get_db)):
+async def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
     if ai_engine is None:
         return {"error": "Chưa tìm thấy file weights/best.pt"}
 
@@ -117,7 +187,7 @@ async def start_analysis(db: Session = Depends(get_db)):
         return {"error": "Thư mục precalib trống. Hãy chạy tiền xử lý trước!"}
 
     # Tạo Batch mới trong DB
-    new_batch = models.InspectionBatch(name="Đợt kiểm tra tự động")
+    new_batch = models.UploadBatch(name="Đợt kiểm tra tự động", user_id=user_id)
     db.add(new_batch)
     db.commit()
     db.refresh(new_batch)
@@ -205,19 +275,46 @@ async def start_analysis(db: Session = Depends(get_db)):
         # Gán Grid ID (Panel_01, Panel_02...) - trái→phải, trên→dưới
         final_panels = SolarAnalyzer.assign_grid_ids(processed_panels)
 
-        # Lưu dữ liệu từng tấm pin vào MySQL
+        # Lưu Image vào DB
+        db_image = models.Image(
+            batch_id=new_batch.id,
+            filename=filename,
+            image_type="Thermal",
+            path=os.path.join(results_dir, filename).replace("\\", "/")
+        )
+        db.add(db_image)
+        db.commit() # Cần commit để lấy db_image.id
+        db.refresh(db_image)
+
+        # Lưu dữ liệu từng tấm pin và AI Result vào MySQL
         for p in final_panels:
-            db_panel = models.PanelAnalysis(
-                batch_id=new_batch.id,
-                filename=filename,
-                x_coord=p['x'],
-                y_coord=p['y'],
-                local_id=p['local_id'],
-                defect_type=", ".join(list(set([d['type'] for d in p['defects']]))) if p['defects'] else "Healthy",
+            # 1. Tìm hoặc tạo Panel dựa trên local_id
+            db_panel = db.query(models.Panel).filter(models.Panel.local_id == p['local_id']).first()
+            if not db_panel:
+                db_panel = models.Panel(
+                    local_id=p['local_id'],
+                    x_coord=p['x'],
+                    y_coord=p['y']
+                )
+                db.add(db_panel)
+                db.commit()
+                db.refresh(db_panel)
+            else:
+                # Cập nhật tọa độ nếu cần
+                db_panel.x_coord = p['x']
+                db_panel.y_coord = p['y']
+                db.commit()
+            
+            # 2. Tạo kết quả phân tích AiResult
+            defect_str = ", ".join(list(set([d['type'] for d in p['defects']]))) if p['defects'] else "Healthy"
+            db_ai_result = models.AiResult(
+                image_id=db_image.id,
+                panel_id=db_panel.id,
+                defect_type=defect_str,
                 loss_pct=p['total_panel_loss'],
                 confidence=p.get('confidence', 0.9)
             )
-            db.add(db_panel)
+            db.add(db_ai_result)
 
         final_report.append({
             "filename": filename,
@@ -229,6 +326,17 @@ async def start_analysis(db: Session = Depends(get_db)):
         })
 
     db.commit()
+
+    # Tự động tạo report sau khi phân tích để lưu vào bảng reports
+    ai_results = db.query(models.AiResult).join(models.Image).filter(models.Image.batch_id == new_batch.id).all()
+    if ai_results:
+        report_name = f"Report_Batch_{new_batch.id}.pdf"
+        report_path = os.path.join("data", report_name)
+        ReportGenerator.generate_inspection_report(new_batch.id, ai_results, report_path)
+        
+        db_report = models.Report(batch_id=new_batch.id, file_path=report_path)
+        db.add(db_report)
+        db.commit()
 
     return {
         "message": "AI đã phân tích và lưu dữ liệu thành công!",
@@ -249,14 +357,21 @@ async def update_ai_model(file: UploadFile = File(...)):
     os.makedirs(weights_dir, exist_ok=True)
     file_path = os.path.join(weights_dir, "best.pt")
 
-    # Lưu đè file trọng số mới
+    # Backup file cũ nếu có
+    if os.path.exists(file_path):
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(weights_dir, f"best_backup_{timestamp}.pt")
+        shutil.move(file_path, backup_path)
+
+    # Lưu file trọng số mới dưới tên best.pt
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     # Tải lại model vào RAM
     try:
         ai_engine.reload_model()
-        return {"message": "Cập nhật trọng số AI thành công và đã load vào hệ thống!"}
+        return {"message": f"Thành công! Trọng số từ file '{file.filename}' đã được load làm model chính."}
     except Exception as e:
         return {"error": f"Lỗi khi load model: {str(e)}"}
 
@@ -357,15 +472,22 @@ def get_mock_gis():
 # ================================
 @app.get("/api/v1/download-report/{batch_id}")
 async def download_report(batch_id: int, db: Session = Depends(get_db)):
-    panels = db.query(models.PanelAnalysis).filter(models.PanelAnalysis.batch_id == batch_id).all()
+    ai_results = db.query(models.AiResult).join(models.Image).filter(models.Image.batch_id == batch_id).all()
     
-    if not panels:
+    if not ai_results:
         return {"error": "Không tìm thấy dữ liệu báo cáo"}
 
     report_name = f"Report_Batch_{batch_id}.pdf"
     report_path = os.path.join("data", report_name)
     
-    ReportGenerator.generate_inspection_report(batch_id, panels, report_path)
+    ReportGenerator.generate_inspection_report(batch_id, ai_results, report_path)
+
+    # Lưu lịch sử tạo report vào Database nếu chưa có
+    existing_report = db.query(models.Report).filter(models.Report.batch_id == batch_id).first()
+    if not existing_report:
+        db_report = models.Report(batch_id=batch_id, file_path=report_path)
+        db.add(db_report)
+        db.commit()
 
     return FileResponse(path=report_path, filename=report_name, media_type='application/pdf')
 
@@ -399,8 +521,12 @@ async def reset_system(db: Session = Depends(get_db)):
     # 2. Xóa sạch dữ liệu trong MySQL
     try:
         db.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
-        db.execute(text("DELETE FROM panel_analyses;"))
-        db.execute(text("DELETE FROM inspection_batches;"))
+        db.execute(text("DELETE FROM reports;"))
+        db.execute(text("DELETE FROM ai_results;"))
+        db.execute(text("DELETE FROM images;"))
+        db.execute(text("DELETE FROM panels;"))
+        db.execute(text("DELETE FROM upload_batches;"))
+        # db.execute(text("DELETE FROM users;")) # Đã xoá dòng này để giữ lại account login
         db.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
         db.commit()
     except Exception as e:

@@ -39,7 +39,13 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             await axios.get("http://127.0.0.1:8000/api/v1/process-thermal");
 
             setStatusText("Đang phân tích AI...");
-            const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all");
+            const analyzeForm = new FormData();
+            const userStr = localStorage.getItem("user");
+            if (userStr) {
+                const user = JSON.parse(userStr);
+                analyzeForm.append("user_id", user.id);
+            }
+            const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all", analyzeForm);
             
             if (onAnalysisComplete) {
                 onAnalysisComplete(res.data.data, res.data.batch_id);
@@ -144,7 +150,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 24 }}>
                 <KpiCard 
                     icon={<LayoutGrid size={20} />} 
-                    label="TOTAL PANELS" 
+                    label="TỔNG SỐ HÌNH ẢNH" 
                     value={totalPanels.toLocaleString()} 
                     accent={colors.primary} 
                 />

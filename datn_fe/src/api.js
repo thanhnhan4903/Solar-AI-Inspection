@@ -12,4 +12,12 @@ export const getMatchPairs = () => api.get(`/match-pairs`);
 export const downloadReportUrl = (batchId) => `${API_BASE_URL}/download-report/${batchId}`;
 export const IMAGE_URL = "http://127.0.0.1:8000/data/processed/";
 
+export const loginUser = async (username, password) => {
+    return await api.post("/login", { username, password });
+};
+
+export const fetchLatestBatch = async () => {
+    return await api.get("/latest-batch");
+};
+
 export default api;

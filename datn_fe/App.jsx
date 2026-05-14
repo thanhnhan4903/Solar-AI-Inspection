@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { fetchLatestBatch } from "./src/api";
 import { Sidebar } from "./src/components/layout/Sidebar";
 import { colors } from "./src/constants/theme";
 
@@ -21,9 +22,28 @@ export default function App() {
     const [aiResults, setAiResults] = useState([]); 
     const [currentBatchId, setCurrentBatchId] = useState(null);
 
+    const [mapFocusTarget, setMapFocusTarget] = useState(null);
+
+    useEffect(() => {
+        if (isAuth) {
+            fetchLatestBatch().then(res => {
+                if (res.data && res.data.batch_id) {
+                    setAiResults(res.data.data);
+                    setCurrentBatchId(res.data.batch_id);
+                }
+            }).catch(console.error);
+        }
+    }, [isAuth]);
+
     const handleLogin = () => { localStorage.setItem("isAuth", "true"); setIsAuth(true); };
     const handleLogout = () => { localStorage.removeItem("isAuth"); setIsAuth(false); };
-    const navigate = (p) => { setPage(p); setActivePage(p); };
+    
+    // Hàm điều hướng chung (từ Sidebar)
+    const navigate = (p) => { 
+        if (p !== "ops") setMapFocusTarget(null);
+        setPage(p); 
+        setActivePage(p); 
+    };
 
     if (!isAuth) return <Login onLogin={handleLogin} />;
 
@@ -59,13 +79,20 @@ export default function App() {
                 {page === "detail" && (
                     <PanelDetail 
                         panel={selectedPanel} 
+                        data={aiResults}
+                        onSelect={(p) => setSelectedPanel(p)}
                         onBack={() => navigate("panel")} 
+                        onViewOnMap={(img) => {
+                            setMapFocusTarget(img.filename);
+                            setPage("ops");
+                            setActivePage("ops");
+                        }}
                     />
                 )}
 
                 {page === "report" && <ReportPage data={aiResults} batchId={currentBatchId} />}
 
-                {page === "ops" && <UnifiedDashboard data={aiResults} />}
+                {page === "ops" && <UnifiedDashboard data={aiResults} focusTarget={mapFocusTarget} />}
             </div>
         </div>
     );
