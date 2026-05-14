@@ -23,11 +23,19 @@ const STATUS_COLORS = {
 
 const IMAGE_BASE_URL = "http://127.0.0.1:8000/data/raw/";
 
-// Fit bounds component
-function FitBounds({ gridData }) {
+// FitBounds component
+function FitBounds({ gridData, focusTarget }) {
     const map = useMap();
     useEffect(() => {
         if (gridData && gridData.length > 0) {
+            if (focusTarget) {
+                const targetImg = gridData.find(img => img.filename === focusTarget);
+                if (targetImg) {
+                    const [[bY, bX], [tY, tX]] = targetImg.bounds;
+                    map.fitBounds([[bY, bX], [tY, tX]], { padding: [50, 50], maxZoom: 0 });
+                    return;
+                }
+            }
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             gridData.forEach(img => {
                 const [[bY, bX], [tY, tX]] = img.bounds;
@@ -38,11 +46,11 @@ function FitBounds({ gridData }) {
             });
             map.fitBounds([[minY, minX], [maxY, maxX]], { padding: [50, 50] });
         }
-    }, [gridData, map]);
+    }, [gridData, map, focusTarget]);
     return null;
 }
 
-export default function UnifiedDashboard({ data }) {
+export default function UnifiedDashboard({ data, focusTarget }) {
     const [viewMode, setViewMode] = useState('monitor'); // 'monitor' or 'mission'
     const [searchQuery, setSearchQuery] = useState('');
     const [statusFilter, setStatusFilter] = useState('All');
@@ -129,7 +137,7 @@ export default function UnifiedDashboard({ data }) {
                 zoomControl={false}
                 style={{ width: '100%', height: '100%', background: '#030712' }} // Dark cyber background
             >
-                <FitBounds gridData={gridData} />
+                <FitBounds gridData={gridData} focusTarget={focusTarget} />
 
                 {gridData.map((img, i) => (
                     <React.Fragment key={i}>
@@ -139,8 +147,20 @@ export default function UnifiedDashboard({ data }) {
                                 bounds={img.bounds} 
                             />
                         )}
-                        {/* Optionally overlay RGB if available, but for the map, Thermal is usually what we inspect */}
-                        {/* Or draw rectangles for bounding boxes */}
+                        {focusTarget === img.filename && (
+                            <div className="focus-rectangle">
+                                {/* Use simple custom logic to draw a border since react-leaflet Rectangle might need separate import */}
+                                <Polygon 
+                                    positions={[
+                                        [img.bounds[0][0], img.bounds[0][1]],
+                                        [img.bounds[0][0], img.bounds[1][1]],
+                                        [img.bounds[1][0], img.bounds[1][1]],
+                                        [img.bounds[1][0], img.bounds[0][1]]
+                                    ]}
+                                    pathOptions={{ color: '#0ea5e9', weight: 8, fill: false, dashArray: "20, 20" }} 
+                                />
+                            </div>
+                        )}
                     </React.Fragment>
                 ))}
 

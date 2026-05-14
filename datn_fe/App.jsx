@@ -21,9 +21,17 @@ export default function App() {
     const [aiResults, setAiResults] = useState([]); 
     const [currentBatchId, setCurrentBatchId] = useState(null);
 
+    const [mapFocusTarget, setMapFocusTarget] = useState(null);
+
     const handleLogin = () => { localStorage.setItem("isAuth", "true"); setIsAuth(true); };
     const handleLogout = () => { localStorage.removeItem("isAuth"); setIsAuth(false); };
-    const navigate = (p) => { setPage(p); setActivePage(p); };
+    
+    // Hàm điều hướng chung (từ Sidebar)
+    const navigate = (p) => { 
+        if (p !== "ops") setMapFocusTarget(null);
+        setPage(p); 
+        setActivePage(p); 
+    };
 
     if (!isAuth) return <Login onLogin={handleLogin} />;
 
@@ -59,13 +67,20 @@ export default function App() {
                 {page === "detail" && (
                     <PanelDetail 
                         panel={selectedPanel} 
+                        data={aiResults}
+                        onSelect={(p) => setSelectedPanel(p)}
                         onBack={() => navigate("panel")} 
+                        onViewOnMap={(img) => {
+                            setMapFocusTarget(img.filename);
+                            setPage("ops");
+                            setActivePage("ops");
+                        }}
                     />
                 )}
 
                 {page === "report" && <ReportPage data={aiResults} batchId={currentBatchId} />}
 
-                {page === "ops" && <UnifiedDashboard data={aiResults} />}
+                {page === "ops" && <UnifiedDashboard data={aiResults} focusTarget={mapFocusTarget} />}
             </div>
         </div>
     );

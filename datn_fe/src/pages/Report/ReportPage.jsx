@@ -36,7 +36,7 @@ export default function ReportPage({ data, batchId }) {
             <PageHeader title="Inspection Report" subtitle={`Fault summary for Batch #${batchId || 'N/A'}`} />
             
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 16, marginBottom: 20 }}>
-                <KpiCard icon={<AlertTriangle size={20} />} label="Total Faulty Panels" value={totalFaults} accent={colors.danger} />
+                <KpiCard icon={<AlertTriangle size={20} />} label="HÌNH ẢNH BỊ LỖI" value={totalFaults} accent={colors.danger} />
                 <KpiCard icon={<Zap size={20} />} label="Avg. Efficiency Loss" value={`${totalFaults > 0 ? (faultyPanels.reduce((a,b) => a + b.total_panel_loss, 0) / totalFaults).toFixed(1) : 0}%`} accent={colors.warning} />
             </div>
 
@@ -52,7 +52,7 @@ export default function ReportPage({ data, batchId }) {
                         <div key={r.label}>
                             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                                 <span style={{ fontSize: 14, fontWeight: 500, color: "#0F172A" }}>{r.label}</span>
-                                <span style={{ fontSize: 14, fontWeight: 700, color: r.color }}>{r.value} tấm</span>
+                                <span style={{ fontSize: 14, fontWeight: 700, color: r.color }}>{r.value} hình</span>
                             </div>
                             <div style={{ height: 8, background: "#F1F5F9", borderRadius: 10, overflow: "hidden" }}>
                                 <div style={{ height: "100%", width: `${totalFaults > 0 ? (r.value / totalFaults) * 100 : 0}%`, background: r.color, borderRadius: 10, transition: "width 1s ease" }} />

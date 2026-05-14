@@ -144,7 +144,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 24 }}>
                 <KpiCard 
                     icon={<LayoutGrid size={20} />} 
-                    label="TOTAL PANELS" 
+                    label="TỔNG SỐ HÌNH ẢNH"
                     value={totalPanels.toLocaleString()} 
                     accent={colors.primary} 
                 />
