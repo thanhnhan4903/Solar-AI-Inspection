@@ -130,11 +130,13 @@ async def get_latest_batch(db: Session = Depends(get_db)):
 # ================================
 # --- KHỐI 1: UPLOAD DỮ LIỆU ---
 # ================================
+from typing import List
+
 @app.post("/api/v1/upload-drone-data")
-async def upload_zip(file: UploadFile = File(...)):
+async def upload_drone_data(files: List[UploadFile] = File(...)):
     upload_dir = "data/raw"
-    files = FileService.save_and_extract_zip(file, upload_dir)
-    return {"message": "Đã nhận và giải nén thành công!", "total_files": len(files)}
+    extracted_files = FileService.process_uploads(files, upload_dir)
+    return {"message": "Đã nhận và xử lý thành công!", "total_files": len(extracted_files)}
 
 
 # ================================
