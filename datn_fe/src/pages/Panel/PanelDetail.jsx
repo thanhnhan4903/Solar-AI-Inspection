@@ -57,17 +57,16 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 32, flex: 1 }}>
-                
                 {/* TRÁI: Khu vực xem ảnh toàn cảnh & Tương tác */}
                 <div>
                     <h2 style={{ marginBottom: 16, marginTop: 0 }}>{image.id} - Bản đồ chi tiết</h2>
                     <div style={{ borderRadius: 12, overflow: "hidden", background: "#000", position: "relative", minHeight: 400 }}>
-                        <img 
-                            src={`${IMAGE_BASE_API}${image.filename}`} 
-                            style={{ width: "100%", display: "block", objectFit: "contain" }} 
-                            alt={image.id} 
+                        <img
+                            src={`${IMAGE_BASE_API}${image.filename}`}
+                            style={{ width: "100%", display: "block", objectFit: "contain" }}
+                            alt={image.id}
                         />
-                        <svg 
+                        <svg
                             style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
                             viewBox={`0 0 ${imgW} ${imgH}`}
                             preserveAspectRatio="xMidYMid meet"
@@ -75,14 +74,14 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                             {image.panels && image.panels.map((p, i) => {
                                 const isHovered = hoveredPanel?.local_id === p.local_id;
                                 const isFaulty = p.total_panel_loss > 0;
-                                
+
                                 const strokeColor = isFaulty ? "#EF4444" : "#10B981"; // Red if faulty, Green if healthy
-                                const fillColor = isHovered 
+                                const fillColor = isHovered
                                     ? (isFaulty ? "rgba(239, 68, 68, 0.4)" : "rgba(16, 185, 129, 0.4)")
                                     : (isFaulty ? "rgba(239, 68, 68, 0.15)" : "transparent");
 
                                 return p.polygon ? (
-                                    <polygon 
+                                    <polygon
                                         key={i}
                                         points={p.polygon.map(pt => pt.join(',')).join(' ')}
                                         fill={fillColor}
@@ -165,12 +164,12 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
 
                                 {/* Tọa độ bounding box */}
                                 <div style={{ padding: 20, border: "1px solid #e2e8f0", borderRadius: 16 }}>
-                                    <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8 }}><MapPin size={18}/> Tọa độ bounding box</h4>
+                                    <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8 }}><MapPin size={18} /> Tọa độ bounding box</h4>
                                     <p style={{ margin: "4px 0" }}>X1: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[0]) : 0}</b> px | Y1: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[1]) : 0}</b> px</p>
                                     <p style={{ margin: "4px 0" }}>X2: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[2]) : 0}</b> px | Y2: <b>{hoveredPanel.box ? Math.round(hoveredPanel.box[3]) : 0}</b> px</p>
                                     {hoveredPanel.confidence && (
                                         <p style={{ marginTop: 12, color: "#718096", margin: "12px 0 0 0" }}>
-                                            <Percent size={14} style={{ verticalAlign: "middle", marginRight: 4 }}/> Độ tin cậy AI: <b>{(hoveredPanel.confidence * 100).toFixed(0)}%</b>
+                                            <Percent size={14} style={{ verticalAlign: "middle", marginRight: 4 }} /> Độ tin cậy AI: <b>{(hoveredPanel.confidence * 100).toFixed(0)}%</b>
                                         </p>
                                     )}
                                 </div>
@@ -179,7 +178,7 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                 {hoveredPanel.total_panel_loss > 0 && hoveredPanel.defects && hoveredPanel.defects.length > 0 && (
                                     <div style={{ padding: 20, background: "#FFF5F5", border: "1px solid #FED7D7", borderRadius: 16 }}>
                                         <h4 style={{ margin: "0 0 12px 0", color: colors.error, display: "flex", alignItems: "center", gap: 8 }}>
-                                            <AlertTriangle size={18}/> Lỗi phát hiện ({hoveredPanel.defects.length})
+                                            <AlertTriangle size={18} /> Lỗi phát hiện ({hoveredPanel.defects.length})
                                         </h4>
                                         {hoveredPanel.defects.map((d, i) => (
                                             <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: i < hoveredPanel.defects.length - 1 ? "1px solid #FED7D7" : "none" }}>
@@ -193,9 +192,9 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                         )}
                     </div>
 
-                    <button 
+                    <button
                         onClick={() => onViewOnMap && onViewOnMap(image)}
-                        style={{ 
+                        style={{
                             marginTop: "auto",
                             padding: "16px",
                             border: "2px solid #1E293B",

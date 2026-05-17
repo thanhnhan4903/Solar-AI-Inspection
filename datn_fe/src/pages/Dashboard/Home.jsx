@@ -41,6 +41,10 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             setStatusText("Đang phân tích AI...");
             const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all");
             
+            if (res.data.error) {
+                throw new Error(res.data.error);
+            }
+            
             if (onAnalysisComplete) {
                 onAnalysisComplete(res.data.data, res.data.batch_id);
             }
