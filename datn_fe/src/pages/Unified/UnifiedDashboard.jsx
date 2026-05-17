@@ -15,13 +15,18 @@ import {
 import './UnifiedStyles.css';
 
 const STATUS_COLORS = {
-    "Healthy": "#10b981",    // Green
-    "Hotspot": "#ef4444",    // Red
-    "Crack": "#8b5cf6",      // Purple
-    "Soiling": "#f59e0b"     // Orange
+    "healthy": "#10b981",         // Green
+    "faulty":  "#ef4444",         // Red
+    // Legacy keys (từ code cũ)
+    "Healthy": "#10b981",
+    "Hotspot": "#ef4444",
+    "Crack":   "#8b5cf6",
+    "Soiling": "#f59e0b",
 };
 
-const IMAGE_BASE_URL = "http://127.0.0.1:8000/data/raw/";
+// ✅ Đổi sang precalib/ — polygon được tính trên ảnh precalib,
+// nên overlay phải dùng cùng ảnh để không bị lệch.
+const IMAGE_BASE_URL = "http://127.0.0.1:8000/data/precalib/";
 
 // FitBounds component
 function FitBounds({ gridData, focusTarget }) {
@@ -50,20 +55,30 @@ function FitBounds({ gridData, focusTarget }) {
     return null;
 }
 
+/**
+ * Chuyển polygon pixel-space sang tọa độ leaflet CRS.Simple.
+ * Panel polygon từ backend là [[x,y], ...] (pixel coords trong ảnh gốc).
+ * Leaflet CRS.Simple dùng [lat, lng] = [y_map, x_map].
+ *
+ * xOffset, yOffset: vị trí ảnh trong grid map ảo.
+ * Trục y leaflet: dương lên trên → yOffset là số âm (row * -imgH).
+ */
+function pixelPolyToLeaflet(polygon, xOffset, yOffset) {
+    return polygon.map(([px, py]) => [yOffset - py, xOffset + px]);
+}
+
 export default function UnifiedDashboard({ data, focusTarget }) {
-    const [viewMode, setViewMode] = useState('monitor'); // 'monitor' or 'mission'
+    const [viewMode, setViewMode] = useState('monitor');
     const [searchQuery, setSearchQuery] = useState('');
     const [statusFilter, setStatusFilter] = useState('All');
     const [showHeatmap, setShowHeatmap] = useState(true);
-    
-    // Hover State for Side-by-Side viewer
     const [hoveredPanel, setHoveredPanel] = useState(null);
 
     // Calculate Grid Mapping
     const gridData = useMemo(() => {
         if (!data || data.length === 0) return [];
         const IMAGES_PER_ROW = 4;
-        const PADDING = 100; // pixels between images
+        const PADDING = 100;
 
         return data.map((img, index) => {
             const col = index % IMAGES_PER_ROW;
@@ -73,28 +88,44 @@ export default function UnifiedDashboard({ data, focusTarget }) {
             const imgH = img.image_height || 512;
             
             const xOffset = col * (imgW + PADDING);
-            const yOffset = - (row * (imgH + PADDING)); // negative down
+            const yOffset = -(row * (imgH + PADDING));
             
             const bounds = [[yOffset - imgH, xOffset], [yOffset, xOffset + imgW]];
             
             const mappedPanels = img.panels.map(p => {
-                const [x1, y1, x2, y2] = p.box;
-                const map_x1 = xOffset + x1;
-                const map_y1 = yOffset - y1; 
-                const map_x2 = xOffset + x2;
-                const map_y2 = yOffset - y2; 
-                
-                const status = p.total_panel_loss > 0 ? (p.defects.length > 0 ? p.defects[0].type : "Hotspot") : "Healthy";
+                // ✅ Ưu tiên dùng polygon thật từ backend (đã refine bằng minAreaRect)
+                // Fallback về bbox chỉ khi không có polygon
+                let leafletPolygon;
+                if (p.polygon && p.polygon.length >= 3) {
+                    leafletPolygon = pixelPolyToLeaflet(p.polygon, xOffset, yOffset);
+                } else {
+                    // Fallback: tạo polygon từ bbox
+                    const [bx1, by1, bx2, by2] = p.bbox || p.box || [0, 0, 0, 0];
+                    leafletPolygon = [
+                        [yOffset - by1, xOffset + bx1],
+                        [yOffset - by1, xOffset + bx2],
+                        [yOffset - by2, xOffset + bx2],
+                        [yOffset - by2, xOffset + bx1],
+                    ];
+                }
+
+                // Status: dùng field mới 'status' (faulty/healthy), fallback sang cũ
+                const status = p.status || (p.total_panel_loss > 0 ? "faulty" : "healthy");
+                const bbox = p.bbox || p.box || [0, 0, 0, 0];
+                const boxW = bbox[2] - bbox[0];
+                const boxH = bbox[3] - bbox[1];
                 
                 return {
                     ...p,
                     source_rgb: img.rgb_image,
                     source_thermal: img.filename,
                     imgW, imgH,
-                    boxW: x2 - x1,
-                    boxH: y2 - y1,
+                    boxW,
+                    boxH,
                     status,
-                    polygon: [[map_y1, map_x1], [map_y1, map_x2], [map_y2, map_x2], [map_y2, map_x1]]
+                    polygon: leafletPolygon,
+                    // Giữ bbox gốc pixel để dùng cho hover crop
+                    bbox_px: bbox,
                 };
             });
             
@@ -106,11 +137,23 @@ export default function UnifiedDashboard({ data, focusTarget }) {
 
     const filteredPanels = useMemo(() => {
         return allPanels.filter(panel => {
-            const matchesSearch = panel.local_id.toLowerCase().includes(searchQuery.toLowerCase());
-            let panelCat = panel.status.toLowerCase().includes('hotspot') ? 'Hotspot' : 
-                           (panel.status.toLowerCase().includes('crack') ? 'Crack' : 
-                           (panel.status.toLowerCase().includes('soil') ? 'Soiling' : 'Healthy'));
-            const matchesStatus = statusFilter === 'All' || panelCat === statusFilter;
+            const lid = panel.local_id || "";
+            const matchesSearch = lid.toLowerCase().includes(searchQuery.toLowerCase());
+
+            // Phân loại theo status mới
+            let panelCat = "Healthy";
+            if (panel.status === "faulty") {
+                // Phân loại chi tiết theo defect chính
+                const mainClass = panel.main_defect_class || "";
+                if (mainClass.includes("hotspot")) panelCat = "Hotspot";
+                else if (mainClass.includes("crack")) panelCat = "Crack";
+                else if (mainClass.includes("soil")) panelCat = "Soiling";
+                else panelCat = "Hotspot"; // default faulty
+            }
+
+            const matchesStatus = statusFilter === 'All' || 
+                (statusFilter === 'Healthy' && panelCat === 'Healthy') ||
+                (statusFilter !== 'Healthy' && panelCat === statusFilter);
             return matchesSearch && matchesStatus;
         });
     }, [allPanels, searchQuery, statusFilter]);
@@ -118,7 +161,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
     const stats = useMemo(() => {
         const counts = { Total: allPanels.length, Healthy: 0, Issues: 0 };
         allPanels.forEach(p => {
-            if (p.status === "Healthy") counts.Healthy++;
+            if (p.status === "healthy" || p.status === "Healthy") counts.Healthy++;
             else counts.Issues++;
         });
         return counts;
@@ -135,7 +178,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                 maxZoom={2}
                 scrollWheelZoom={true}
                 zoomControl={false}
-                style={{ width: '100%', height: '100%', background: '#030712' }} // Dark cyber background
+                style={{ width: '100%', height: '100%', background: '#030712' }}
             >
                 <FitBounds gridData={gridData} focusTarget={focusTarget} />
 
@@ -149,7 +192,6 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                         )}
                         {focusTarget === img.filename && (
                             <div className="focus-rectangle">
-                                {/* Use simple custom logic to draw a border since react-leaflet Rectangle might need separate import */}
                                 <Polygon 
                                     positions={[
                                         [img.bounds[0][0], img.bounds[0][1]],
@@ -165,10 +207,14 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                 ))}
 
                 {filteredPanels.map((p, i) => {
-                    let color = STATUS_COLORS["Healthy"];
-                    if (p.status.toLowerCase().includes("hotspot")) color = STATUS_COLORS["Hotspot"];
-                    else if (p.status.toLowerCase().includes("crack")) color = STATUS_COLORS["Crack"];
-                    else if (p.status.toLowerCase().includes("soil")) color = STATUS_COLORS["Soiling"];
+                    const isHealthy = p.status === "healthy" || p.status === "Healthy";
+                    let color = STATUS_COLORS["healthy"];
+                    if (!isHealthy) {
+                        const mainClass = p.main_defect_class || "";
+                        if (mainClass.includes("crack")) color = STATUS_COLORS["Crack"];
+                        else if (mainClass.includes("soil")) color = STATUS_COLORS["Soiling"];
+                        else color = STATUS_COLORS["faulty"];
+                    }
 
                     return (
                         <Polygon
@@ -177,7 +223,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                             pathOptions={{
                                 color: color,
                                 fillColor: color,
-                                fillOpacity: p.status === "Healthy" ? 0.1 : 0.4,
+                                fillOpacity: isHealthy ? 0.1 : 0.4,
                                 weight: 2
                             }}
                             eventHandlers={{
@@ -187,7 +233,15 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                         >
                             <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg">
                                 <div className="text-sm font-bold text-sky-400">{p.local_id}</div>
-                                <div className="text-xs">{p.status} {p.status !== "Healthy" && `(${p.total_panel_loss.toFixed(1)}%)`}</div>
+                                <div className="text-xs">
+                                    {isHealthy 
+                                        ? "Healthy" 
+                                        : `${p.main_defect_class || "Faulty"} (${(p.total_defect_area_ratio_percent || p.total_panel_loss || 0).toFixed(2)}%)`
+                                    }
+                                </div>
+                                {p.worst_severity && !isHealthy && (
+                                    <div className="text-xs text-orange-300">Severity: {p.worst_severity}</div>
+                                )}
                             </Tooltip>
                         </Polygon>
                     );
@@ -195,7 +249,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
             </MapContainer>
 
             {/* Hover Side-by-Side Viewer */}
-            {hoveredPanel && hoveredPanel.status !== "Healthy" && (
+            {hoveredPanel && hoveredPanel.status !== "healthy" && hoveredPanel.status !== "Healthy" && (
                 <div style={{
                     position: "absolute", bottom: 40, right: 40, zIndex: 1000,
                     background: "rgba(15, 23, 42, 0.9)", backdropFilter: "blur(20px)",
@@ -204,26 +258,40 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
                         <span style={{ color: "#F8FAFC", fontWeight: 700, fontSize: 16 }}>{hoveredPanel.local_id}</span>
-                        <span style={{ color: "#EF4444", fontWeight: 700, fontSize: 14 }}>{hoveredPanel.status}</span>
+                        <span style={{ color: "#EF4444", fontWeight: 700, fontSize: 14 }}>
+                            {hoveredPanel.worst_severity || "Faulty"}
+                        </span>
                     </div>
                     
+                    {/* Defect summary */}
+                    {hoveredPanel.defects && hoveredPanel.defects.length > 0 && (
+                        <div style={{ marginBottom: 12, fontSize: 12, color: "#CBD5E1" }}>
+                            {hoveredPanel.defects.slice(0, 3).map((d, i) => (
+                                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0" }}>
+                                    <span style={{ color: "#F87171" }}>{d.class_name}</span>
+                                    <span>{d.location_in_panel} · {d.area_ratio_percent?.toFixed(2)}% · {d.severity}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                         {/* Thermal Crop */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                             <span style={{ color: "#94A3B8", fontSize: 12, fontWeight: 600 }}>Ảnh Nhiệt (Thermal)</span>
                             <div style={{ 
-                                width: "100%", height: 180, background: "#000", borderRadius: 8, overflow: "hidden", position: "relative",
+                                width: "100%", height: 180, background: "#000", borderRadius: 8, overflow: "hidden",
                                 display: "flex", alignItems: "center", justifyContent: "center"
                             }}>
                                 <div style={{
                                     width: hoveredPanel.boxW, height: hoveredPanel.boxH,
                                     overflow: "hidden", position: "relative",
-                                    transform: `scale(${Math.min(220/hoveredPanel.boxW, 180/hoveredPanel.boxH)})`,
+                                    transform: `scale(${Math.min(220/Math.max(hoveredPanel.boxW,1), 180/Math.max(hoveredPanel.boxH,1))})`,
                                     transformOrigin: "center center"
                                 }}>
                                     <img 
                                         src={`${IMAGE_BASE_URL}${hoveredPanel.source_thermal}`} 
-                                        style={{ position: "absolute", left: -hoveredPanel.box[0], top: -hoveredPanel.box[1], maxWidth: "none" }}
+                                        style={{ position: "absolute", left: -(hoveredPanel.bbox_px?.[0] || 0), top: -(hoveredPanel.bbox_px?.[1] || 0), maxWidth: "none" }}
                                     />
                                     <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "2px solid #EF4444" }} />
                                 </div>
@@ -234,19 +302,19 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                             <span style={{ color: "#94A3B8", fontSize: 12, fontWeight: 600 }}>Ảnh Quang (RGB)</span>
                             <div style={{ 
-                                width: "100%", height: 180, background: "#000", borderRadius: 8, overflow: "hidden", position: "relative",
+                                width: "100%", height: 180, background: "#000", borderRadius: 8, overflow: "hidden",
                                 display: "flex", alignItems: "center", justifyContent: "center"
                             }}>
                                 {hoveredPanel.source_rgb ? (
                                     <div style={{
                                         width: hoveredPanel.boxW, height: hoveredPanel.boxH,
                                         overflow: "hidden", position: "relative",
-                                        transform: `scale(${Math.min(220/hoveredPanel.boxW, 180/hoveredPanel.boxH)})`,
+                                        transform: `scale(${Math.min(220/Math.max(hoveredPanel.boxW,1), 180/Math.max(hoveredPanel.boxH,1))})`,
                                         transformOrigin: "center center"
                                     }}>
                                         <img 
                                             src={`${IMAGE_BASE_URL}${hoveredPanel.source_rgb}`} 
-                                            style={{ position: "absolute", left: -hoveredPanel.box[0], top: -hoveredPanel.box[1], maxWidth: "none" }}
+                                            style={{ position: "absolute", left: -(hoveredPanel.bbox_px?.[0] || 0), top: -(hoveredPanel.bbox_px?.[1] || 0), maxWidth: "none" }}
                                         />
                                         <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "2px solid #0EA5E9" }} />
                                     </div>
@@ -259,7 +327,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                 </div>
             )}
 
-            {/* Left Sidebar - GIS Controls */}
+            {/* Left Sidebar */}
             {viewMode === 'monitor' && (
                 <div className="unified-overlay sidebar-left glass-panel" style={{ zIndex: 1000 }}>
                     <h2 className="text-xl font-bold mb-6 flex items-center gap-2 text-white">
@@ -271,7 +339,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                         <Search className="absolute left-3 top-2.5 text-slate-500" size={16} />
                         <input 
                             type="text" 
-                            placeholder="Tìm ID (VD: Panel_01)..." 
+                            placeholder="Tìm ID (VD: R01_C03)..." 
                             className="w-full bg-slate-800/50 border border-slate-700 rounded-lg py-2 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 text-white"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
