@@ -1,0 +1,24 @@
+@echo off
+echo ==============================================
+echo   DANG DAY CODE LEN GITHUB...
+echo ==============================================
+
+:: Thêm tất cả các file có thay đổi
+git add .
+
+:: Yêu cầu người dùng nhập thông điệp để lưu lại
+set /p commitMsg="Nhap tin nhan mo ta cho lan luu nay (Vi du: Fix loi giao dien): "
+
+:: Nếu người dùng không nhập gì, gán mặc định
+if "%commitMsg%"=="" set commitMsg="Auto update code"
+
+:: Lưu lịch sử
+git commit -m "%commitMsg%"
+
+:: Đẩy lên GitHub
+git push origin develop
+
+echo ==============================================
+echo   DA DAY CODE THANH CONG!
+echo ==============================================
+pause

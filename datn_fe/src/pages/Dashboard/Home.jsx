@@ -12,6 +12,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
     const [isResetting, setIsResetting] = useState(false);
     const [statusText, setStatusText] = useState("");
     const fileInputRef = useRef(null);
+    const folderInputRef = useRef(null);
     const modelInputRef = useRef(null);
     const [isUpdatingModel, setIsUpdatingModel] = useState(false);
 
@@ -25,21 +26,29 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
     const estimatedLoss = faultyPanels.reduce((sum, p) => sum + (p.total_panel_loss * 0.5), 0);
 
     const handleUploadAndAnalyze = async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
+        const files = Array.from(e.target.files);
+        if (files.length === 0) return;
 
         setIsProcessing(true);
         try {
             setStatusText("Đang tải dữ liệu lên...");
             const formData = new FormData();
-            formData.append("file", file);
+            files.forEach(file => {
+                formData.append("files", file);
+            });
             await axios.post("http://127.0.0.1:8000/api/v1/upload-drone-data", formData);
 
             setStatusText("Đang tiền hiệu chỉnh ảnh...");
             await axios.get("http://127.0.0.1:8000/api/v1/process-thermal");
 
             setStatusText("Đang phân tích AI...");
-            const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all");
+            const analyzeForm = new FormData();
+            const userStr = localStorage.getItem("user");
+            if (userStr) {
+                const user = JSON.parse(userStr);
+                analyzeForm.append("user_id", user.id);
+            }
+            const res = await axios.post("http://127.0.0.1:8000/api/v1/analyze-all", analyzeForm);
             
             if (res.data.error) {
                 throw new Error(res.data.error);
@@ -56,6 +65,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
         }
         setIsProcessing(false);
         if (fileInputRef.current) fileInputRef.current.value = "";
+        if (folderInputRef.current) folderInputRef.current.value = "";
     };
 
     const handleUpdateModel = async (e) => {
@@ -104,7 +114,8 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                 <div style={{ display: "flex", gap: 12 }}>
                     <input 
                         type="file" 
-                        accept=".zip" 
+                        accept=".zip,.rar,.jpg,.jpeg,.png,image/*" 
+                        multiple
                         ref={fileInputRef} 
                         onChange={handleUploadAndAnalyze} 
                         style={{ display: "none" }} 
@@ -115,7 +126,24 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                         icon={isProcessing ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
                         style={{ background: "linear-gradient(135deg, #0EA5E9, #8B5CF6)", color: "white", border: "none" }}
                     >
-                        {isProcessing ? statusText : "Tải lên & Phân tích"}
+                        {isProcessing ? statusText : "Tải lên (File/Zip/Rar)"}
+                    </ActionButton>
+
+                    <input 
+                        type="file" 
+                        webkitdirectory="" 
+                        multiple
+                        ref={folderInputRef} 
+                        onChange={handleUploadAndAnalyze} 
+                        style={{ display: "none" }} 
+                    />
+                    <ActionButton 
+                        onClick={() => folderInputRef.current?.click()} 
+                        disabled={isProcessing || isResetting || isUpdatingModel}
+                        style={{ background: "linear-gradient(135deg, #10B981, #3B82F6)", color: "white", border: "none" }}
+                        icon={isProcessing ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
+                    >
+                        {isProcessing ? statusText : "Tải Thư Mục"}
                     </ActionButton>
 
                     <input 
@@ -148,7 +176,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 24 }}>
                 <KpiCard 
                     icon={<LayoutGrid size={20} />} 
-                    label="TỔNG SỐ HÌNH ẢNH"
+                    label="TỔNG SỐ HÌNH ẢNH" 
                     value={totalPanels.toLocaleString()} 
                     accent={colors.primary} 
                 />

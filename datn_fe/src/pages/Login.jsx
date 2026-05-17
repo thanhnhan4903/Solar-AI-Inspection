@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Sun, Lock, User, Cpu, ShieldCheck, AlertTriangle } from "lucide-react";
+import { loginUser } from "../api";
 
 export default function Login({ onLogin }) {
     const [username, setUsername] = useState("admin123");
@@ -19,7 +20,7 @@ export default function Login({ onLogin }) {
         return () => window.removeEventListener("mousemove", handleMouseMove);
     }, []);
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         setError("");
         
@@ -29,14 +30,20 @@ export default function Login({ onLogin }) {
         }
 
         setIsLoading(true);
-        setTimeout(() => {
-            if (username === "admin123" && password === "admin123") {
-                onLogin();
+        try {
+            const res = await loginUser(username, password);
+            if (res.data.error) {
+                setError(res.data.error);
             } else {
-                setError("Tài khoản hoặc mật khẩu không chính xác!");
-                setIsLoading(false);
+                // Save user data
+                localStorage.setItem("user", JSON.stringify(res.data.user));
+                onLogin();
             }
-        }, 800); // Fake delay for technical feel
+        } catch (err) {
+            setError("Lỗi kết nối tới máy chủ.");
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     return (

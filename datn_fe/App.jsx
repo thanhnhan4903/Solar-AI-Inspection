@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { fetchLatestBatch } from "./src/api";
 import { Sidebar } from "./src/components/layout/Sidebar";
 import { colors } from "./src/constants/theme";
 
@@ -22,6 +23,17 @@ export default function App() {
     const [currentBatchId, setCurrentBatchId] = useState(null);
 
     const [mapFocusTarget, setMapFocusTarget] = useState(null);
+
+    useEffect(() => {
+        if (isAuth) {
+            fetchLatestBatch().then(res => {
+                if (res.data && res.data.batch_id) {
+                    setAiResults(res.data.data);
+                    setCurrentBatchId(res.data.batch_id);
+                }
+            }).catch(console.error);
+        }
+    }, [isAuth]);
 
     const handleLogin = () => { localStorage.setItem("isAuth", "true"); setIsAuth(true); };
     const handleLogout = () => { localStorage.removeItem("isAuth"); setIsAuth(false); };
