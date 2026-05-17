@@ -163,20 +163,22 @@ async def process_images():
     """
     Tiền xử lý ảnh thermal từ data/raw → data/precalib.
 
-    Pipeline hiện tại: BPR + Bilateral filter + black-border restore.
-    QUAN TRỌNG: pipeline này phải GIỐNG với preprocessing dùng khi train model.
-    Nếu model được train trên ảnh raw (không qua BPR/Bilateral), hãy tắt
-    bằng cách set BYPASS_PREPROCESSING=True bên dưới.
+    Pipeline: BPR + Bilateral filter + black-border restore + quality assessment.
+    Trả về quality_report cho từng ảnh để frontend hiển thị popup xác nhận trước AI.
+
+    Quality tiers:
+      ok      — 0 issues
+      warning — 1-2 issues (vẫn có thể chạy AI)
+      poor    — ≥3 issues  (khuyến nghị chụp lại)
     """
-    # Option: bypass preprocessing mạnh, chỉ copy raw sang precalib
-    # Đặt True nếu model train trên ảnh raw (không qua BPR/Bilateral)
     BYPASS_PREPROCESSING = False
 
     raw_dir = "data/raw"
     output_dir = "data/precalib"
     os.makedirs(output_dir, exist_ok=True)
 
-    processed_count = 0
+    quality_report = []
+
     for filename in os.listdir(raw_dir):
         if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
             continue
@@ -185,15 +187,46 @@ async def process_images():
         dst_path = os.path.join(output_dir, filename)
 
         if BYPASS_PREPROCESSING:
-            # Không xử lý, chỉ copy để đảm bảo ảnh inference = ảnh raw
             shutil.copy2(src_path, dst_path)
+            # Chạy quality check trên ảnh gốc khi bypass
+            import cv2 as _cv2
+            raw_img = _cv2.imread(src_path)
+            quality = ImageProcessor.assess_quality(raw_img) if raw_img is not None else {
+                "quality_status": "error", "issues": [], "issues_vi": [], "metrics": {}
+            }
         else:
-            result = ImageProcessor.preprocess_thermal(src_path)
+            result, quality = ImageProcessor.preprocess_thermal(src_path, return_quality=True)
             if result is not None:
                 cv2.imwrite(dst_path, result)
-        processed_count += 1
+            else:
+                quality = {"quality_status": "error", "issues": ["image_read_failed"], "issues_vi": ["Không đọc được ảnh"], "metrics": {}}
 
-    return {"message": f"Đã tiền hiệu chỉnh xong {processed_count} ảnh!"}
+        quality_report.append({
+            "filename": filename,
+            "quality_status": quality.get("quality_status", "error"),
+            "issues": quality.get("issues", []),
+            "issues_vi": quality.get("issues_vi", []),
+            "metrics": quality.get("metrics", {}),
+            "preview_url": f"/data/precalib/{filename}",
+        })
+
+    # Tính overall_status: poor nếu có bất kỳ ảnh poor, warning nếu có warning, ok nếu tất cả ok
+    statuses = [r["quality_status"] for r in quality_report]
+    if "poor" in statuses:
+        overall_status = "poor"
+    elif "warning" in statuses:
+        overall_status = "warning"
+    elif "error" in statuses:
+        overall_status = "warning"
+    else:
+        overall_status = "ok"
+
+    return {
+        "message": f"Đã tiền hiệu chỉnh xong {len(quality_report)} ảnh!",
+        "processed_count": len(quality_report),
+        "overall_status": overall_status,
+        "quality_report": quality_report,
+    }
 
 
 # ================================
