@@ -278,7 +278,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                         {/* Thermal Crop */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                            <span style={{ color: "#94A3B8", fontSize: 12, fontWeight: 600 }}>Ảnh Nhiệt (Thermal)</span>
+                            <span style={{ color: "#94A3B8", fontSize: 12, fontWeight: 600 }}>Thermal Image</span>
                             <div style={{ 
                                 width: "100%", height: 180, background: "#000", borderRadius: 8, overflow: "hidden",
                                 display: "flex", alignItems: "center", justifyContent: "center"
@@ -300,7 +300,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
 
                         {/* RGB Crop */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                            <span style={{ color: "#94A3B8", fontSize: 12, fontWeight: 600 }}>Ảnh Quang (RGB)</span>
+                            <span style={{ color: "#94A3B8", fontSize: 12, fontWeight: 600 }}>RGB Image</span>
                             <div style={{ 
                                 width: "100%", height: 180, background: "#000", borderRadius: 8, overflow: "hidden",
                                 display: "flex", alignItems: "center", justifyContent: "center"
@@ -319,7 +319,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                                         <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "2px solid #0EA5E9" }} />
                                     </div>
                                 ) : (
-                                    <span style={{ color: "#64748B", fontSize: 12 }}>Không tìm thấy ảnh RGB</span>
+                                    <span style={{ color: "#64748B", fontSize: 12 }}>RGB image not found</span>
                                 )}
                             </div>
                         </div>
@@ -339,7 +339,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                         <Search className="absolute left-3 top-2.5 text-slate-500" size={16} />
                         <input 
                             type="text" 
-                            placeholder="Tìm ID (VD: R01_C03)..." 
+                            placeholder="Search ID (e.g. R01_C03)..." 
                             className="w-full bg-slate-800/50 border border-slate-700 rounded-lg py-2 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 text-white"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
@@ -348,9 +348,9 @@ export default function UnifiedDashboard({ data, focusTarget }) {
 
                     <div className="space-y-4">
                         <div>
-                            <label className="text-[10px] text-slate-400 uppercase font-bold mb-2 block">Lọc trạng thái</label>
+                            <label className="text-[10px] text-slate-400 uppercase font-bold mb-2 block">Filter Status</label>
                             <div className="grid grid-cols-2 gap-2">
-                                <button onClick={() => setStatusFilter('All')} className={`text-xs p-2 rounded-lg border ${statusFilter === 'All' ? 'bg-sky-600 border-sky-500 text-white' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}>Tất cả</button>
+                                <button onClick={() => setStatusFilter('All')} className={`text-xs p-2 rounded-lg border ${statusFilter === 'All' ? 'bg-sky-600 border-sky-500 text-white' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}>All</button>
                                 {["Healthy", "Hotspot", "Crack", "Soiling"].map(s => (
                                     <button key={s} onClick={() => setStatusFilter(s)} className={`text-xs p-2 rounded-lg border flex items-center gap-2 ${statusFilter === s ? 'bg-sky-600 border-sky-500 text-white' : 'bg-slate-800/50 border-slate-700 text-slate-400'}`}>
                                         <div className="w-2 h-2 rounded-full" style={{ background: STATUS_COLORS[s] || "#ccc" }} /> {s}
@@ -365,7 +365,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                         >
                             <div className="flex items-center gap-3">
                                 <Thermometer size={18} />
-                                <span className="text-sm font-bold">Hiển thị lớp ảnh Nhiệt</span>
+                                <span className="text-sm font-bold">Show Thermal Overlay</span>
                             </div>
                             <div className={`w-8 h-4 rounded-full relative ${showHeatmap ? 'bg-orange-500' : 'bg-slate-600'}`}>
                                 <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${showHeatmap ? 'right-0.5' : 'left-0.5'}`} />
@@ -376,11 +376,11 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                     <div className="mt-8 pt-6 border-t border-slate-700/50">
                         <div className="grid grid-cols-2 gap-4">
                             <div className="p-3 bg-slate-800/50 rounded-xl text-center border border-slate-700/50">
-                                <div className="text-[10px] text-slate-400 uppercase">Bình thường</div>
+                                <div className="text-[10px] text-slate-400 uppercase">Healthy</div>
                                 <div className="text-xl font-bold text-emerald-400">{stats.Healthy}</div>
                             </div>
                             <div className="p-3 bg-slate-800/50 rounded-xl text-center border border-slate-700/50">
-                                <div className="text-[10px] text-slate-400 uppercase">Lỗi phát hiện</div>
+                                <div className="text-[10px] text-slate-400 uppercase">Faults Detected</div>
                                 <div className="text-xl font-bold text-rose-400">{stats.Issues}</div>
                             </div>
                         </div>
@@ -388,7 +388,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                     
                     {!data || data.length === 0 ? (
                         <div style={{ marginTop: 20, padding: 16, background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: 12, color: "#FCA5A5", fontSize: 13, textAlign: "center" }}>
-                            Chưa có dữ liệu. Vui lòng tải dữ liệu và phân tích ở màn hình Dashboard trước!
+                            No data available. Please upload drone data and run AI analysis on the Dashboard first!
                         </div>
                     ) : null}
                 </div>
@@ -397,7 +397,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
             {/* Top right floating info */}
             <div style={{ position: "absolute", top: 24, right: 24, zIndex: 1000, display: "flex", gap: 12 }}>
                 <div style={{ background: "rgba(15, 23, 42, 0.8)", backdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, padding: "8px 16px", display: "flex", alignItems: "center", gap: 8, color: "#fff", fontSize: 13, fontWeight: 600 }}>
-                    <Maximize2 size={16} color="#0EA5E9" /> Chế độ Virtual Map
+                    <Maximize2 size={16} color="#0EA5E9" /> Virtual Map Mode
                 </div>
             </div>
         </div>

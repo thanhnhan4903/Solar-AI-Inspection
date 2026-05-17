@@ -9,7 +9,7 @@ import { BadgePill } from "../../components/ui/BadgePill";
 const IMAGE_BASE_API = "http://127.0.0.1:8000/data/precalib/";
 
 export default function PanelPage({ data, onSelect, onNavigate }) {
-    if (!data || data.length === 0) return <div style={{ textAlign: "center", padding: 100 }}><ActionButton onClick={() => onNavigate("home")}>Vui lòng chạy AI tại Dashboard trước</ActionButton></div>;
+    if (!data || data.length === 0) return <div style={{ textAlign: "center", padding: 100 }}><ActionButton onClick={() => onNavigate("home")}>Please run AI Analytics at Dashboard first</ActionButton></div>;
 
     const [searchQuery, setSearchQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState("all");
@@ -20,7 +20,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
             const faultyPanels = img.panels.filter(p => p.total_panel_loss > 0);
             return {
                 ...img,
-                id: `Hình ${index + 1}`,
+                id: `Image ${index + 1}`,
                 status: faultyPanels.length > 0 ? "defective" : "healthy",
                 faulty_count: faultyPanels.length
             };
@@ -54,7 +54,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
 
     return (
         <div>
-            <PageHeader title="Quản lý Hình ảnh" subtitle={`Đang hiển thị ${filteredAndSortedImages.length} / ${allImages.length} hình`} />
+            <PageHeader title="Image Management" subtitle={`Showing ${filteredAndSortedImages.length} of ${allImages.length} images`} />
             
             {/* Filter & Sort Bar */}
             <div style={{ display: "flex", gap: 16, marginBottom: 24, background: "#fff", padding: 16, borderRadius: 16, border: "1px solid #e2e8f0", alignItems: "center" }}>
@@ -62,7 +62,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                     <Search size={18} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#94a3b8" }} />
                     <input 
                         type="text" 
-                        placeholder="Tìm kiếm ID hình ảnh hoặc tên file..." 
+                        placeholder="Search image ID or filename..." 
                         value={searchQuery}
                         onChange={e => setSearchQuery(e.target.value)}
                         style={{ width: "100%", padding: "10px 10px 10px 38px", borderRadius: 8, border: "1px solid #e2e8f0", outline: "none", fontSize: 14 }}
@@ -76,9 +76,9 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                         onChange={e => setStatusFilter(e.target.value)}
                         style={{ padding: "10px 16px 10px 12px", borderRadius: 8, border: "1px solid #e2e8f0", outline: "none", background: "#f8fafc", cursor: "pointer", fontSize: 14 }}
                     >
-                        <option value="all">Tất cả trạng thái</option>
-                        <option value="healthy">Bình thường</option>
-                        <option value="defective">Có lỗi</option>
+                        <option value="all">All Statuses</option>
+                        <option value="healthy">Healthy</option>
+                        <option value="defective">Defective</option>
                     </select>
                 </div>
 
@@ -91,8 +91,8 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                     >
                         <option value="id_asc">ID (A-Z)</option>
                         <option value="id_desc">ID (Z-A)</option>
-                        <option value="loss_desc">Số lỗi giảm dần</option>
-                        <option value="loss_asc">Số lỗi tăng dần</option>
+                        <option value="loss_desc">Faults (Descending)</option>
+                        <option value="loss_asc">Faults (Ascending)</option>
                     </select>
                 </div>
             </div>
@@ -116,8 +116,8 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                                 <BadgePill type={img.status === "defective" ? "hotspot" : "healthy"} />
                             </div>
                             <div style={{ fontSize: 13, color: "#64748B", display: "flex", justifyContent: "space-between" }}>
-                                <span>{img.total_panels} tấm pin</span>
-                                {img.faulty_count > 0 && <span style={{ color: colors.error, fontWeight: 600 }}>{img.faulty_count} tấm bị lỗi</span>}
+                                <span>{img.total_panels} panels</span>
+                                {img.faulty_count > 0 && <span style={{ color: colors.error, fontWeight: 600 }}>{img.faulty_count} faulty panels</span>}
                             </div>
                         </div>
                     </div>

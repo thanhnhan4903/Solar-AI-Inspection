@@ -2,10 +2,8 @@ import React, { useState } from "react";
 import { ArrowLeft, ArrowRight, MapPin, Activity, AlertTriangle, Percent, LayoutGrid, Info, Map as MapIcon, Target } from "lucide-react";
 import { colors } from "../../constants/theme";
 
-// ✅ Dùng precalib/ — cùng loại ảnh với AI inference để polygon overlay đúng vị trí
 const IMAGE_BASE_API = "http://127.0.0.1:8000/data/precalib/";
 
-// Severity color map
 const SEVERITY_COLORS = {
     "very_minor": "#94a3b8",
     "minor": "#f59e0b",
@@ -22,6 +20,19 @@ const DEFECT_STROKE_COLORS = {
     "crack": "#a855f7",
 };
 
+// Lấy tên file không có extension
+function getImageDisplayName(filename) {
+    if (!filename) return "";
+    return filename.replace(/\.[^/.]+$/, "");
+}
+
+// Lấy số thứ tự panel từ local_id (R02_C03 → số index)
+function getPanelIndex(panels, localId) {
+    if (!panels) return null;
+    const idx = panels.findIndex(p => p.local_id === localId);
+    return idx >= 0 ? idx + 1 : null;
+}
+
 export default function PanelDetail({ panel: image, data, onSelect, onBack, onViewOnMap }) {
     if (!image) return null;
 
@@ -31,6 +42,8 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
     const imgW = image.image_width || 640;
     const imgH = image.image_height || 512;
 
+    const displayName = getImageDisplayName(image.filename);
+
     const handleNext = () => {
         if (!data || data.length === 0) return;
         const currentIndex = data.findIndex(img => img.filename === image.filename);
@@ -38,7 +51,7 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
             const nextIndex = (currentIndex + 1) % data.length;
             onSelect({
                 ...data[nextIndex],
-                id: `Hình ${nextIndex + 1}`,
+                id: `Image ${nextIndex + 1}`,
                 status: data[nextIndex].panels.filter(p => (p.status === "faulty" || p.total_panel_loss > 0)).length > 0 ? "defective" : "healthy",
                 faulty_count: data[nextIndex].panels.filter(p => (p.status === "faulty" || p.total_panel_loss > 0)).length
             });
@@ -52,24 +65,23 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
             const prevIndex = (currentIndex - 1 + data.length) % data.length;
             onSelect({
                 ...data[prevIndex],
-                id: `Hình ${prevIndex + 1}`,
+                id: `Image ${prevIndex + 1}`,
                 status: data[prevIndex].panels.filter(p => (p.status === "faulty" || p.total_panel_loss > 0)).length > 0 ? "defective" : "healthy",
                 faulty_count: data[prevIndex].panels.filter(p => (p.status === "faulty" || p.total_panel_loss > 0)).length
             });
         }
     };
 
-    /**
-     * Kiểm tra panel có lỗi không.
-     * Hỗ trợ cả field mới (status='faulty') và cũ (total_panel_loss > 0).
-     */
     const isPanelFaulty = (p) => p.status === "faulty" || p.total_panel_loss > 0;
+
+    const panelIndex = hoveredPanel ? getPanelIndex(image.panels, hoveredPanel.local_id) : null;
 
     return (
         <div style={{ background: "#fff", borderRadius: 20, padding: 24, display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+            {/* Header */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
                 <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 8, border: "none", background: "none", color: colors.primary, cursor: "pointer", fontWeight: 600 }}>
-                    <ArrowLeft size={18} /> Quay lại
+                    <ArrowLeft size={18} /> Back
                 </button>
                 <div style={{ display: "flex", gap: 24 }}>
                     <button onClick={handlePrev} style={{ display: "flex", alignItems: "center", border: "none", background: "none", color: "#1E293B", cursor: "pointer", padding: 0 }}>
@@ -82,17 +94,29 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 32, flex: 1 }}>
-                {/* TRÁI: Khu vực xem ảnh toàn cảnh & Tương tác */}
+                {/* TRÁI */}
                 <div>
-                    <h2 style={{ marginBottom: 16, marginTop: 0 }}>{image.id} - Bản đồ chi tiết</h2>
+                    {/* Tên tấm hình */}
+                    <div style={{
+                        display: "inline-block",
+                        border: "2px solid #1E293B",
+                        borderRadius: 6,
+                        padding: "4px 16px",
+                        marginBottom: 12,
+                        fontWeight: 700,
+                        fontSize: 15,
+                        color: "#1E293B",
+                        letterSpacing: 0.5,
+                    }}>
+                        {image.id} – {displayName}
+                    </div>
+
                     <div style={{ borderRadius: 12, overflow: "hidden", background: "#000", position: "relative", minHeight: 400 }}>
-                        {/* Ảnh nền — dùng precalib để đồng bộ với polygon */}
                         <img
                             src={`${IMAGE_BASE_API}${image.filename}`}
                             style={{ width: "100%", display: "block", objectFit: "contain" }}
                             alt={image.id}
                         />
-                        {/* SVG overlay polygon — coordinate space khớp với ảnh gốc */}
                         <svg
                             style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
                             viewBox={`0 0 ${imgW} ${imgH}`}
@@ -108,7 +132,6 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
 
                                 return (
                                     <g key={i}>
-                                        {/* Panel polygon — ưu tiên polygon refine, fallback bbox */}
                                         {p.polygon && p.polygon.length >= 3 ? (
                                             <polygon
                                                 points={p.polygon.map(pt => Array.isArray(pt) ? pt.join(',') : pt).join(' ')}
@@ -135,7 +158,6 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                             )
                                         )}
 
-                                        {/* Local ID label */}
                                         {p.center && (
                                             <text
                                                 x={p.center[0]}
@@ -151,7 +173,6 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                             </text>
                                         )}
 
-                                        {/* Defect polygons overlay */}
                                         {faulty && p.defects && p.defects.map((d, di) => {
                                             const defectStroke = DEFECT_STROKE_COLORS[d.class_name] || "#f97316";
                                             const isDefectHovered = hoveredDefect?.class_name === d.class_name
@@ -178,25 +199,25 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                         </svg>
                     </div>
                     <p style={{ fontSize: 13, color: "#64748b", marginTop: 12, display: "flex", gap: 6, alignItems: "center" }}>
-                        <Info size={14} /> <i>Rê chuột vào tấm pin (viền xanh/đỏ) hoặc vùng lỗi (viền cam/tím) để xem chi tiết.</i>
+                        <Info size={14} /> <i>Hover over a panel rectangle or polygon to view detailed diagnostics.</i>
                     </p>
                 </div>
 
-                {/* PHẢI: Bảng thông tin thay đổi động */}
+                {/* PHẢI */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
                         {!hoveredPanel ? (
-                            // TRẠNG THÁI MẶC ĐỊNH
+                            // MẶC ĐỊNH
                             <>
                                 <div style={{ padding: 20, background: "#f8fafc", borderRadius: 16, border: "1px solid #e2e8f0" }}>
-                                    <h3 style={{ margin: "0 0 16px 0", color: "#1E293B" }}>Tổng quan {image.id}</h3>
+                                    <h3 style={{ margin: "0 0 16px 0", color: "#1E293B" }}>Overview {image.id}</h3>
                                     <div style={{ display: "flex", gap: 20 }}>
                                         <div style={{ flex: 1 }}>
-                                            <p style={{ margin: "0 0 8px 0", color: "#64748B", fontSize: 13, fontWeight: 600 }}>TỔNG SỐ TẤM PIN</p>
+                                            <p style={{ margin: "0 0 8px 0", color: "#64748B", fontSize: 13, fontWeight: 600 }}>TOTAL PANELS</p>
                                             <p style={{ margin: 0, fontSize: 24, fontWeight: "bold", color: colors.primary }}>{image.total_panels}</p>
                                         </div>
                                         <div style={{ flex: 1 }}>
-                                            <p style={{ margin: "0 0 8px 0", color: "#64748B", fontSize: 13, fontWeight: 600 }}>TẤM BỊ LỖI</p>
+                                            <p style={{ margin: "0 0 8px 0", color: "#64748B", fontSize: 13, fontWeight: 600 }}>FAULTY PANELS</p>
                                             <p style={{ margin: 0, fontSize: 24, fontWeight: "bold", color: image.faulty_count > 0 ? colors.danger : colors.success }}>{image.faulty_count}</p>
                                         </div>
                                     </div>
@@ -204,16 +225,16 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                 {image.faulty_count > 0 && (
                                     <div style={{ padding: 20, background: "#FFF5F5", borderRadius: 16, border: "1px solid #FED7D7" }}>
                                         <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8, color: colors.error }}>
-                                            <AlertTriangle size={18} /> Cảnh báo
+                                            <AlertTriangle size={18} /> Warning
                                         </h4>
                                         <p style={{ margin: 0, color: "#9B2C2C", fontSize: 14 }}>
-                                            Phát hiện <b>{image.faulty_count}</b> tấm pin có dấu hiệu hư hỏng. Rê chuột vào khung màu đỏ để kiểm tra.
+                                            Detected <b>{image.faulty_count}</b> faulty panels. Hover over red bounding boxes to investigate.
                                         </p>
                                     </div>
                                 )}
                             </>
                         ) : hoveredDefect ? (
-                            // TRẠNG THÁI HOVER DEFECT
+                            // HOVER DEFECT
                             <>
                                 <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 16, borderBottom: "1px solid #e2e8f0" }}>
                                     <Target size={24} color={DEFECT_STROKE_COLORS[hoveredDefect.class_name] || "#f97316"} />
@@ -227,7 +248,6 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                     </div>
                                 </div>
 
-                                {/* Severity badge */}
                                 <div style={{
                                     padding: "10px 16px", borderRadius: 12,
                                     background: `${SEVERITY_COLORS[hoveredDefect.severity] || "#94a3b8"}22`,
@@ -240,10 +260,9 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                     <span style={{ fontSize: 13, color: "#64748B" }}>{hoveredDefect.recommendation}</span>
                                 </div>
 
-                                {/* Stats */}
                                 <div style={{ padding: 16, border: "1px solid #e2e8f0", borderRadius: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                                     <div>
-                                        <p style={{ margin: "0 0 4px 0", fontSize: 11, color: "#94A3B8", fontWeight: 600, textTransform: "uppercase" }}>Diện tích lỗi</p>
+                                        <p style={{ margin: "0 0 4px 0", fontSize: 11, color: "#94A3B8", fontWeight: 600, textTransform: "uppercase" }}>Defect Area</p>
                                         <p style={{ margin: 0, fontSize: 18, fontWeight: "bold", color: "#1E293B" }}>
                                             {(hoveredDefect.area_ratio_percent || 0).toFixed(3)}%
                                         </p>
@@ -255,7 +274,7 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                         </p>
                                     </div>
                                     <div>
-                                        <p style={{ margin: "0 0 4px 0", fontSize: 11, color: "#94A3B8", fontWeight: 600, textTransform: "uppercase" }}>Vị trí (u,v)</p>
+                                        <p style={{ margin: "0 0 4px 0", fontSize: 11, color: "#94A3B8", fontWeight: 600, textTransform: "uppercase" }}>Position (u,v)</p>
                                         <p style={{ margin: 0, fontSize: 13, color: "#475569" }}>
                                             {hoveredDefect.relative_position
                                                 ? `(${hoveredDefect.relative_position.u?.toFixed(2)}, ${hoveredDefect.relative_position.v?.toFixed(2)})`
@@ -264,7 +283,7 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                         </p>
                                     </div>
                                     <div>
-                                        <p style={{ margin: "0 0 4px 0", fontSize: 11, color: "#94A3B8", fontWeight: 600, textTransform: "uppercase" }}>Độ tin cậy</p>
+                                        <p style={{ margin: "0 0 4px 0", fontSize: 11, color: "#94A3B8", fontWeight: 600, textTransform: "uppercase" }}>Confidence</p>
                                         <p style={{ margin: 0, fontSize: 13, color: "#475569" }}>
                                             {((hoveredDefect.confidence || 0) * 100).toFixed(0)}%
                                         </p>
@@ -272,29 +291,47 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                 </div>
                             </>
                         ) : (
-                            // TRẠNG THÁI HOVER PANEL
+                            // HOVER PANEL
                             <>
-                                <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 16, borderBottom: "1px solid #e2e8f0" }}>
-                                    <LayoutGrid size={24} color={colors.primary} />
-                                    <div>
-                                        <h3 style={{ margin: 0, color: "#1E293B" }}>{hoveredPanel.local_id}</h3>
-                                        {hoveredPanel.row && (
-                                            <p style={{ margin: 0, fontSize: 12, color: "#64748B" }}>
-                                                Hàng {hoveredPanel.row}, Cột {hoveredPanel.col}
-                                            </p>
-                                        )}
+                                {/* Header: Chi tiết Tấm số N + ID box */}
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBottom: 16, borderBottom: "1px solid #e2e8f0" }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                                        <LayoutGrid size={24} color={colors.primary} />
+                                        <div>
+                                            <h3 style={{ margin: 0, color: "#1E293B" }}>
+                                                Panel #{panelIndex} Details
+                                            </h3>
+                                            {hoveredPanel.row && (
+                                                <p style={{ margin: 0, fontSize: 12, color: "#64748B" }}>
+                                                    Row {hoveredPanel.row}, Col {hoveredPanel.col}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                    {/* ID TẤM HÌNH box */}
+                                    <div style={{
+                                        border: "2px solid #1E293B",
+                                        borderRadius: 6,
+                                        padding: "6px 14px",
+                                        fontWeight: 700,
+                                        fontSize: 13,
+                                        color: "#1E293B",
+                                        letterSpacing: 0.5,
+                                        whiteSpace: "nowrap"
+                                    }}>
+                                        {hoveredPanel.local_id}
                                     </div>
                                 </div>
 
                                 {/* Tình trạng */}
                                 <div style={{ padding: 20, background: isPanelFaulty(hoveredPanel) ? "#FFF5F5" : "#F0FDF4", borderRadius: 16, border: `1px solid ${isPanelFaulty(hoveredPanel) ? '#FED7D7' : '#BBF7D0'}` }}>
                                     <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8, color: isPanelFaulty(hoveredPanel) ? colors.error : colors.success }}>
-                                        <Activity size={18} /> Tình trạng
+                                        <Activity size={18} /> Status
                                     </h4>
                                     <div style={{ fontSize: 22, fontWeight: "bold", color: isPanelFaulty(hoveredPanel) ? colors.error : colors.success }}>
                                         {isPanelFaulty(hoveredPanel)
                                             ? `${hoveredPanel.worst_severity || "Faulty"} — ${(hoveredPanel.total_defect_area_ratio_percent || hoveredPanel.total_panel_loss || 0).toFixed(2)}%`
-                                            : "Bình thường (Healthy)"
+                                            : "Healthy"
                                         }
                                     </div>
                                     {isPanelFaulty(hoveredPanel) && hoveredPanel.recommendation && (
@@ -307,19 +344,17 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                 {/* Tọa độ */}
                                 <div style={{ padding: 16, border: "1px solid #e2e8f0", borderRadius: 16 }}>
                                     <h4 style={{ margin: "0 0 10px 0", display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
-                                        <MapPin size={16} /> Bounding Box
+                                        <MapPin size={16} /> Bounding Box Coordinates
                                     </h4>
                                     <p style={{ margin: "4px 0", fontSize: 13 }}>
-                                        X1: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[0] || 0)}</b> ·
-                                        Y1: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[1] || 0)}</b>
+                                        X1: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[0] || 0)} px</b> | Y1: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[1] || 0)} px</b>
                                     </p>
                                     <p style={{ margin: "4px 0", fontSize: 13 }}>
-                                        X2: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[2] || 0)}</b> ·
-                                        Y2: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[3] || 0)}</b>
+                                        X2: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[2] || 0)} px</b> | Y2: <b>{Math.round((hoveredPanel.bbox || hoveredPanel.box || [])[3] || 0)} px</b>
                                     </p>
                                     <p style={{ margin: "12px 0 0 0", fontSize: 13, color: "#718096" }}>
                                         <Percent size={13} style={{ verticalAlign: "middle", marginRight: 4 }} />
-                                        Confidence AI: <b>{((hoveredPanel.confidence || 0) * 100).toFixed(0)}%</b>
+                                        AI Confidence: <b>{((hoveredPanel.confidence || 0) * 100).toFixed(0)}%</b>
                                     </p>
                                 </div>
 
@@ -327,7 +362,7 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                 {isPanelFaulty(hoveredPanel) && hoveredPanel.defects && hoveredPanel.defects.length > 0 && (
                                     <div style={{ padding: 16, background: "#FFF5F5", border: "1px solid #FED7D7", borderRadius: 16 }}>
                                         <h4 style={{ margin: "0 0 10px 0", color: colors.error, display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
-                                            <AlertTriangle size={16} /> Lỗi ({hoveredPanel.defects.length}) — rê vào vùng lỗi để xem chi tiết
+                                            <AlertTriangle size={16} /> Anomalies ({hoveredPanel.defects.length}) — hover over a region to view details
                                         </h4>
                                         {hoveredPanel.defects.map((d, i) => (
                                             <div key={i} style={{

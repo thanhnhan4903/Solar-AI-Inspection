@@ -50,9 +50,15 @@ export default function App() {
     const isFullPage = page === "ops";
 
     return (
-        <div style={{ display: "flex", height: "100vh", width: "100vw", background: colors.bg, fontFamily: "'DM Sans', system-ui, sans-serif", overflow: "hidden" }}>
+        <div style={{ display: "flex", height: "100vh", width: "100vw", fontFamily: "'DM Sans', system-ui, sans-serif", overflow: "hidden",
+            background: "linear-gradient(135deg, #e8f4fd 0%, #f0f9ff 30%, #fef9ee 60%, #f0fdf4 100%)" }}>
             <Sidebar onNavigate={navigate} onLogout={handleLogout} activePage={activePage} />
-            <div style={{ flex: 1, padding: isFullPage ? 0 : "28px 32px", overflowY: isFullPage ? "hidden" : "auto", position: "relative" }}>
+            <div style={{ flex: 1, padding: isFullPage ? 0 : "28px 32px", overflowY: isFullPage ? "hidden" : "auto", position: "relative",
+                backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'%3E%3Cdefs%3E%3CradialGradient id='sun' cx='75%25' cy='20%25' r='30%25'%3E%3Cstop offset='0%25' stop-color='%23fbbf24' stop-opacity='0.12'/%3E%3Cstop offset='100%25' stop-color='%23f59e0b' stop-opacity='0'/%3E%3C/radialGradient%3E%3CradialGradient id='sun2' cx='10%25' cy='80%25' r='25%25'%3E%3Cstop offset='0%25' stop-color='%230ea5e9' stop-opacity='0.08'/%3E%3Cstop offset='100%25' stop-color='%230ea5e9' stop-opacity='0'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='800' height='600' fill='url(%23sun)'/%3E%3Crect width='800' height='600' fill='url(%23sun2)'/%3E%3Cg opacity='0.04' stroke='%23f59e0b' stroke-width='1' fill='none'%3E%3Crect x='50' y='400' width='60' height='40' rx='3'/%3E%3Crect x='120' y='400' width='60' height='40' rx='3'/%3E%3Crect x='190' y='400' width='60' height='40' rx='3'/%3E%3Crect x='50' y='450' width='60' height='40' rx='3'/%3E%3Crect x='120' y='450' width='60' height='40' rx='3'/%3E%3Crect x='190' y='450' width='60' height='40' rx='3'/%3E%3C/g%3E%3Ccircle cx='600' cy='120' r='80' fill='none' stroke='%23fbbf24' stroke-width='1' opacity='0.08'/%3E%3Ccircle cx='600' cy='120' r='50' fill='none' stroke='%23fbbf24' stroke-width='1' opacity='0.06'/%3E%3Cline x1='600' y1='30' x2='600' y2='10' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='600' y1='210' x2='600' y2='230' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='510' y1='120' x2='490' y2='120' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='690' y1='120' x2='710' y2='120' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='537' y1='47' x2='523' y2='33' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='663' y1='193' x2='677' y2='207' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='663' y1='47' x2='677' y2='33' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3Cline x1='537' y1='193' x2='523' y2='207' stroke='%23fbbf24' stroke-width='2' opacity='0.1'/%3E%3C/svg%3E")`,
+                backgroundSize: "cover",
+                backgroundRepeat: "no-repeat",
+                backgroundPosition: "top right",
+            }}>
                 
                 {page === "home" && (
                     <Home 
