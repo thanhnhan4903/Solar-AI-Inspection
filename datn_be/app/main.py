@@ -65,6 +65,16 @@ app.add_middleware(
 WEIGHTS_PATH = "weights/best.pt"
 ai_engine: Optional[AIEngine] = AIEngine(WEIGHTS_PATH) if os.path.exists(WEIGHTS_PATH) else None
 
+# ── Biến theo dõi tiến trình AI (in-memory, đủ cho single-user) ──
+progress_state = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "filename": "",
+    "step": "",
+    "done": False,
+}
+
 
 @app.get("/")
 def welcome():
@@ -240,10 +250,19 @@ async def match_images():
 
 
 # ================================
+# --- POLL TIẾN TRÌNH AI ---
+# ================================
+@app.get("/api/v1/analyze-progress")
+async def get_analyze_progress():
+    """Trả về trạng thái tiến trình phân tích AI hiện tại."""
+    return dict(progress_state)
+
+
+# ================================
 # --- KHỐI 4-5: CHẠY AI + PHÂN TÍCH + LƯU DB ---
 # ================================
 @app.post("/api/v1/analyze-all")
-async def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
+def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
     """
     Pipeline phân tích hoàn chỉnh:
     1. Chạy YOLOv8-seg trên ảnh precalib
@@ -266,6 +285,25 @@ async def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db
     if not os.path.exists(precalib_dir) or len(os.listdir(precalib_dir)) == 0:
         return {"error": "Thư mục precalib trống. Hãy chạy tiền xử lý trước!"}
 
+    # Ghép cặp Thermal và RGB
+    pairs = RegistrationService.match_thermal_rgb(raw_dir)
+    thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
+    rgb_images = set([p['rgb'] for p in pairs])
+
+    # Danh sách file thermal cần xử lý
+    thermal_files = [
+        fn for fn in os.listdir(precalib_dir)
+        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) and fn not in rgb_images
+    ]
+
+    # ── Reset + bắt đầu progress tracker ──
+    progress_state["running"] = True
+    progress_state["done"] = False
+    progress_state["current"] = 0
+    progress_state["total"] = len(thermal_files)
+    progress_state["filename"] = ""
+    progress_state["step"] = "Khởi động..."
+
     # Tạo Batch mới trong DB
     new_batch = models.UploadBatch(name="Đợt kiểm tra tự động", user_id=user_id)
     db.add(new_batch)
@@ -274,22 +312,17 @@ async def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db
 
     final_report = []
 
-    # Ghép cặp Thermal và RGB
-    pairs = RegistrationService.match_thermal_rgb(raw_dir)
-    thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
-    rgb_images = set([p['rgb'] for p in pairs])
-
     logger.info(f"[analyze-all] Model classes: {ai_engine.model.names}")
-    logger.info(f"[analyze-all] Bắt đầu xử lý thư mục: {precalib_dir}")
+    logger.info(f"[analyze-all] Bắt đầu xử lý {len(thermal_files)} ảnh")
 
-    for filename in os.listdir(precalib_dir):
-        if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-            continue
-        if filename in rgb_images:
-            continue  # Bỏ qua ảnh RGB, chỉ chạy AI trên thermal
+    for idx, filename in enumerate(thermal_files):
+        # ── Cập nhật progress ──
+        progress_state["current"] = idx + 1
+        progress_state["filename"] = filename
+        progress_state["step"] = f"YOLO inference..."
 
         img_path = os.path.join(precalib_dir, filename)
-        logger.info(f"[analyze-all] Inference: {img_path}")
+        logger.info(f"[analyze-all] Inference ({idx+1}/{len(thermal_files)}): {img_path}")
 
         # ── BƯỚC 1: Chạy YOLOv8-seg ──
         raw_detections, yolo_result = ai_engine.detect_and_segment(img_path)
@@ -404,6 +437,11 @@ async def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db
         db.commit()
 
     logger.info(f"[analyze-all] Hoàn tất! Batch ID: {new_batch.id}, {len(final_report)} ảnh.")
+
+    # ── Kết thúc progress tracker ──
+    progress_state["running"] = False
+    progress_state["done"] = True
+    progress_state["step"] = "Hoàn tất!"
 
     return {
         "message": "AI đã phân tích và lưu dữ liệu thành công!",

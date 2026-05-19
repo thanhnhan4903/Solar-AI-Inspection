@@ -46,8 +46,8 @@ def is_valid_panel_detection(det: Dict[str, Any], median_area: Optional[float] =
     # So sánh với median area nếu có
     if median_area and median_area > 0:
         ratio = area / median_area
-        # Loại panel có diện tích nhỏ hơn 40% hoặc lớn hơn 250% so với median
-        if ratio < 0.40 or ratio > 2.50:
+        # Loại panel có diện tích
+        if ratio < 0.75 or ratio > 1.25:
             return False
 
     return True
@@ -201,7 +201,7 @@ def assign_row_col_ids(panels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     if heights:
         median_h = float(np.median(heights))
-        row_threshold = median_h * 0.5
+        row_threshold = median_h * 0.6   # 60% panel height — đủ rộng cho ảnh nghiêng nhẹ
     else:
         row_threshold = 30.0  # fallback px
 
@@ -209,15 +209,17 @@ def assign_row_col_ids(panels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     sorted_panels = sorted(panels, key=lambda p: p["_cy"])
     rows: List[List[Dict]] = []
     current_row = [sorted_panels[0]]
-    current_y = sorted_panels[0]["_cy"]
+    current_row_mean_y = sorted_panels[0]["_cy"]   # dùng mean thay vì y cố định
 
     for p in sorted_panels[1:]:
-        if abs(p["_cy"] - current_y) <= row_threshold:
+        if abs(p["_cy"] - current_row_mean_y) <= row_threshold:
             current_row.append(p)
+            # Cập nhật mean y của hàng hiện tại
+            current_row_mean_y = float(np.mean([q["_cy"] for q in current_row]))
         else:
             rows.append(current_row)
             current_row = [p]
-            current_y = p["_cy"]
+            current_row_mean_y = p["_cy"]
     rows.append(current_row)
 
     # Trong mỗi hàng, sort theo x rồi gán col

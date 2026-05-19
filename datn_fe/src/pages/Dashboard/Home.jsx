@@ -31,94 +31,181 @@ const API = "http://127.0.0.1:8000";
 function AnomalyBarChart({ data }) {
     if (!data || data.length === 0) {
         return (
-            <div
-                style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    height: "100%",
-                    flexDirection: "column",
-                    gap: 12,
-                    color: "#94a3b8",
-                }}
-            >
-                <TrendingUp size={40} style={{ opacity: 0.3 }} />
-                <p style={{ margin: 0, fontSize: 13 }}>No analysis data available</p>
+            <div style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                height: "100%", flexDirection: "column", gap: 12, color: "#94a3b8",
+            }}>
+                <TrendingUp size={32} style={{ opacity: 0.3 }} />
+                <p style={{ margin: 0, fontSize: 12 }}>Chưa có dữ liệu phân tích</p>
             </div>
         );
     }
 
     const max = Math.max(...data.map((d) => d.value), 1);
-    const barColors = [
-        "#f97316",
-        "#ef4444",
-        "#06b6d4",
-        "#eab308",
-        "#a855f7",
-        "#10b981",
-        "#0ea5e9",
-        "#f59e0b",
-    ];
+    const barColors = ["#f97316","#ef4444","#06b6d4","#eab308","#a855f7","#10b981","#0ea5e9","#f59e0b"];
+    const MAX_BAR_HEIGHT = 64; // px — giới hạn cứng để không tràn
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div
-                style={{
-                    flex: 1,
-                    display: "flex",
-                    alignItems: "flex-end",
-                    gap: 10,
-                    padding: "8px 0",
-                }}
-            >
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            {/* Bars area */}
+            <div style={{
+                flex: 1, display: "flex", alignItems: "flex-end",
+                gap: 6, minHeight: 0, overflow: "hidden", paddingBottom: 2,
+            }}>
                 {data.map((item, i) => {
-                    const pct = (item.value / max) * 100;
-
+                    const barH = Math.max(Math.round((item.value / max) * MAX_BAR_HEIGHT), 4);
+                    const color = barColors[i % barColors.length];
                     return (
-                        <div
-                            key={i}
-                            style={{
-                                flex: 1,
-                                display: "flex",
-                                flexDirection: "column",
-                                alignItems: "center",
-                                gap: 4,
-                            }}
-                        >
-                            <span style={{ fontSize: 11, fontWeight: 700, color: "#1e293b" }}>
+                        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 0 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: "#334155", lineHeight: 1 }}>
                                 {item.value}
                             </span>
-                            <div
-                                style={{
-                                    width: "100%",
-                                    height: `${Math.max(pct * 1.4, 4)}px`,
-                                    background: `linear-gradient(180deg, ${barColors[i % barColors.length]}, ${barColors[i % barColors.length]}bb)`,
-                                    borderRadius: "4px 4px 0 0",
-                                    transition: "height 0.5s ease",
-                                    minHeight: 4,
-                                }}
-                            />
+                            <div style={{
+                                width: "100%", height: barH,
+                                background: `linear-gradient(180deg, ${color}, ${color}bb)`,
+                                borderRadius: "3px 3px 0 0",
+                                transition: "height 0.6s ease",
+                            }} />
                         </div>
                     );
                 })}
             </div>
 
-            <div style={{ display: "flex", gap: 10, borderTop: "2px solid #e2e8f0", paddingTop: 6 }}>
+            {/* Labels */}
+            <div style={{ display: "flex", gap: 6, borderTop: "1px solid #e2e8f0", paddingTop: 4, flexShrink: 0 }}>
                 {data.map((item, i) => (
-                    <div
-                        key={i}
-                        style={{
-                            flex: 1,
-                            textAlign: "center",
-                            fontSize: 9,
-                            color: "#64748b",
-                            wordBreak: "break-word",
-                            lineHeight: 1.2,
-                        }}
-                    >
+                    <div key={i} style={{
+                        flex: 1, textAlign: "center", fontSize: 8,
+                        color: "#64748b", wordBreak: "break-word", lineHeight: 1.2, minWidth: 0,
+                    }}>
                         {item.label}
                     </div>
                 ))}
+            </div>
+        </div>
+    );
+}
+
+// ─────────────────────────────────────────
+// AI Progress Modal
+// ─────────────────────────────────────────
+function AIProgressModal({ onDone }) {
+    const [progress, setProgress] = useState({ current: 0, total: 0, filename: "", step: "Khởi động...", done: false });
+
+    React.useEffect(() => {
+        const interval = setInterval(async () => {
+            try {
+                const res = await axios.get(`${API}/api/v1/analyze-progress`);
+                setProgress(res.data);
+                if (res.data.done && !res.data.running) {
+                    clearInterval(interval);
+                }
+            } catch (_) {}
+        }, 600);
+        return () => clearInterval(interval);
+    }, []);
+
+    const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+
+    return (
+        <div style={{
+            position: "fixed", inset: 0, zIndex: 10000,
+            background: "rgba(2,8,23,0.90)", backdropFilter: "blur(10px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+            <div style={{
+                background: "linear-gradient(145deg, #0f172a, #1e293b)",
+                border: "1px solid rgba(14,165,233,0.35)",
+                borderRadius: 24,
+                boxShadow: "0 0 80px rgba(14,165,233,0.15), 0 30px 60px rgba(0,0,0,0.6)",
+                width: "min(520px, 92vw)",
+                padding: "40px 44px",
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 28,
+            }}>
+                {/* Animated icon */}
+                <div style={{ position: "relative", width: 72, height: 72 }}>
+                    <svg viewBox="0 0 72 72" width="72" height="72">
+                        <circle cx="36" cy="36" r="30" fill="none" stroke="rgba(14,165,233,0.15)" strokeWidth="5" />
+                        <circle
+                            cx="36" cy="36" r="30" fill="none"
+                            stroke="url(#aiGrad)" strokeWidth="5"
+                            strokeDasharray={188.5}
+                            strokeDashoffset={188.5 - (pct / 100) * 188.5}
+                            strokeLinecap="round"
+                            style={{ transform: "rotate(-90deg)", transformOrigin: "36px 36px", transition: "stroke-dashoffset 0.5s ease" }}
+                        />
+                        <defs>
+                            <linearGradient id="aiGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stopColor="#0EA5E9" />
+                                <stop offset="100%" stopColor="#6366F1" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <span style={{ fontSize: 15, fontWeight: 800, color: "#0EA5E9" }}>{pct}%</span>
+                    </div>
+                </div>
+
+                {/* Title */}
+                <div style={{ textAlign: "center" }}>
+                    <h3 style={{ margin: "0 0 6px 0", color: "#F8FAFC", fontSize: 20, fontWeight: 700, letterSpacing: "-0.3px" }}>
+                        Đang phân tích AI...
+                    </h3>
+                    <p style={{ margin: 0, color: "#64748B", fontSize: 13 }}>
+                        {progress.step}
+                    </p>
+                </div>
+
+                {/* Progress bar */}
+                <div style={{ width: "100%" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                        <span style={{ fontSize: 12, color: "#94A3B8" }}>
+                            {progress.current > 0 ? `Ảnh ${progress.current} / ${progress.total}` : "Chuẩn bị..."}
+                        </span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#0EA5E9" }}>{pct}%</span>
+                    </div>
+                    <div style={{ height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 10, overflow: "hidden", position: "relative" }}>
+                        {/* Shimmer bg */}
+                        <div style={{
+                            position: "absolute", inset: 0,
+                            background: "linear-gradient(90deg, transparent 25%, rgba(255,255,255,0.04) 50%, transparent 75%)",
+                            backgroundSize: "200% 100%",
+                            animation: "shimmerAI 1.5s infinite linear",
+                        }} />
+                        {/* Fill */}
+                        <div style={{
+                            height: "100%", width: `${pct}%`,
+                            background: "linear-gradient(90deg, #0EA5E9, #6366F1)",
+                            borderRadius: 10,
+                            transition: "width 0.5s ease",
+                            position: "relative",
+                        }} />
+                    </div>
+                </div>
+
+                {/* Current file */}
+                {progress.filename && (
+                    <div style={{
+                        background: "rgba(14,165,233,0.08)",
+                        border: "1px solid rgba(14,165,233,0.2)",
+                        borderRadius: 10, padding: "10px 18px",
+                        width: "100%", boxSizing: "border-box",
+                    }}>
+                        <div style={{ fontSize: 10, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>
+                            File đang xử lý
+                        </div>
+                        <div style={{ fontSize: 13, color: "#CBD5E1", fontFamily: "monospace", wordBreak: "break-all" }}>
+                            {progress.filename}
+                        </div>
+                    </div>
+                )}
+
+                <style>{`
+                    @keyframes shimmerAI {
+                        0% { background-position: -200% 0; }
+                        100% { background-position: 200% 0; }
+                    }
+                `}</style>
             </div>
         </div>
     );
@@ -703,6 +790,10 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
 
     return (
         <div>
+            {/* AI Progress modal — hiển thị khi đang chạy AI */}
+            {isRunningAI && <AIProgressModal />}
+
+            {/* Quality Review modal — sau preprocessing */}
             {qualityData && (
                 <QualityReviewModal
                     qualityData={qualityData}

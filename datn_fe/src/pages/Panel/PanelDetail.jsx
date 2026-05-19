@@ -299,11 +299,11 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                         <LayoutGrid size={24} color={colors.primary} />
                                         <div>
                                             <h3 style={{ margin: 0, color: "#1E293B" }}>
-                                                Panel #{panelIndex} Details
+                                                Panel {hoveredPanel.local_id}
                                             </h3>
                                             {hoveredPanel.row && (
                                                 <p style={{ margin: 0, fontSize: 12, color: "#64748B" }}>
-                                                    Row {hoveredPanel.row}, Col {hoveredPanel.col}
+                                                    Hàng {hoveredPanel.row} · Cột {hoveredPanel.col}
                                                 </p>
                                             )}
                                         </div>
