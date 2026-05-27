@@ -9,7 +9,7 @@ export default function MapPage() {
 
     return (
         <div>
-            <PageHeader title="GIS Mapping" subtitle="Real-time panel location overlay" />
+            <PageHeader title="Bản Đồ GIS" subtitle="Bản phủ vị trí thiết bị theo thời gian thực" />
             <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
                 <div style={{
                     height: 500, background: "linear-gradient(135deg,#E0F2FE,#BAE6FD,#7DD3FC)",
@@ -17,7 +17,7 @@ export default function MapPage() {
                     display: "flex", alignItems: "center", justifyContent: "center",
                     position: "relative", color: "#0369A1", fontWeight: 600, fontSize: 15,
                 }}>
-                    🗺 Map View
+                    🗺 Chế độ xem bản đồ
                     {panel && (
                         <div style={{
                             position: "absolute", background: colors.danger, color: "#fff",
@@ -30,12 +30,12 @@ export default function MapPage() {
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                     <SolarCard style={{ flex: 1 }}>
-                        <CardHeader title="Thermal" />
-                        <div style={{ height: 200, background: "linear-gradient(135deg,#FEF3C7,#FCA5A5)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#92400E", fontWeight: 500 }}>Thermal Layer</div>
+                        <CardHeader title="Nhiệt kế" />
+                        <div style={{ height: 200, background: "linear-gradient(135deg,#FEF3C7,#FCA5A5)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#92400E", fontWeight: 500 }}>Lớp nhiệt</div>
                     </SolarCard>
                     <SolarCard style={{ flex: 1 }}>
                         <CardHeader title="RGB" />
-                        <div style={{ height: 200, background: "linear-gradient(135deg,#E0F2FE,#DBEAFE)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#1E40AF", fontWeight: 500 }}>RGB Layer</div>
+                        <div style={{ height: 200, background: "linear-gradient(135deg,#E0F2FE,#DBEAFE)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#1E40AF", fontWeight: 500 }}>Lớp RGB</div>
                     </SolarCard>
                 </div>
             </div>

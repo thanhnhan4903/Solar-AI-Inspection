@@ -10,7 +10,6 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
-
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -22,7 +21,8 @@ from app.models import models
 from app.services.file_handler import FileService
 from app.services.image_processor import ImageProcessor
 from app.services.registration import RegistrationService
-from app.services.ai_engine import AIEngine, draw_custom_annotation
+from app.services.ai_engine import AIEngine
+from app.services.panel_processor import draw_custom_annotation
 from app.services.analyzer import SolarAnalyzer
 from app.services.panel_geometry import assign_row_col_ids
 from app.services.defect_logic import assign_defects_to_panels
@@ -110,10 +110,13 @@ async def login(req: LoginRequest, db: Session = Depends(get_db)):
 @app.get("/api/v1/latest-batch")
 async def get_latest_batch(db: Session = Depends(get_db)):
     latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
-    if not latest_batch:
-        return {"data": [], "batch_id": None}
     
-    images = db.query(models.Image).filter(models.Image.batch_id == latest_batch.id).all()
+    # Lấy tất cả ảnh thay vì chỉ ảnh của đợt mới nhất
+    images = db.query(models.Image).all()
+    
+    # Ghép cặp Thermal và RGB trên thư mục data/raw để có thông tin chính xác
+    pairs = RegistrationService.match_thermal_rgb("data/raw")
+    thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
     
     final_report = []
     for img in images:
@@ -141,14 +144,16 @@ async def get_latest_batch(db: Session = Depends(get_db)):
             })
             
         final_report.append({
+            "id": img.filename, # frontend UnifiedDashboard dùng ID như filename
             "filename": img.filename,
-            "rgb_image": img.filename.replace("_thermal", ""),
+            "rgb_image": thermal_to_rgb.get(img.filename, img.filename.replace("_thermal", "")),
             "total_panels": len(panels_data),
-            "panels": panels_data
+            "panels": panels_data,
+            "upload_date": img.batch.upload_date.isoformat() if img.batch else None
         })
         
     return {
-        "batch_id": latest_batch.id,
+        "batch_id": latest_batch.id if latest_batch else None,
         "data": final_report
     }
 
@@ -181,7 +186,7 @@ async def process_images():
       warning — 1-2 issues (vẫn có thể chạy AI)
       poor    — ≥3 issues  (khuyến nghị chụp lại)
     """
-    BYPASS_PREPROCESSING = False
+    BYPASS_PREPROCESSING = True  # Bypass tiền xử lý để YOLO nhận ảnh gốc như khi test trực tiếp
 
     raw_dir = "data/raw"
     output_dir = "data/precalib"
@@ -196,11 +201,31 @@ async def process_images():
         src_path = os.path.join(raw_dir, filename)
         dst_path = os.path.join(output_dir, filename)
 
+        # Đọc ảnh để phân biệt ảnh nhiệt (Thermal) và ảnh quang học (RGB) bằng độ phân giải
+        import cv2 as _cv2
+        raw_img = _cv2.imread(src_path)
+        if raw_img is None:
+            continue
+            
+        h, w = raw_img.shape[:2]
+        if w > 1280:
+            # Đây là ảnh RGB (ảnh quang học song song), bỏ qua không chạy tiền xử lý/AI
+            continue
+
+        # Tránh xử lý lại các file đã có trong precalib
+        if os.path.exists(dst_path):
+            quality_report.append({
+                "filename": filename,
+                "quality_status": "ok",
+                "issues": [],
+                "issues_vi": [],
+                "metrics": {},
+                "preview_url": f"/data/precalib/{filename}",
+            })
+            continue
+
         if BYPASS_PREPROCESSING:
             shutil.copy2(src_path, dst_path)
-            # Chạy quality check trên ảnh gốc khi bypass
-            import cv2 as _cv2
-            raw_img = _cv2.imread(src_path)
             quality = ImageProcessor.assess_quality(raw_img) if raw_img is not None else {
                 "quality_status": "error", "issues": [], "issues_vi": [], "metrics": {}
             }
@@ -290,11 +315,19 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
     thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
     rgb_images = set([p['rgb'] for p in pairs])
 
+    # Danh sách file đã phân tích
+    processed_images = set([img.filename for img in db.query(models.Image).all()])
+
     # Danh sách file thermal cần xử lý
     thermal_files = [
         fn for fn in os.listdir(precalib_dir)
-        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) and fn not in rgb_images
+        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
+        and fn not in rgb_images
+        and fn not in processed_images
     ]
+
+    if not thermal_files:
+        return {"message": "Không có ảnh mới nào cần phân tích!"}
 
     # ── Reset + bắt đầu progress tracker ──
     progress_state["running"] = True
@@ -408,7 +441,7 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
                 image_id=db_image.id,
                 panel_id=db_panel.id,
                 defect_type=defect_str,
-                loss_pct=p.get("total_defect_area_ratio_percent", 0.0),
+                loss_pct=p.get("total_panel_loss", 0.0),
                 confidence=p.get("confidence", 0.0),
             )
             db.add(db_ai_result)
@@ -477,7 +510,7 @@ def _serialize_panels(panels: List) -> List:
             "recommendation":   p.get("recommendation", "No action"),
             "main_defect_class": p.get("main_defect_class"),
             # Backward compat cho frontend cũ
-            "total_panel_loss": p.get("total_defect_area_ratio_percent", 0.0),
+            "total_panel_loss": p.get("total_panel_loss", 0.0),
             "x": p.get("center", [0, 0])[0],
             "y": p.get("center", [0, 0])[1],
         }
@@ -669,6 +702,41 @@ async def download_report(batch_id: int, db: Session = Depends(get_db)):
         db.commit()
 
     return FileResponse(path=report_path, filename=report_name, media_type='application/pdf')
+
+
+# ================================
+# --- PHÂN TÍCH LẠI (GIỮ ẢNH GỐC) ---
+# ================================
+@app.post("/api/v1/reanalyze")
+async def reanalyze(db: Session = Depends(get_db)):
+    folders = ["data/results", "data/panels"]
+    for folder in folders:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+        os.makedirs(folder, exist_ok=True)
+
+    if os.path.exists("data"):
+        for f in os.listdir("data"):
+            if f.endswith(".pdf"):
+                try:
+                    os.remove(os.path.join("data", f))
+                except:
+                    pass
+
+    try:
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+        db.execute(text("DELETE FROM reports;"))
+        db.execute(text("DELETE FROM ai_results;"))
+        db.execute(text("DELETE FROM images;"))
+        db.execute(text("DELETE FROM panels;"))
+        db.execute(text("DELETE FROM upload_batches;"))
+        db.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+    return {"message": "Dữ liệu phân tích đã được xóa sạch, sẵn sàng chạy lại AI!"}
 
 
 # ================================

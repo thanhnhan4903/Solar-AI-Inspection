@@ -3,7 +3,7 @@ import React from "react";
 export const BADGE_CFG = {
     hotspot: { bg: "#FEE2E2", color: "#DC2626", label: "Hotspot" },
     soiling: { bg: "#FEF3C7", color: "#D97706", label: "Soiling" },
-    healthy: { bg: "#D1FAE5", color: "#059669", label: "Healthy" },
+    healthy: { bg: "#D1FAE5", color: "#059669", label: "Bình thường" },
     crack: { bg: "#EDE9FE", color: "#7C3AED", label: "Crack" },
 };
 

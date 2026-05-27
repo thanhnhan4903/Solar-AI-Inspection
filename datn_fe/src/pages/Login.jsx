@@ -111,7 +111,7 @@ export default function Login({ onLogin }) {
                     </div>
                     <div style={{ marginTop: 12, padding: "4px 12px", background: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.3)", borderRadius: 100, display: "flex", alignItems: "center", gap: 6 }}>
                         <ShieldCheck size={14} color="#34D399" />
-                        <span style={{ color: "#34D399", fontSize: 12, fontWeight: 600 }}>AI Inspection System</span>
+                        <span style={{ color: "#34D399", fontSize: 12, fontWeight: 600 }}>Hệ Thống Kiểm Tra AI</span>
                     </div>
                 </div>
 

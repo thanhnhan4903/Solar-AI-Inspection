@@ -15,6 +15,8 @@ import {
     X,
     ChevronRight,
     TrendingUp,
+    Zap,
+    RefreshCw,
 } from "lucide-react";
 import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
@@ -192,7 +194,7 @@ function AIProgressModal({ onDone }) {
                         width: "100%", boxSizing: "border-box",
                     }}>
                         <div style={{ fontSize: 10, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 4 }}>
-                            File đang xử lý
+                            Tệp đang xử lý
                         </div>
                         <div style={{ fontSize: 13, color: "#CBD5E1", fontFamily: "monospace", wordBreak: "break-all" }}>
                             {progress.filename}
@@ -487,92 +489,31 @@ function QualityReviewModal({ qualityData, onConfirm, onCancel, isRunningAI }) {
                                     <div
                                         style={{
                                             borderTop: "1px solid rgba(255,255,255,0.06)",
-                                            padding: "14px 16px",
-                                            display: "grid",
-                                            gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-                                            gap: 10,
+                                            padding: "16px",
+                                            display: "flex",
+                                            justifyContent: "center",
+                                            alignItems: "center",
+                                            background: "rgba(2, 6, 23, 0.4)",
                                         }}
                                     >
-                                        {[
-                                            {
-                                                label: "Blur Score",
-                                                val: m.blur_score?.toFixed(1),
-                                                good: m.blur_score >= 60,
-                                                unit: "",
-                                            },
-                                            {
-                                                label: "Noise Score",
-                                                val: m.noise_score?.toFixed(1),
-                                                good: m.noise_score <= 18,
-                                                unit: "",
-                                            },
-                                            {
-                                                label: "Viền đen",
-                                                val:
-                                                    m.black_border_ratio !== undefined
-                                                        ? (m.black_border_ratio * 100).toFixed(1)
-                                                        : null,
-                                                good: m.black_border_ratio <= 0.5,
-                                                unit: "%",
-                                            },
-                                            {
-                                                label: "Độ sáng TB",
-                                                val: m.brightness_mean?.toFixed(1),
-                                                good: true,
-                                                unit: "",
-                                            },
-                                            {
-                                                label: "Dải sáng (DR)",
-                                                val: m.dynamic_range?.toFixed(1),
-                                                good: m.dynamic_range >= 40,
-                                                unit: "",
-                                            },
-                                            {
-                                                label: "Quá sáng",
-                                                val:
-                                                    m.high_saturation_ratio !== undefined
-                                                        ? (m.high_saturation_ratio * 100).toFixed(1)
-                                                        : null,
-                                                good: m.high_saturation_ratio <= 0.15,
-                                                unit: "%",
-                                            },
-                                        ].map(
-                                            ({ label, val, good, unit }) =>
-                                                val !== null &&
-                                                val !== undefined && (
-                                                    <div
-                                                        key={label}
-                                                        style={{
-                                                            background: "rgba(255,255,255,0.04)",
-                                                            borderRadius: 8,
-                                                            padding: "8px 12px",
-                                                        }}
-                                                    >
-                                                        <div
-                                                            style={{
-                                                                fontSize: 10,
-                                                                color: "#64748B",
-                                                                textTransform: "uppercase",
-                                                                letterSpacing: "0.05em",
-                                                                marginBottom: 2,
-                                                            }}
-                                                        >
-                                                            {label}
-                                                        </div>
-                                                        <div
-                                                            style={{
-                                                                fontSize: 15,
-                                                                fontWeight: 700,
-                                                                color: good ? "#10b981" : "#f59e0b",
-                                                                fontFamily: "monospace",
-                                                            }}
-                                                        >
-                                                            {val}
-                                                            {unit}
-                                                        </div>
-                                                    </div>
-                                                )
-                                        )}
+                                        <div style={{
+                                            width: "100%",
+                                            maxWidth: "600px",
+                                            borderRadius: 12,
+                                            overflow: "hidden",
+                                            border: "1px solid rgba(255, 255, 255, 0.1)",
+                                            boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.3)",
+                                            background: "#000",
+                                        }}>
+                                            <img
+                                                src={`${API}${item.preview_url}`}
+                                                alt={item.filename}
+                                                style={{ width: "100%", height: "auto", display: "block", maxHeight: "400px", objectFit: "contain" }}
+                                                onError={(e) => {
+                                                    e.target.style.display = "none";
+                                                }}
+                                            />
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -652,6 +593,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
     const [isRunningAI, setIsRunningAI] = useState(false);
     const [isResetting, setIsResetting] = useState(false);
     const [isUpdatingModel, setIsUpdatingModel] = useState(false);
+    const [isReanalyzing, setIsReanalyzing] = useState(false);
     const [statusText, setStatusText] = useState("");
     const [qualityData, setQualityData] = useState(null);
 
@@ -663,7 +605,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
     const totalPanels = allPanels.length;
     const faultyPanels = allPanels.filter((p) => p.total_panel_loss > 0 || p.status === "faulty");
     const totalFaults = faultyPanels.length;
-    const estimatedLoss = faultyPanels.reduce((sum, p) => sum + (Number(p.total_panel_loss || 0) * 0.5), 0);
+    const estimatedLoss = faultyPanels.reduce((sum, p) => sum + Number(p.total_panel_loss || 0), 0);
     const healthyRate = totalPanels > 0 ? ((totalPanels - totalFaults) / totalPanels) * 100 : 0;
 
     const defectCounts = {};
@@ -770,6 +712,23 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
         }
     };
 
+    const handleReanalyze = async () => {
+        if (!window.confirm("Bạn có muốn chạy lại phân tích AI trên các ảnh đã tải lên không? (Kết quả cũ sẽ bị xóa và cập nhật theo thuật toán mới)")) return;
+
+        setIsReanalyzing(true);
+
+        try {
+            await axios.post(`${API}/api/v1/reanalyze`);
+            if (onReset) onReset();
+            // Tự động chạy lại AI
+            await handleRunAI();
+        } catch (error) {
+            alert("Lỗi khi phân tích lại: " + error.message);
+        } finally {
+            setIsReanalyzing(false);
+        }
+    };
+
     const handleSystemReset = async () => {
         if (!window.confirm("Hành động này sẽ xóa sạch dữ liệu và Database. Bạn có chắc chắn?")) return;
 
@@ -786,7 +745,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
         }
     };
 
-    const isAnyLoading = isUploading || isRunningAI || isResetting || isUpdatingModel;
+    const isAnyLoading = isUploading || isRunningAI || isResetting || isUpdatingModel || isReanalyzing;
 
     return (
         <div>
@@ -813,7 +772,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                     flexWrap: "wrap",
                 }}
             >
-                <PageHeader title="Dashboard" subtitle="Solar farm monitoring overview (Real-time AI Data)" />
+                <PageHeader title="Bảng điều khiển" subtitle="Tổng quan giám sát (Dữ liệu AI thời gian thực)" />
 
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "flex-end" }}>
                     <input
@@ -880,7 +839,22 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                             backdropFilter: "blur(4px)",
                         }}
                     >
-                        {isUpdatingModel ? "Đang Update AI..." : "Thay model AI"}
+                        {isUpdatingModel ? "Đang cập nhật AI..." : "Thay model AI"}
+                    </ActionButton>
+
+                    <ActionButton
+                        onClick={handleReanalyze}
+                        disabled={isAnyLoading || totalPanels === 0}
+                        icon={isReanalyzing ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                        style={{
+                            background: "linear-gradient(135deg, #f59e0b, #ef4444)",
+                            color: "white",
+                            border: "none",
+                            boxShadow: totalPanels > 0 ? "0 4px 12px rgba(245,158,11,0.3)" : "none",
+                            opacity: (totalPanels === 0) ? 0.5 : 1,
+                        }}
+                    >
+                        {isReanalyzing ? "Đang chạy lại..." : "Phân tích lại"}
                     </ActionButton>
 
                     <ActionButton
@@ -893,7 +867,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                             border: `1px solid ${(colors.error || colors.danger)}30`,
                         }}
                     >
-                        Reset System
+                        Reset Hệ thống
                     </ActionButton>
                 </div>
             </div>
@@ -908,20 +882,20 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             >
                 <KpiCard
                     icon={<LayoutGrid size={20} />}
-                    label="TỔNG SỐ HÌNH ẢNH"
+                    label="TỔNG SỐ TẤM PIN"
                     value={totalPanels.toLocaleString()}
                     accent={colors.primary}
                 />
                 <KpiCard
                     icon={<AlertCircle size={20} />}
-                    label="FAULTS DETECTED"
+                    label="SỐ LƯỢNG LỖI"
                     value={totalFaults}
                     accent={colors.danger || colors.error}
                 />
                 <KpiCard
-                    icon={<DollarSign size={20} />}
-                    label="ESTIMATED LOSS ($)"
-                    value={`$${estimatedLoss.toFixed(2)}`}
+                    icon={<Zap size={20} />}
+                    label="SẢN LƯỢNG HAO HỤT (W)"
+                    value={`${estimatedLoss.toFixed(2)}W`}
                     accent={colors.warning}
                 />
             </div>
@@ -1001,7 +975,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                                 marginBottom: 4,
                             }}
                         >
-                            AI Analysis Breakdown
+                            Chi tiết phân tích AI
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                             <h3
@@ -1013,7 +987,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                                     letterSpacing: "-0.5px",
                                 }}
                             >
-                                System Stability
+                                Độ ổn định hệ thống
                             </h3>
                             <div
                                 style={{
@@ -1049,7 +1023,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                                     marginBottom: 4,
                                 }}
                             >
-                                Batch Status
+                                Trạng thái xử lý
                             </div>
                             <div
                                 style={{
@@ -1064,7 +1038,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                                     textTransform: "uppercase",
                                 }}
                             >
-                                {totalPanels > 0 ? "Active" : "None"}
+                                {totalPanels > 0 ? "Đang chạy" : "Không có"}
                             </div>
                         </div>
 
@@ -1086,7 +1060,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                                     marginBottom: 4,
                                 }}
                             >
-                                Health Profile
+                                Hồ sơ sức khỏe
                             </div>
                             <div
                                 style={{
@@ -1095,7 +1069,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                                     color: totalPanels > 0 ? (healthyRate > 95 ? "#10b981" : "#d97706") : "#94a3b8",
                                 }}
                             >
-                                {totalPanels > 0 ? (healthyRate > 95 ? "EXCELLENT" : "STABLE") : "NO SCAN"}
+                                {totalPanels > 0 ? (healthyRate > 95 ? "XUẤT SẮC" : "ỔN ĐỊNH") : "CHƯA QUÉT"}
                             </div>
                         </div>
                     </div>
@@ -1112,7 +1086,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                     </div>
 
                     <p style={{ margin: 0, fontSize: 11, color: "#94a3b8", textAlign: "right" }}>
-                        * Data updated from the latest AI scan (Batch ID: {totalPanels > 0 ? "Active" : "None"}).
+                        * Dữ liệu được cập nhật từ lần quét AI gần nhất (ID xử lý: {totalPanels > 0 ? "Đang chạy" : "Không có"}).
                     </p>
                 </div>
 
@@ -1137,7 +1111,7 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                             marginBottom: 8,
                         }}
                     >
-                        Anomaly Distribution
+                        Phân bố bất thường
                     </div>
                     <div style={{ height: 110 }}>
                         <AnomalyBarChart data={chartData} />

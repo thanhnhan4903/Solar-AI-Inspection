@@ -9,11 +9,11 @@ import { BadgePill } from "../../components/ui/BadgePill";
 const IMAGE_BASE_API = "http://127.0.0.1:8000/data/precalib/";
 
 export default function PanelPage({ data, onSelect, onNavigate }) {
-    if (!data || data.length === 0) return <div style={{ textAlign: "center", padding: 100 }}><ActionButton onClick={() => onNavigate("home")}>Please run AI Analytics at Dashboard first</ActionButton></div>;
+    if (!data || data.length === 0) return <div style={{ textAlign: "center", padding: 100 }}><ActionButton onClick={() => onNavigate("home")}>Vui lòng chạy phân tích AI ở Trang chủ trước!</ActionButton></div>;
 
     const [searchQuery, setSearchQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState("all");
-    const [sortBy, setSortBy] = useState("id_asc");
+    const [sortBy, setSortBy] = useState("date_desc");
 
     const allImages = useMemo(() => {
         return data.map((img, index) => {
@@ -38,12 +38,20 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
         }
 
         if (statusFilter !== "all") {
-            result = result.filter(img => img.status === statusFilter);
+            if (statusFilter === "healthy" || statusFilter === "defective") {
+                result = result.filter(img => img.status === statusFilter);
+            } else {
+                result = result.filter(img => {
+                    return img.panels.some(p => p.defects && p.defects.some(d => d.type.toLowerCase().includes(statusFilter)));
+                });
+            }
         }
 
         result.sort((a, b) => {
-            if (sortBy === "id_asc") return a.id.localeCompare(b.id, undefined, { numeric: true });
-            if (sortBy === "id_desc") return b.id.localeCompare(a.id, undefined, { numeric: true });
+            if (sortBy === "date_desc") return new Date(b.upload_date || 0) - new Date(a.upload_date || 0);
+            if (sortBy === "date_asc") return new Date(a.upload_date || 0) - new Date(b.upload_date || 0);
+            if (sortBy === "name_asc") return a.filename.localeCompare(b.filename);
+            if (sortBy === "name_desc") return b.filename.localeCompare(a.filename);
             if (sortBy === "loss_desc") return b.faulty_count - a.faulty_count;
             if (sortBy === "loss_asc") return a.faulty_count - b.faulty_count;
             return 0;
@@ -54,7 +62,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
 
     return (
         <div>
-            <PageHeader title="Image Management" subtitle={`Showing ${filteredAndSortedImages.length} of ${allImages.length} images`} />
+            <PageHeader title="Quản lý hình ảnh" subtitle={`Hiển thị ${filteredAndSortedImages.length} / ${allImages.length} ảnh`} />
             
             {/* Filter & Sort Bar */}
             <div style={{ display: "flex", gap: 16, marginBottom: 24, background: "#fff", padding: 16, borderRadius: 16, border: "1px solid #e2e8f0", alignItems: "center" }}>
@@ -62,7 +70,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                     <Search size={18} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#94a3b8" }} />
                     <input 
                         type="text" 
-                        placeholder="Search image ID or filename..." 
+                        placeholder="Tìm kiếm ID hoặc tên ảnh..." 
                         value={searchQuery}
                         onChange={e => setSearchQuery(e.target.value)}
                         style={{ width: "100%", padding: "10px 10px 10px 38px", borderRadius: 8, border: "1px solid #e2e8f0", outline: "none", fontSize: 14 }}
@@ -76,9 +84,12 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                         onChange={e => setStatusFilter(e.target.value)}
                         style={{ padding: "10px 16px 10px 12px", borderRadius: 8, border: "1px solid #e2e8f0", outline: "none", background: "#f8fafc", cursor: "pointer", fontSize: 14 }}
                     >
-                        <option value="all">All Statuses</option>
-                        <option value="healthy">Healthy</option>
-                        <option value="defective">Defective</option>
+                        <option value="all">Tất cả trạng thái</option>
+                        <option value="healthy">Bình thường</option>
+                        <option value="defective">Có lỗi (Bất kỳ)</option>
+                        <option value="hotspot">Lỗi Hotspot</option>
+                        <option value="crack">Lỗi Nứt (Crack)</option>
+                        <option value="soil">Lỗi Bám bẩn (Soiling)</option>
                     </select>
                 </div>
 
@@ -89,10 +100,12 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                         onChange={e => setSortBy(e.target.value)}
                         style={{ padding: "10px 16px 10px 12px", borderRadius: 8, border: "1px solid #e2e8f0", outline: "none", background: "#f8fafc", cursor: "pointer", fontSize: 14 }}
                     >
-                        <option value="id_asc">ID (A-Z)</option>
-                        <option value="id_desc">ID (Z-A)</option>
-                        <option value="loss_desc">Faults (Descending)</option>
-                        <option value="loss_asc">Faults (Ascending)</option>
+                        <option value="date_desc">Ngày thêm (Mới nhất)</option>
+                        <option value="date_asc">Ngày thêm (Cũ nhất)</option>
+                        <option value="name_asc">Tên (A-Z)</option>
+                        <option value="name_desc">Tên (Z-A)</option>
+                        <option value="loss_desc">Lỗi (Giảm dần)</option>
+                        <option value="loss_asc">Lỗi (Tăng dần)</option>
                     </select>
                 </div>
             </div>
@@ -116,8 +129,8 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                                 <BadgePill type={img.status === "defective" ? "hotspot" : "healthy"} />
                             </div>
                             <div style={{ fontSize: 13, color: "#64748B", display: "flex", justifyContent: "space-between" }}>
-                                <span>{img.total_panels} panels</span>
-                                {img.faulty_count > 0 && <span style={{ color: colors.error, fontWeight: 600 }}>{img.faulty_count} faulty panels</span>}
+                                <span>{img.total_panels} tấm pin</span>
+                                {img.faulty_count > 0 && <span style={{ color: colors.error, fontWeight: 600 }}>{img.faulty_count} tấm pin lỗi</span>}
                             </div>
                         </div>
                     </div>

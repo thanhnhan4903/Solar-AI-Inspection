@@ -4,10 +4,10 @@ import { colors } from "../../constants/theme";
 import epcLogo from "../../assets/epc_solar_logo.png";
 
 const NAV = [
-    { key: "home", icon: BarChart3, label: "Dashboard" },
-    { key: "panel", icon: Grid3X3, label: "Images" },
-    { key: "ops", icon: Map, label: "Solar Operations" },
-    { key: "report", icon: BarChart3, label: "Reports" },
+    { key: "home", icon: BarChart3, label: "Bảng điều khiển" },
+    { key: "panel", icon: Grid3X3, label: "Hình ảnh" },
+    { key: "ops", icon: Map, label: "Bản đồ phân tích" },
+    { key: "report", icon: BarChart3, label: "Báo cáo" },
 ];
 
 export function Sidebar({ onNavigate, onLogout, activePage }) {
@@ -104,7 +104,7 @@ export function Sidebar({ onNavigate, onLogout, activePage }) {
                     marginBottom: 12,
                     letterSpacing: "0.5px",
                 }}>
-                    AI Solar Inspection v2.0
+                    Kiểm Tra Điện Mặt Trời AI v2.0
                 </div>
                 <button
                     onClick={onLogout}
@@ -126,7 +126,7 @@ export function Sidebar({ onNavigate, onLogout, activePage }) {
                     onMouseEnter={e => { e.currentTarget.style.background = "rgba(239,68,68,0.18)"; }}
                     onMouseLeave={e => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
                 >
-                    <LogOut size={16} /> Logout
+                    <LogOut size={16} /> Đăng xuất
                 </button>
             </div>
         </aside>

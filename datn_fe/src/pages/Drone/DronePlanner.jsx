@@ -193,13 +193,13 @@ export default function DronePlanner() {
             <div className="drone-overlay drone-sidebar glass-panel">
                 <div className="flex items-center gap-2 mb-6">
                     <Settings className="text-blue-400" size={24} />
-                    <h2 className="text-xl font-bold uppercase tracking-wider">Mission Plan</h2>
+                    <h2 className="text-xl font-bold uppercase tracking-wider">Kế hoạch nhiệm vụ</h2>
                 </div>
 
                 <div className="space-y-6">
                     <div>
                         <div className="flex justify-between text-sm mb-2">
-                            <span className="text-gray-400">Flight Altitude</span>
+                            <span className="text-gray-400">Cao độ bay</span>
                             <span className="text-blue-400 font-bold">{altitude}m</span>
                         </div>
                         <input type="range" min="10" max="120" value={altitude} onChange={(e) => setAltitude(e.target.value)} />
@@ -207,7 +207,7 @@ export default function DronePlanner() {
 
                     <div>
                         <div className="flex justify-between text-sm mb-2">
-                            <span className="text-gray-400">Flight Speed</span>
+                            <span className="text-gray-400">Tốc độ bay</span>
                             <span className="text-blue-400 font-bold">{speed}m/s</span>
                         </div>
                         <input type="range" min="1" max="15" value={speed} onChange={(e) => setSpeed(e.target.value)} />
@@ -215,7 +215,7 @@ export default function DronePlanner() {
 
                     <div>
                         <div className="flex justify-between text-sm mb-2">
-                            <span className="text-gray-400">Side Overlap</span>
+                            <span className="text-gray-400">Chồng lấp ngang</span>
                             <span className="text-blue-400 font-bold">{overlap}%</span>
                         </div>
                         <input type="range" min="50" max="90" value={overlap} onChange={(e) => setOverlap(e.target.value)} />
@@ -224,25 +224,25 @@ export default function DronePlanner() {
                     <div className="grid grid-cols-2 gap-4 pt-4">
                         <button className="flex flex-col items-center gap-2 p-3 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 transition">
                             <Camera size={20} className="text-blue-400" />
-                            <span className="text-[10px] uppercase font-bold">RGB Mode</span>
+                            <span className="text-[10px] uppercase font-bold">Chế độ RGB</span>
                         </button>
                         <button className="flex flex-col items-center gap-2 p-3 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 transition">
                             <Thermometer size={20} className="text-orange-400" />
-                            <span className="text-[10px] uppercase font-bold">Thermal</span>
+                            <span className="text-[10px] uppercase font-bold">Nhiệt kế</span>
                         </button>
                     </div>
 
                     <div className="pt-6 border-t border-white/10 space-y-3">
                         <div className="flex justify-between text-xs">
-                            <span className="text-gray-400">Total Distance</span>
+                            <span className="text-gray-400">Tổng quãng đường</span>
                             <span className="font-mono">{path.length > 0 ? calculateTotalDistance(path).toFixed(0) : 0} m</span>
                         </div>
                         <div className="flex justify-between text-xs">
-                            <span className="text-gray-400">Est. Flight Time</span>
+                            <span className="text-gray-400">Thời gian bay dự tính</span>
                             <span className="font-mono">{path.length > 0 ? (calculateTotalDistance(path) / speed / 60).toFixed(1) : 0} min</span>
                         </div>
                         <div className="flex justify-between text-xs">
-                            <span className="text-gray-400">Photo Count</span>
+                            <span className="text-gray-400">Số ảnh chụp</span>
                             <span className="font-mono">{path.length * 2}</span>
                         </div>
                     </div>
@@ -258,7 +258,7 @@ export default function DronePlanner() {
                             className={`flex-[2] py-3 px-4 rounded-xl transition flex items-center justify-center gap-2 font-bold text-sm ${path.length > 0 ? 'start-btn' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
                         >
                             <Play size={18} fill="currentColor" />
-                            START MISSION
+                            BẮT ĐẦU NHIỆM VỤ
                         </button>
                     </div>
                 </div>
@@ -274,17 +274,17 @@ export default function DronePlanner() {
                 </div>
                 
                 <div className="hud-item glass-panel">
-                    <div className="hud-label">Speed</div>
+                    <div className="hud-label">Tốc độ</div>
                     <div className="hud-value">{isFlying ? speed : '0.0'}<span className="text-xs ml-1 text-gray-400">m/s</span></div>
                 </div>
 
                 <div className="hud-item glass-panel">
-                    <div className="hud-label">Height</div>
+                    <div className="hud-label">Cao độ</div>
                     <div className="hud-value">{isFlying ? altitude : '0.0'}<span className="text-xs ml-1 text-gray-400">m</span></div>
                 </div>
 
                 <div className="hud-item glass-panel">
-                    <div className="hud-label">Coordinates</div>
+                    <div className="hud-label">Tọa độ</div>
                     <div className="text-[12px] font-mono">
                         10.8231° N<br />
                         106.6297° E
@@ -296,8 +296,8 @@ export default function DronePlanner() {
             {points.length === 0 && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                     <div className="bg-black/60 backdrop-blur-md px-8 py-4 rounded-2xl border border-white/20 text-center animate-pulse">
-                        <p className="text-white font-bold tracking-widest text-sm mb-1">MISSION INITIALIZATION</p>
-                        <p className="text-blue-400 text-xs">CLICK ON MAP TO DRAW SOLAR FARM BOUNDARY</p>
+                        <p className="text-white font-bold tracking-widest text-sm mb-1">KHỚI TẠO NHIỆM VỤ</p>
+                        <p className="text-blue-400 text-xs">CLICK VÀO BẢN ĐỒ ĐỂ VẼ BIÊN GIỚI TRẠI NĂNG LƯỢNG MẶT TRỜI</p>
                     </div>
                 </div>
             )}

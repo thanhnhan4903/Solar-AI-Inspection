@@ -27,24 +27,24 @@ export default function ReportPage({ data, batchId }) {
     const totalFaults = faultyPanels.length;
 
     const handleDownloadPDF = () => {
-        if (!batchId) return alert("Please upload drone data and run AI analysis on the Dashboard first!");
+        if (!batchId) return alert("Vui lòng tải ảnh drone và chạy phân tích AI ở Trang chủ trước!");
         window.open(`http://127.0.0.1:8000/api/v1/download-report/${batchId}`, "_blank");
     };
 
     return (
         <div>
-            <PageHeader title="Inspection Report" subtitle={`Fault summary for Batch #${batchId || 'N/A'}`} />
+            <PageHeader title="Báo Cáo Kiểm Tra" subtitle={`Tóm tắt lỗi - Lô #${batchId || 'N/A'}`} />
             
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 16, marginBottom: 20 }}>
-                <KpiCard icon={<AlertTriangle size={20} />} label="FAULTY IMAGES" value={totalFaults} accent={colors.danger} />
-                <KpiCard icon={<Zap size={20} />} label="Avg. Efficiency Loss" value={`${totalFaults > 0 ? (faultyPanels.reduce((a,b) => a + b.total_panel_loss, 0) / totalFaults).toFixed(1) : 0}%`} accent={colors.warning} />
+                <KpiCard icon={<AlertTriangle size={20} />} label="ẢNH CÓ LỖI" value={totalFaults} accent={colors.danger} />
+                <KpiCard icon={<Zap size={20} />} label="Hao hụt hiệu suất TB" value={`${totalFaults > 0 ? (faultyPanels.reduce((a,b) => a + b.total_panel_loss, 0) / totalFaults).toFixed(1) : 0}%`} accent={colors.warning} />
             </div>
 
             <SolarCard style={{ marginBottom: 20 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingRight: 20 }}>
-                    <CardHeader title="Fault Breakdown" />
+                    <CardHeader title="Phân Loại Lỗi" />
                     <ActionButton onClick={handleDownloadPDF} icon={<Download size={15} />}>
-                        Download Full PDF
+                        Tải Báo Cáo PDF
                     </ActionButton>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: "0 20px 20px" }}>
@@ -52,7 +52,7 @@ export default function ReportPage({ data, batchId }) {
                         <div key={r.label}>
                             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                                 <span style={{ fontSize: 14, fontWeight: 500, color: "#0F172A" }}>{r.label}</span>
-                                <span style={{ fontSize: 14, fontWeight: 700, color: r.color }}>{r.value} images</span>
+                                <span style={{ fontSize: 14, fontWeight: 700, color: r.color }}>{r.value} ảnh</span>
                             </div>
                             <div style={{ height: 8, background: "#F1F5F9", borderRadius: 10, overflow: "hidden" }}>
                                 <div style={{ height: "100%", width: `${totalFaults > 0 ? (r.value / totalFaults) * 100 : 0}%`, background: r.color, borderRadius: 10, transition: "width 1s ease" }} />
@@ -60,9 +60,9 @@ export default function ReportPage({ data, batchId }) {
                         </div>
                     ))}
                     <div style={{ borderTop: "1px solid #F1F5F9", paddingTop: 14, display: "flex", justifyContent: "space-between" }}>
-                        <span style={{ fontWeight: 600, color: "#0F172A" }}>Health Status</span>
+                        <span style={{ fontWeight: 600, color: "#0F172A" }}>Trạng thái sức khỏe</span>
                         <span style={{ fontWeight: 700, color: colors.primary }}>
-                            {allPanels.length > 0 ? ((allPanels.length - totalFaults) / allPanels.length * 100).toFixed(1) : 0}% Healthy
+                            {allPanels.length > 0 ? ((allPanels.length - totalFaults) / allPanels.length * 100).toFixed(1) : 0}% Bình thường
                         </span>
                     </div>
                 </div>

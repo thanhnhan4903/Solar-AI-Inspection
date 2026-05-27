@@ -95,10 +95,14 @@ def refine_panel_polygon_from_mask(mask_data: np.ndarray, img_shape: Tuple[int, 
     if cv2.contourArea(largest) < 100:
         return None
 
-    # minAreaRect → 4 điểm tứ giác xoay
-    rect = cv2.minAreaRect(largest)
-    box_pts = cv2.boxPoints(rect)  # shape (4, 2)
-    return np.int32(box_pts).tolist()
+    # Dùng approxPolyDP để trích xuất viền tấm pin thực tế thay vì hình chữ nhật
+    epsilon = 0.005 * cv2.arcLength(largest, True)
+    approx = cv2.approxPolyDP(largest, epsilon, True)
+    poly = approx.reshape(-1, 2).tolist()
+    
+    if len(poly) < 3:
+        return None
+    return poly
 
 
 def refine_panel_polygon_from_xy(xy_polygon: List, img_shape: Tuple[int, int]) -> Optional[List[List[int]]]:
@@ -244,7 +248,8 @@ def assign_row_col_ids(panels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def localize_defect_inside_panel(
     defect_center: List[float],
-    panel_bbox: List[float]
+    panel_bbox: List[float],
+    panel_polygon: Optional[List[List[float]]] = None
 ) -> Dict[str, Any]:
     """
     Tính vị trí tương đối của lỗi (defect) bên trong tấm pin (panel).
@@ -252,22 +257,68 @@ def localize_defect_inside_panel(
     Args:
         defect_center: [cx, cy] của defect (pixel coords trong ảnh gốc)
         panel_bbox: [x1, y1, x2, y2] của panel (pixel coords trong ảnh gốc)
+        panel_polygon: [[x,y], ...] của panel (pixel coords trong ảnh gốc)
 
     Returns:
         dict với:
             u (float): 0.0 = trái, 1.0 = phải
             v (float): 0.0 = trên, 1.0 = dưới
+            u_long (float): vị trí dọc theo chiều dài của tấm pin (0.0 đến 1.0)
+            v_short (float): vị trí dọc theo chiều rộng của tấm pin (0.0 đến 1.0)
             location_in_panel (str): e.g. "upper-left", "middle-center", "lower-right"
     """
-    x1, y1, x2, y2 = panel_bbox
-    w = max(x2 - x1, 1)
-    h = max(y2 - y1, 1)
-
     cx, cy = defect_center
 
-    # Tọa độ tương đối, clamp vào [0, 1]
-    u = max(0.0, min(1.0, (cx - x1) / w))
-    v = max(0.0, min(1.0, (cy - y1) / h))
+    if not panel_polygon or len(panel_polygon) < 3:
+        x1, y1, x2, y2 = panel_bbox
+        w = max(x2 - x1, 1)
+        h = max(y2 - y1, 1)
+        u = max(0.0, min(1.0, (cx - x1) / w))
+        v = max(0.0, min(1.0, (cy - y1) / h))
+        is_landscape = w >= h
+        u_long = u if is_landscape else v
+        v_short = v if is_landscape else u
+    else:
+        pts = np.array(panel_polygon, dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        
+        # ────────────────────────────────────────────────────────
+        # CÁCH SỬA: Sắp xếp 4 góc theo thứ tự chuẩn centroid góc quay robust
+        # ────────────────────────────────────────────────────────
+        cx_box, cy_box = np.mean(box, axis=0)
+        angles = np.arctan2(box[:, 1] - cy_box, box[:, 0] - cx_box)
+        sorted_box = box[np.argsort(angles)]
+        
+        # Tìm góc Top-Left để roll mảng
+        min_x, min_y = np.min(box, axis=0)
+        distances = np.linalg.norm(sorted_box - [min_x, min_y], axis=1)
+        tl_idx = np.argmin(distances)
+        sorted_box = np.roll(sorted_box, -tl_idx, axis=0)
+        
+        tl, tr, br, bl = sorted_box[0], sorted_box[1], sorted_box[2], sorted_box[3]
+        # ────────────────────────────────────────────────────────
+
+        v_horiz = tr - tl
+        v_vert = bl - tl
+        
+        dot_h = np.dot(v_horiz, v_horiz)
+        dot_v = np.dot(v_vert, v_vert)
+        
+        vc = np.array([cx, cy], dtype=np.float32) - tl
+        
+        u_proj = np.dot(vc, v_horiz) / dot_h if dot_h > 0 else 0.5
+        v_proj = np.dot(vc, v_vert) / dot_v if dot_v > 0 else 0.5
+        
+        u = max(0.0, min(1.0, float(u_proj)))
+        v = max(0.0, min(1.0, float(v_proj)))
+        
+        if dot_h >= dot_v:
+            u_long = u
+            v_short = v
+        else:
+            u_long = v
+            v_short = u
 
     # Phân vùng horizontal
     if u < 0.33:
@@ -288,5 +339,7 @@ def localize_defect_inside_panel(
     return {
         "u": round(u, 3),
         "v": round(v, 3),
+        "u_long": round(u_long, 3),
+        "v_short": round(v_short, 3),
         "location_in_panel": f"{v_zone}-{h_zone}",
     }
