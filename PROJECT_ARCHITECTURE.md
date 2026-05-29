@@ -1,7 +1,7 @@
 # TÀI LIỆU KIẾN TRÚC HỆ THỐNG & CƠ SỞ DỮ LIỆU
 ## Dự án: Hệ thống kiểm tra và phát hiện lỗi tấm pin năng lượng mặt trời bằng AI (Solar AI Inspection)
 
-Tài liệu này mô tả trực quan và chi tiết cấu trúc tổng thể của hệ thống, luồng di chuyển của dữ liệu, và thiết kế các bảng cơ sở dữ liệu.
+Tài liệu này mô tả trực quan và chi tiết cấu trúc tổng thể của hệ thống, luồng di chuyển của dữ liệu, cấu trúc mạng của mô hình AI và thiết kế các bảng cơ sở dữ liệu.
 
 ---
 
@@ -97,7 +97,65 @@ sequenceDiagram
 
 ---
 
-## III. THIẾT KẾ CƠ SỞ DỮ LIỆU (DATABASE SCHEMA)
+## III. THUẬT TOÁN & CẤU TRÚC MÔ HÌNH AI (AI ENGINE PIPELINE)
+
+Hệ thống sử dụng mô hình học sâu **YOLOv8 Instance Segmentation (YOLOv8-seg)** để đồng thời nhận diện vị trí các tấm pin quang điện (`panel`) và phân mảnh các vùng dị thường nhiệt (`defect`). 
+
+### 1. Sơ đồ xử lý của công cụ AI (AI Pipeline Flowchart)
+
+```mermaid
+graph TD
+    %%{init: {'theme': 'neutral'}}%%
+    Input[Ảnh nhiệt màu 8-bit precalib] --> Predict[YOLOv8-seg Inference]
+    Predict --> Split{Tách biệt phân lớp}
+
+    Split -->|Class: panel| RefinePanel[Quy trình xử lý Panel]
+    Split -->|Class: defect| SimplifyDefect[Quy trình xử lý Defect]
+
+    subgraph Panel_Contour_Refinement [Hậu xử lý hình học Panel]
+        RefinePanel --> Level1{Cấp độ 1: Convex Hull + approxPolyDP}
+        Level1 -->|1. Đạt chuẩn hình học và đối xứng| SortCorners[Sắp xếp 4 góc _sort_corners]
+        Level1 -->|2. Thất bại do méo hoặc răng cưa| Level2[Cấp độ 2: Rotated Min Area Rect cv2.minAreaRect]
+        Level2 -->|Đạt chuẩn tứ giác nghiêng| SortCorners
+        Level2 -->|3. Thất bại| Level3[Cấp độ 3: Fallback YOLO Bounding Box]
+        Level3 --> SortCorners
+    end
+
+    subgraph Defect_Polygon_Smoothing [Lọc mượt biên đa giác Lỗi]
+        SimplifyDefect --> RDP[Thuật toán Ramer-Douglas-Peucker]
+        RDP --> Max6[Rút gọn đa giác lỗi về tối đa 6 đỉnh phẳng mịn]
+    end
+
+    SortCorners --> Assign[Thuật toán đè chồng Overlap Area Ratio]
+    Max6 --> Assign
+
+    Assign --> Calculate[Tính toán mã Hàng_Cột R_C + Tỷ lệ % Suy hao]
+    Calculate --> Draw[Vẽ vẽ custom_annotation]
+    Draw --> DB[Lưu Database & Xuất PDF]
+```
+
+### 2. Các ngưỡng tin cậy (Confidence Thresholds)
+*   **Ngưỡng tin cậy của Panel (`PANEL_CONF_THRESHOLD = 0.9`):** Panel được thiết lập ngưỡng tin cậy rất cao nhằm đảm bảo tính cấu trúc hệ thống, tránh nhận diện nhầm các chi tiết ngoại cảnh làm ảnh hưởng tới việc đánh giá lưới pin.
+*   **Ngưỡng tin cậy của Defect (`DEFECT_CONF_THRESHOLD = 0.2`):** Thiết lập ngưỡng tin cậy thấp hơn để giữ bộ lọc nhạy bén tối đa, tránh bỏ sót các điểm hotspot hoặc vết nứt vỡ (cracks) rất nhỏ mới hình thành.
+
+### 3. Danh sách phân lớp lỗi AI (Dataset Classes)
+Mô hình phát hiện và gom nhóm các lớp đối tượng bao gồm:
+*   `panel`: Tấm pin mặt trời (Vật thể cần định vị).
+*   `defect` (Các lớp con gây tổn hao hiệu suất):
+    *   `hotspot_single_cell`: Điểm nóng cục bộ trên một cell pin.
+    *   `hotspot_multi_cell`: Điểm nóng loang rộng trên nhiều cell liền kề.
+    *   `shading`: Bị bóng che (do lá cây, phân chim, dị vật che khuất).
+    *   `soiling`: Bám bụi bẩn tích tụ lâu ngày làm giảm khả năng hấp thụ quang học.
+    *   `crack`: Tấm pin bị nứt vỡ vật lý dẫn tới ngắt mạch.
+
+### 4. Thuật toán hậu xử lý đặc biệt (Specialized Algorithms)
+*   **Thuật toán `refine_panel_contour`:** Ứng dụng quy trình OpenCV 3 cấp độ (Convex Hull, Rotated Rectangle, approxPolyDP) để chỉnh sửa các đa giác răng cưa từ AI trở thành hình tứ giác hoàn hảo khớp phối cảnh (perspective), loại bỏ hoàn toàn hiện tượng lem đường bao sang tấm pin lân cận.
+*   **Thuật toán `_sort_corners`:** Định vị chính xác tọa độ centroid (trung tâm) và tính toán góc quét lượng giác để luôn sắp xếp 4 đỉnh theo thứ tự kim đồng hồ chuẩn: `[Top-Left, Top-Right, Bottom-Right, Bottom-Left]`, làm cơ sở dữ liệu chính xác cho việc tính toán hình học GIS.
+*   **Thuật toán `simplify_defect_polygon`:** Sử dụng bộ đơn giản hóa đa giác Ramer-Douglas-Peucker (RDP) thích ứng, rút gọn các vùng lỗi lởm chởm về tối đa 6 đỉnh để tăng tốc độ hiển thị và đảm bảo tính thẩm mỹ cao trên giao diện GIS Frontend.
+
+---
+
+## IV. THIẾT KẾ CƠ SỞ DỮ LIỆU (DATABASE SCHEMA)
 
 Cơ sở dữ liệu được thiết kế chuẩn hóa để tối ưu hóa việc truy vấn hiệu suất của từng tấm pin mặt trời qua từng đợt bay quét khác nhau.
 
@@ -156,7 +214,7 @@ erDiagram
 
 ---
 
-## IV. ĐẶC TẢ CHI TIẾT CÁC BẢNG DỮ LIỆU (DATA DICTIONARY)
+## V. ĐẶC TẢ CHI TIẾT CÁC BẢNG DỮ LIỆU (DATA DICTIONARY)
 
 > [!TIP]
 > Bảng dữ liệu đã được phân tách rõ ràng thành hai phần: **Thông tin địa lý cố định (`panels`)** và **Thông tin động theo thời gian (`ai_results`, `images`)**. Cách thiết kế này giúp bạn dễ dàng vẽ biểu đồ theo dõi hiệu suất/suy hao của cùng một tấm pin qua nhiều tháng/năm.
@@ -215,7 +273,7 @@ erDiagram
 
 ---
 
-## V. ĐÁNH GIÁ THIẾT KẾ KIẾN TRÚC (ARCHITECTURAL REVIEW)
+## VI. ĐÁNH GIÁ THIẾT KẾ KIẾN TRÚC (ARCHITECTURAL REVIEW)
 
 > [!IMPORTANT]
 > **Điểm cộng của thiết kế:**
