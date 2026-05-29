@@ -130,7 +130,7 @@ graph TD
     Max6 --> Assign
 
     Assign --> Calculate[Tính toán mã Hàng_Cột R_C + Tỷ lệ % Suy hao]
-    Calculate --> Draw[Vẽ vẽ custom_annotation]
+    Calculate --> Draw[Vẽ chú thích ảnh custom_annotation]
     Draw --> DB[Lưu Database & Xuất PDF]
 ```
 
