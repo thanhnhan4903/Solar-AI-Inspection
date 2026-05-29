@@ -26,7 +26,7 @@ def filter_panels_by_area(panels: List[Dict]) -> List[Dict]:
     for i, p in enumerate(panels):
         ratio = areas[i] / median_area
         # Nới lỏng filter (0.7 - 1.3) để không lỡ tay xóa nhầm các panel bị nghiêng/lệch nhỏ
-        if 0.70 <= ratio <= 1.30:
+        if 0.80 <= ratio <= 1.20:
             filtered.append(p)
 
     # Nếu filter quá mạnh (loại > 50%), trả về tất cả để tránh mất data
