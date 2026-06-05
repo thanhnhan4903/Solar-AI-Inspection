@@ -21,6 +21,14 @@ class UploadBatch(Base):
     upload_date = Column(DateTime(timezone=True), server_default=func.now())
     status = Column(String(50), default="Completed") # Processing, Completed, Failed
     
+    project_name = Column(String(255), nullable=True)
+    location = Column(String(255), nullable=True)
+    scan_time = Column(String(255), nullable=True)
+    operator = Column(String(255), nullable=True)
+    device = Column(String(255), nullable=True)
+    scope = Column(String(255), nullable=True)
+    panel_power = Column(Float, default=600.0)
+    
     user = relationship("User", back_populates="batches")
     images = relationship("Image", back_populates="batch", cascade="all, delete-orphan")
     reports = relationship("Report", back_populates="batch", cascade="all, delete-orphan")

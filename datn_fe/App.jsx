@@ -21,6 +21,7 @@ export default function App() {
     // DỮ LIỆU TỪ BACKEND
     const [aiResults, setAiResults] = useState([]); 
     const [currentBatchId, setCurrentBatchId] = useState(null);
+    const [currentPanelPower, setCurrentPanelPower] = useState(600);
 
     const [mapFocusTarget, setMapFocusTarget] = useState(null);
 
@@ -30,6 +31,7 @@ export default function App() {
                 if (res.data && res.data.batch_id) {
                     setAiResults(res.data.data);
                     setCurrentBatchId(res.data.batch_id);
+                    setCurrentPanelPower(res.data.panel_power || 600);
                 }
             }).catch(console.error);
         }
@@ -63,18 +65,18 @@ export default function App() {
                 {page === "home" && (
                     <Home 
                         data={aiResults} 
-                        onAnalysisComplete={(data, batchId) => {
-                            setAiResults(prev => {
-                                const newMap = new Map();
-                                prev.forEach(d => newMap.set(d.filename, d));
-                                data.forEach(d => newMap.set(d.filename, d));
-                                return Array.from(newMap.values());
-                            });
+                        batchId={currentBatchId}
+                        onAnalysisComplete={(data, batchId, panelPower) => {
+                            setAiResults(data);
                             setCurrentBatchId(batchId);
+                            if (panelPower !== undefined && panelPower !== null) {
+                                setCurrentPanelPower(panelPower);
+                            }
                         }}
                         onReset={() => {
                             setAiResults([]);
                             setCurrentBatchId(null);
+                            setCurrentPanelPower(600);
                         }}
                     />
                 )}
@@ -91,6 +93,7 @@ export default function App() {
                     <PanelDetail 
                         panel={selectedPanel} 
                         data={aiResults}
+                        panelPower={currentPanelPower}
                         onSelect={(p) => setSelectedPanel(p)}
                         onBack={() => navigate("panel")} 
                         onViewOnMap={(img) => {
@@ -103,7 +106,7 @@ export default function App() {
 
                 {page === "report" && <ReportPage data={aiResults} batchId={currentBatchId} />}
 
-                {page === "ops" && <UnifiedDashboard data={aiResults} focusTarget={mapFocusTarget} />}
+                {page === "ops" && <UnifiedDashboard data={aiResults} panelPower={currentPanelPower} focusTarget={mapFocusTarget} />}
             </div>
         </div>
     );

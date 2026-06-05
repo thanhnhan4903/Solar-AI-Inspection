@@ -17,6 +17,7 @@ import {
     TrendingUp,
     Zap,
     RefreshCw,
+    Settings,
 } from "lucide-react";
 import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
@@ -93,6 +94,15 @@ function AnomalyBarChart({ data }) {
 // ─────────────────────────────────────────
 function AIProgressModal({ onDone }) {
     const [progress, setProgress] = useState({ current: 0, total: 0, filename: "", step: "Khởi động...", done: false });
+    const [startTime] = useState(Date.now());
+    const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+    React.useEffect(() => {
+        const timer = setInterval(() => {
+            setElapsedSeconds(Math.round((Date.now() - startTime) / 1000));
+        }, 1000);
+        return () => clearInterval(timer);
+    }, [startTime]);
 
     React.useEffect(() => {
         const interval = setInterval(async () => {
@@ -103,11 +113,33 @@ function AIProgressModal({ onDone }) {
                     clearInterval(interval);
                 }
             } catch (_) {}
-        }, 600);
+        }, 2000);
         return () => clearInterval(interval);
     }, []);
 
     const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+
+    // Tính toán thời gian chờ đợi còn lại (ETA) chuyên nghiệp và ổn định
+    let etaText = "Đang tính...";
+    if (progress.total > 0) {
+        if (progress.current === progress.total) {
+            etaText = progress.done ? "Hoàn tất!" : "Đang hoàn tất lưu trữ...";
+        } else {
+            const activeSeconds = Math.max(1, elapsedSeconds - 3);
+            const timePerImage = progress.current > 0 ? (activeSeconds / progress.current) : 2.2;
+            const clampedTime = Math.max(1.5, Math.min(3.5, timePerImage));
+            const remainingImages = progress.total - progress.current;
+            const remainingSeconds = Math.round(clampedTime * remainingImages);
+            
+            if (remainingSeconds <= 0) {
+                etaText = "Sắp hoàn thành...";
+            } else {
+                const m = Math.floor(remainingSeconds / 60);
+                const s = remainingSeconds % 60;
+                etaText = m > 0 ? `${m}m ${s}s` : `${s}s`;
+            }
+        }
+    }
 
     return (
         <div style={{
@@ -182,6 +214,15 @@ function AIProgressModal({ onDone }) {
                             transition: "width 0.5s ease",
                             position: "relative",
                         }} />
+                    </div>
+                    {/* Time metrics */}
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
+                        <span style={{ fontSize: 11, color: "#64748B" }}>
+                            Đã chạy: <b style={{ color: "#CBD5E1" }}>{elapsedSeconds}s</b>
+                        </span>
+                        <span style={{ fontSize: 11, color: "#64748B" }}>
+                            Còn lại (ước tính): <b style={{ color: "#f59e0b" }}>{etaText}</b>
+                        </span>
                     </div>
                 </div>
 
@@ -585,10 +626,215 @@ function QualityReviewModal({ qualityData, onConfirm, onCancel, isRunningAI }) {
     );
 }
 
+
+// ─────────────────────────────────────────
+// Project Metadata & Panel Power Modal
+// ─────────────────────────────────────────
+function ProjectMetadataModal({ 
+    metadata, 
+    onChange, 
+    onSave, 
+    onClose, 
+    isNewProject = false, 
+    isLoading = false 
+}) {
+    return (
+        <div style={{
+            position: "fixed", inset: 0, zIndex: 10005,
+            background: "rgba(2,8,23,0.85)", backdropFilter: "blur(8px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 20,
+        }}>
+            <div style={{
+                background: "linear-gradient(145deg, #0f172a, #1e293b)",
+                border: "1px solid rgba(14,165,233,0.3)",
+                borderRadius: 20,
+                boxShadow: "0 20px 50px rgba(0,0,0,0.5), 0 0 40px rgba(14,165,233,0.1)",
+                width: "min(550px, 94vw)",
+                maxHeight: "90vh",
+                display: "flex", flexDirection: "column", overflow: "hidden"
+            }}>
+                {/* Header */}
+                <div style={{
+                    padding: "20px 24px",
+                    borderBottom: "1px solid rgba(255,255,255,0.06)",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    background: "rgba(14,165,233,0.03)"
+                }}>
+                    <div>
+                        <h3 style={{ margin: 0, color: "#f8fafc", fontSize: 18, fontWeight: 700 }}>
+                            {isNewProject ? "Thông Tin Dự Án Mới" : "Cấu Hình Thông Tin Dự Án"}
+                        </h3>
+                        <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: 12 }}>
+                            {isNewProject ? "Nhập metadata dự án trước khi chạy AI phân tích" : "Chỉnh sửa thông tin dự án & công suất tấm pin"}
+                        </p>
+                    </div>
+                    <button onClick={onClose} style={{
+                        background: "rgba(255,255,255,0.05)", border: "none", color: "#94a3b8",
+                        borderRadius: 8, padding: 6, cursor: "pointer", transition: "0.2s"
+                    }}>
+                        <X size={16} />
+                    </button>
+                </div>
+
+                {/* Content - Inputs */}
+                <div style={{ flex: 1, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
+                    
+                    {/* Tên dự án */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Tên dự án</label>
+                        <input 
+                            type="text" 
+                            value={metadata.projectName || ""} 
+                            onChange={(e) => onChange("projectName", e.target.value)}
+                            placeholder="Ví dụ: Binh Nguyen Solar Farm Phase 1"
+                            style={inputStyle}
+                        />
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        {/* Địa điểm */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Địa điểm</label>
+                            <input 
+                                type="text" 
+                                value={metadata.location || ""} 
+                                onChange={(e) => onChange("location", e.target.value)}
+                                placeholder="Ví dụ: Ninh Thuan, Viet Nam"
+                                style={inputStyle}
+                            />
+                        </div>
+
+                        {/* Thời gian quét */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Thời gian quét</label>
+                            <input 
+                                type="text" 
+                                value={metadata.scanTime || ""} 
+                                onChange={(e) => onChange("scanTime", e.target.value)}
+                                placeholder="Ví dụ: 2026-06-02"
+                                style={inputStyle}
+                            />
+                        </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        {/* Đơn vị quét */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Đơn vị quét</label>
+                            <input 
+                                type="text" 
+                                value={metadata.operator || ""} 
+                                onChange={(e) => onChange("operator", e.target.value)}
+                                placeholder="Ví dụ: EPC Solar JSC"
+                                style={inputStyle}
+                            />
+                        </div>
+
+                        {/* Thiết bị quét */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Thiết bị quét</label>
+                            <input 
+                                type="text" 
+                                value={metadata.device || ""} 
+                                onChange={(e) => onChange("device", e.target.value)}
+                                placeholder="Ví dụ: DJI Matrice 300 RTK"
+                                style={inputStyle}
+                            />
+                        </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 16 }}>
+                        {/* Phạm vi quét */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Phạm vi quét</label>
+                            <input 
+                                type="text" 
+                                value={metadata.scope || ""} 
+                                onChange={(e) => onChange("scope", e.target.value)}
+                                placeholder="Ví dụ: Inverter Block 01 - 04"
+                                style={inputStyle}
+                            />
+                        </div>
+
+                        {/* Công suất tấm pin */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#0ea5e9" }}>Công suất tấm pin (W)</label>
+                            <input 
+                                type="text" 
+                                value={metadata.panelPower === undefined || metadata.panelPower === null ? "" : metadata.panelPower} 
+                                onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === "" || /^[0-9]*\.?[0-9]*$/.test(val)) {
+                                        onChange("panelPower", val);
+                                    }
+                                }}
+                                placeholder="Mặc định: 600"
+                                style={{
+                                    ...inputStyle,
+                                    border: "1px solid rgba(14,165,233,0.4)",
+                                    color: "#38bdf8",
+                                    fontWeight: 700
+                                }}
+                            />
+                        </div>
+                    </div>
+                </div>
+
+                {/* Footer Buttons */}
+                <div style={{
+                    padding: "16px 24px",
+                    borderTop: "1px solid rgba(255,255,255,0.06)",
+                    display: "flex", justifyContent: "flex-end", gap: 12,
+                    background: "rgba(15,23,42,0.4)"
+                }}>
+                    <button 
+                        onClick={onClose} 
+                        style={{
+                            padding: "9px 18px", borderRadius: 8, background: "transparent",
+                            border: "1px solid rgba(255,255,255,0.15)", color: "#94a3b8",
+                            fontSize: 13, fontWeight: 600, cursor: "pointer"
+                        }}
+                    >
+                        {isNewProject ? "Bỏ qua & Đóng" : "Đóng"}
+                    </button>
+                    <button 
+                        onClick={onSave} 
+                        disabled={isLoading}
+                        style={{
+                            padding: "9px 24px", borderRadius: 8,
+                            background: "linear-gradient(135deg, #0ea5e9, #6366f1)",
+                            border: "none", color: "#fff", fontSize: 13, fontWeight: 700,
+                            cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+                            boxShadow: "0 4px 15px rgba(14,165,233,0.3)"
+                        }}
+                    >
+                        {isLoading ? <Loader2 size={14} className="animate-spin" /> : null}
+                        {isNewProject ? "Lưu & Chạy AI Phân Tích" : "Lưu Thay Đổi"}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+const inputStyle = {
+    background: "rgba(2, 6, 23, 0.4)",
+    border: "1px solid rgba(255, 255, 255, 0.08)",
+    borderRadius: 10,
+    color: "#f8fafc",
+    padding: "10px 14px",
+    fontSize: 13,
+    outline: "none",
+    transition: "border-color 0.2s",
+    boxSizing: "border-box",
+    width: "100%"
+};
+
 // ─────────────────────────────────────────
 // Home Page
 // ─────────────────────────────────────────
-export default function Home({ data, onAnalysisComplete, onReset }) {
+export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
     const [isUploading, setIsUploading] = useState(false);
     const [isRunningAI, setIsRunningAI] = useState(false);
     const [isResetting, setIsResetting] = useState(false);
@@ -596,6 +842,18 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
     const [isReanalyzing, setIsReanalyzing] = useState(false);
     const [statusText, setStatusText] = useState("");
     const [qualityData, setQualityData] = useState(null);
+
+    const [projectMetadata, setProjectMetadata] = useState({
+        projectName: "",
+        location: "",
+        scanTime: "",
+        operator: "",
+        device: "",
+        scope: "",
+        panelPower: 600
+    });
+    const [showMetadataModal, setShowMetadataModal] = useState(false);
+    const [isSavingMetadata, setIsSavingMetadata] = useState(false);
 
     const fileInputRef = useRef(null);
     const folderInputRef = useRef(null);
@@ -621,6 +879,87 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
         .slice(0, 8)
         .map(([label, value]) => ({ label, value }));
 
+    // Tự động tải Metadata khi batchId thay đổi
+    React.useEffect(() => {
+        const loadMetadata = async () => {
+            if (batchId) {
+                try {
+                    const res = await axios.get(`${API}/api/v1/latest-batch`);
+                    if (res.data) {
+                        setProjectMetadata({
+                            projectName: res.data.project_name || "",
+                            location: res.data.location || "",
+                            scanTime: res.data.scan_time || "",
+                            operator: res.data.operator || "",
+                            device: res.data.device || "",
+                            scope: res.data.scope || "",
+                            panelPower: res.data.panel_power || 600
+                        });
+                    }
+                } catch (e) {
+                    console.error("Error loading project metadata:", e);
+                }
+            } else {
+                setProjectMetadata({
+                    projectName: "",
+                    location: "",
+                    scanTime: "",
+                    operator: "",
+                    device: "",
+                    scope: "",
+                    panelPower: 600
+                });
+            }
+        };
+        loadMetadata();
+    }, [batchId]);
+
+    const handleMetadataChange = (key, value) => {
+        setProjectMetadata(prev => ({
+            ...prev,
+            [key]: value
+        }));
+    };
+
+    const handleSaveMetadata = async () => {
+        if (!batchId) {
+            // Đây là đợt tải dự án mới, lưu tạm vào state rồi đóng để chạy AI
+            setShowMetadataModal(false);
+            await handleRunAI();
+            return;
+        }
+
+        setIsSavingMetadata(true);
+        try {
+            const res = await axios.post(`${API}/api/v1/update-batch-metadata`, {
+                batch_id: batchId,
+                project_name: projectMetadata.projectName,
+                location: projectMetadata.location,
+                scan_time: projectMetadata.scanTime,
+                operator: projectMetadata.operator,
+                device: projectMetadata.device,
+                scope: projectMetadata.scope,
+                panel_power: parseFloat(projectMetadata.panelPower) || 600
+            });
+            
+            if (res.data.error) {
+                alert("Lỗi: " + res.data.error);
+            } else {
+                alert("✅ Cập nhật cấu hình và tính toán lại hao hụt thành công!");
+                setShowMetadataModal(false);
+                // Cập nhật lại state chính của React
+                const latestRes = await axios.get(`${API}/api/v1/latest-batch`);
+                if (latestRes.data && onAnalysisComplete) {
+                    onAnalysisComplete(latestRes.data.data, latestRes.data.batch_id, latestRes.data.panel_power);
+                }
+            }
+        } catch (e) {
+            alert("Lỗi khi cập nhật thông tin: " + (e.response?.data?.detail || e.message));
+        } finally {
+            setIsSavingMetadata(false);
+        }
+    };
+
     // Bước 1: Upload + tiền xử lý, sau đó mở modal quality review
     const handleUploadFiles = async (e) => {
         const files = Array.from(e.target.files || []);
@@ -639,6 +978,8 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
             const res = await axios.get(`${API}/api/v1/process-thermal`);
 
             setQualityData(res.data);
+            // Mở popup nhập metadata dự án trước khi bấm chạy AI!
+            setShowMetadataModal(true);
         } catch (error) {
             alert("Lỗi: " + (error.response?.data?.detail || error.message));
         } finally {
@@ -662,13 +1003,23 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                 analyzeForm.append("user_id", user.id);
             }
 
+            // Gửi các trường metadata của dự án kèm theo
+            analyzeForm.append("project_name", projectMetadata.projectName);
+            analyzeForm.append("location", projectMetadata.location);
+            analyzeForm.append("scan_time", projectMetadata.scanTime);
+            analyzeForm.append("operator", projectMetadata.operator);
+            analyzeForm.append("device", projectMetadata.device);
+            analyzeForm.append("scope", projectMetadata.scope);
+            analyzeForm.append("panel_power", projectMetadata.panelPower);
+
             const res = await axios.post(`${API}/api/v1/analyze-all`, analyzeForm);
 
             if (onAnalysisComplete) {
-                onAnalysisComplete(res.data.data, res.data.batch_id);
+                onAnalysisComplete(res.data.data, res.data.batch_id, parseFloat(projectMetadata.panelPower) || 600);
             }
 
             setQualityData(null);
+            setShowMetadataModal(false);
             alert(`✅ Thành công! Đã phân tích xong ${res.data.data.length} ảnh.`);
         } catch (error) {
             alert("Lỗi AI: " + (error.response?.data?.detail || error.message));
@@ -762,6 +1113,18 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                 />
             )}
 
+            {/* Project Metadata modal — nhập/chỉnh sửa thông tin dự án */}
+            {showMetadataModal && (
+                <ProjectMetadataModal
+                    metadata={projectMetadata}
+                    onChange={handleMetadataChange}
+                    onSave={handleSaveMetadata}
+                    onClose={() => setShowMetadataModal(false)}
+                    isNewProject={!batchId}
+                    isLoading={isSavingMetadata}
+                />
+            )}
+
             <div
                 style={{
                     display: "flex",
@@ -818,6 +1181,20 @@ export default function Home({ data, onAnalysisComplete, onReset }) {
                         }}
                     >
                         {isUploading ? statusText : "Tải Thư Mục"}
+                    </ActionButton>
+
+                    <ActionButton
+                        onClick={() => setShowMetadataModal(true)}
+                        disabled={isAnyLoading}
+                        icon={<Settings size={16} />}
+                        style={{
+                            background: "linear-gradient(135deg, #475569, #1e293b)",
+                            color: "white",
+                            border: "none",
+                            boxShadow: "0 4px 12px rgba(30,41,59,0.3)",
+                        }}
+                    >
+                        Thông tin dự án
                     </ActionButton>
 
                     <input

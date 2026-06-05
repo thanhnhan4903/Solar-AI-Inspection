@@ -80,7 +80,7 @@ function isPanelFaulty(p) {
     return p.status === "faulty" || p.total_panel_loss > 0;
 }
 
-export default function PanelDetail({ panel: image, data, onSelect, onBack, onViewOnMap }) {
+export default function PanelDetail({ panel: image, data, panelPower = 600, onSelect, onBack, onViewOnMap }) {
     if (!image) return null;
 
     const [hoveredPanel, setHoveredPanel] = useState(null);
@@ -487,8 +487,8 @@ export default function PanelDetail({ panel: image, data, onSelect, onBack, onVi
                                     </h4>
                                     <div style={{ fontSize: 22, fontWeight: "bold", color: isPanelFaulty(hoveredPanel) ? colors.error : colors.success }}>
                                         {isPanelFaulty(hoveredPanel)
-                                            ? `Hao hụt: ${(hoveredPanel.total_panel_loss || 0).toFixed(0)} W`
-                                            : "Hoạt động tối ưu (600 W)"
+                                            ? `Hao hụt: ${Number(hoveredPanel.total_panel_loss || 0).toFixed(0)} W`
+                                            : `Hoạt động tối ưu (${Number(panelPower).toFixed(0)} W)`
                                         }
                                     </div>
                                     {isPanelFaulty(hoveredPanel) && hoveredPanel.recommendation && (

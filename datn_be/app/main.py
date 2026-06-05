@@ -5,7 +5,7 @@ import shutil
 import uuid
 import logging
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Depends, Form
+from fastapi import FastAPI, UploadFile, File, Depends, Form, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +40,25 @@ logger = logging.getLogger("solar_ai")
 
 # Khởi tạo bảng Database
 models.Base.metadata.create_all(bind=engine)
+
+# Tự động di chuyển (migration) thêm cột mới vào bảng upload_batches nếu chưa có
+with engine.connect() as conn:
+    for col_name, col_type in [
+        ("project_name", "VARCHAR(255)"),
+        ("location", "VARCHAR(255)"),
+        ("scan_time", "VARCHAR(255)"),
+        ("operator", "VARCHAR(255)"),
+        ("device", "VARCHAR(255)"),
+        ("scope", "VARCHAR(255)"),
+        ("panel_power", "FLOAT DEFAULT 600.0"),
+    ]:
+        try:
+            conn.execute(text(f"ALTER TABLE upload_batches ADD COLUMN {col_name} {col_type}"))
+            conn.commit()
+            logger.info(f"Da them cot '{col_name}' vao bang upload_batches thanh cong.")
+        except Exception:
+            # Cột đã tồn tại, bỏ qua
+            pass
 
 app = FastAPI(title="AI Solar Inspection API")
 
@@ -111,8 +130,10 @@ async def login(req: LoginRequest, db: Session = Depends(get_db)):
 async def get_latest_batch(db: Session = Depends(get_db)):
     latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
     
-    # Lấy tất cả ảnh thay vì chỉ ảnh của đợt mới nhất
-    images = db.query(models.Image).all()
+    # Lấy ảnh thuộc đợt mới nhất
+    images = []
+    if latest_batch:
+        images = db.query(models.Image).filter(models.Image.batch_id == latest_batch.id).all()
     
     # Ghép cặp Thermal và RGB trên thư mục data/raw để có thông tin chính xác
     pairs = RegistrationService.match_thermal_rgb("data/raw")
@@ -125,22 +146,59 @@ async def get_latest_batch(db: Session = Depends(get_db)):
         panels_data = []
         for r in ai_results:
             panel_info = db.query(models.Panel).filter(models.Panel.id == r.panel_id).first()
+            if not panel_info:
+                continue
             
+            panel_detail = {}
             defects_list = []
             if r.defect_type and r.defect_type != "Healthy":
+                if r.defect_type.startswith("{"):
+                    try:
+                        import json
+                        panel_detail = json.loads(r.defect_type)
+                        defects_list = panel_detail.get("defects", [])
+                    except Exception:
+                        pass
+                elif r.defect_type.startswith("["):
+                    try:
+                        import json
+                        defects_list = json.loads(r.defect_type)
+                    except Exception:
+                        pass
+            
+            if not defects_list and r.defect_type and r.defect_type != "Healthy" and not r.defect_type.startswith("{") and not r.defect_type.startswith("["):
                 defect_types = r.defect_type.split(", ")
                 for dt in defect_types:
                     defects_list.append({"type": dt, "class_name": dt})
-            
+
+            # Parse row and col
+            import re
+            row_val, col_val = 0, 0
+            if panel_info.local_id:
+                m = re.match(r"R(\d+)_C(\d+)", panel_info.local_id)
+                if m:
+                    row_val = int(m.group(1))
+                    col_val = int(m.group(2))
+
             panels_data.append({
                 "local_id": panel_info.local_id,
+                "row": panel_detail.get("row", row_val),
+                "col": panel_detail.get("col", col_val),
                 "x": panel_info.x_coord,
                 "y": panel_info.y_coord,
+                "center": [panel_info.x_coord, panel_info.y_coord],
+                "bbox": panel_detail.get("bbox", []),
+                "box": panel_detail.get("bbox", []),
+                "polygon": panel_detail.get("polygon", []),
                 "total_panel_loss": r.loss_pct,
                 "total_defect_area_ratio_percent": r.loss_pct,
                 "confidence": r.confidence,
                 "defects": defects_list,
                 "status": "faulty" if defects_list else "healthy",
+                "worst_severity": panel_detail.get("worst_severity", "healthy"),
+                "recommendation": panel_detail.get("recommendation", "Không cần xử lý"),
+                "gps_lat": panel_detail.get("gps_lat"),
+                "gps_lng": panel_detail.get("gps_lng"),
             })
             
         final_report.append({
@@ -154,6 +212,13 @@ async def get_latest_batch(db: Session = Depends(get_db)):
         
     return {
         "batch_id": latest_batch.id if latest_batch else None,
+        "project_name": latest_batch.project_name if latest_batch else None,
+        "location": latest_batch.location if latest_batch else None,
+        "scan_time": latest_batch.scan_time if latest_batch else None,
+        "operator": latest_batch.operator if latest_batch else None,
+        "device": latest_batch.device if latest_batch else None,
+        "scope": latest_batch.scope if latest_batch else None,
+        "panel_power": latest_batch.panel_power if latest_batch else 600.0,
         "data": final_report
     }
 
@@ -278,16 +343,75 @@ async def match_images():
 # --- POLL TIẾN TRÌNH AI ---
 # ================================
 @app.get("/api/v1/analyze-progress")
-async def get_analyze_progress():
+def get_analyze_progress():
     """Trả về trạng thái tiến trình phân tích AI hiện tại."""
     return dict(progress_state)
+
+
+def get_gps_metadata(img_path):
+    """
+    Trích xuất tọa độ GPS Latitude, Longitude từ EXIF metadata của ảnh RGB.
+    """
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS, GPSTAGS
+        
+        image = Image.open(img_path)
+        exif = image._getexif()
+        if not exif:
+            return None
+            
+        gps_info = {}
+        for tag, value in exif.items():
+            decoded = TAGS.get(tag, tag)
+            if decoded == "GPSInfo":
+                for t in value:
+                    sub_decoded = GPSTAGS.get(t, t)
+                    gps_info[sub_decoded] = value[t]
+                    
+        if not gps_info:
+            return None
+            
+        def _to_degrees(value):
+            d = float(value[0])
+            m = float(value[1])
+            s = float(value[2])
+            return d + (m / 60.0) + (s / 3600.0)
+            
+        lat_value = gps_info.get("GPSLatitude")
+        lat_ref = gps_info.get("GPSLatitudeRef")
+        lng_value = gps_info.get("GPSLongitude")
+        lng_ref = gps_info.get("GPSLongitudeRef")
+        
+        if lat_value and lat_ref and lng_value and lng_ref:
+            lat = _to_degrees(lat_value)
+            if lat_ref != "N":
+                lat = -lat
+            lng = _to_degrees(lng_value)
+            if lng_ref != "E":
+                lng = -lng
+            return lat, lng
+    except Exception as e:
+        logger.warning(f"Error reading GPS EXIF: {e}")
+    return None
 
 
 # ================================
 # --- KHỐI 4-5: CHẠY AI + PHÂN TÍCH + LƯU DB ---
 # ================================
 @app.post("/api/v1/analyze-all")
-def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
+def start_analysis(
+    background_tasks: BackgroundTasks,
+    user_id: int = Form(None), 
+    project_name: str = Form(None),
+    location: str = Form(None),
+    scan_time: str = Form(None),
+    operator: str = Form(None),
+    device: str = Form(None),
+    scope: str = Form(None),
+    panel_power: float = Form(600.0),
+    db: Session = Depends(get_db)
+):
     """
     Pipeline phân tích hoàn chỉnh:
     1. Chạy YOLOv8-seg trên ảnh precalib
@@ -338,7 +462,17 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
     progress_state["step"] = "Khởi động..."
 
     # Tạo Batch mới trong DB
-    new_batch = models.UploadBatch(name="Đợt kiểm tra tự động", user_id=user_id)
+    new_batch = models.UploadBatch(
+        name=project_name or "Đợt kiểm tra tự động", 
+        user_id=user_id,
+        project_name=project_name,
+        location=location,
+        scan_time=scan_time,
+        operator=operator,
+        device=device,
+        scope=scope,
+        panel_power=panel_power or 600.0
+    )
     db.add(new_batch)
     db.commit()
     db.refresh(new_batch)
@@ -375,7 +509,7 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
             p["id"] = str(uuid.uuid4())
 
         # ── BƯỚC 3: Gán defect vào panel bằng overlap area ──
-        panels_with_defects, unassigned = assign_defects_to_panels(panels_raw, defects_raw)
+        panels_with_defects, unassigned = assign_defects_to_panels(panels_raw, defects_raw, panel_power, image_path=img_path)
 
         logger.info(
             f"  → Defect assigned: {sum(len(p['defects']) for p in panels_with_defects)}, "
@@ -384,6 +518,19 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
 
         # ── BƯỚC 4: Gán hàng/cột (R01_C03) ──
         final_panels = assign_row_col_ids(panels_with_defects)
+
+        # Lấy GPS từ EXIF của ảnh RGB ghép cặp
+        lat_exif, lng_exif = None, None
+        rgb_filename = thermal_to_rgb.get(filename)
+        if rgb_filename:
+            rgb_path = os.path.join(raw_dir, rgb_filename)
+            gps_coords = get_gps_metadata(rgb_path)
+            if gps_coords:
+                lat_exif, lng_exif = gps_coords
+
+        for p in final_panels:
+            p["gps_lat"] = lat_exif
+            p["gps_lng"] = lng_exif
 
         n_faulty = sum(1 for p in final_panels if p["status"] == "faulty")
         n_healthy = sum(1 for p in final_panels if p["status"] == "healthy")
@@ -411,8 +558,7 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
             path=os.path.join(results_dir, filename).replace("\\", "/")
         )
         db.add(db_image)
-        db.commit()
-        db.refresh(db_image)
+        db.flush()
 
         # ── BƯỚC 7: Lưu panel và AI Result vào DB ──
         for p in final_panels:
@@ -427,15 +573,27 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
                     y_coord=center[1],
                 )
                 db.add(db_panel)
-                db.commit()
-                db.refresh(db_panel)
+                db.flush()
             else:
                 db_panel.x_coord = center[0]
                 db_panel.y_coord = center[1]
-                db.commit()
 
-            # Defect types string
-            defect_str = ", ".join(list(set([d["class_name"] for d in p["defects"]]))) if p["defects"] else "Healthy"
+            # Defect types string or JSON representing the panel data
+            import json
+            defect_str = json.dumps({
+                "bbox": _to_list(p.get("bbox") or p.get("box", [])),
+                "polygon": _to_list(p.get("polygon", [])),
+                "defects": _serialize_defects(p.get("defects", [])),
+                "row": p.get("row", 0),
+                "col": p.get("col", 0),
+                "status": p.get("status", "healthy"),
+                "total_panel_loss": p.get("total_panel_loss", 0.0),
+                "worst_severity": p.get("worst_severity", "healthy"),
+                "recommendation": p.get("recommendation", "Không cần xử lý"),
+                "confidence": p.get("confidence", 0.0),
+                "gps_lat": lat_exif,
+                "gps_lng": lng_exif,
+            })
 
             db_ai_result = models.AiResult(
                 image_id=db_image.id,
@@ -457,14 +615,14 @@ def start_analysis(user_id: int = Form(None), db: Session = Depends(get_db)):
 
     db.commit()
 
-    # ── Auto-generate report PDF ──
+    # ── Auto-generate report PDF (Chạy ngầm dưới nền) ──
     ai_results = db.query(models.AiResult).join(models.Image).filter(
         models.Image.batch_id == new_batch.id
     ).all()
     if ai_results:
         report_name = f"Report_Batch_{new_batch.id}.pdf"
         report_path = os.path.join("data", report_name)
-        ReportGenerator.generate_inspection_report(new_batch.id, ai_results, report_path)
+        background_tasks.add_task(ReportGenerator.generate_inspection_report, new_batch.id, ai_results, report_path)
         db_report = models.Report(batch_id=new_batch.id, file_path=report_path)
         db.add(db_report)
         db.commit()
@@ -509,6 +667,9 @@ def _serialize_panels(panels: List) -> List:
             "worst_severity":   p.get("worst_severity", "healthy"),
             "recommendation":   p.get("recommendation", "No action"),
             "main_defect_class": p.get("main_defect_class"),
+            # GPS EXIF
+            "gps_lat":          p.get("gps_lat"),
+            "gps_lng":          p.get("gps_lng"),
             # Backward compat cho frontend cũ
             "total_panel_loss": p.get("total_panel_loss", 0.0),
             "x": p.get("center", [0, 0])[0],
@@ -606,7 +767,9 @@ async def get_panel_image(filename: str, x1: float, y1: float, x2: float, y2: fl
     # Dùng ảnh precalib — cùng loại với ảnh dùng cho AI inference
     img_path = os.path.join("data/precalib", filename)
     if not os.path.exists(img_path):
-        return {"error": "Image not found"}
+        img_path = os.path.join("data/raw", filename)
+        if not os.path.exists(img_path):
+            return {"error": "Image not found"}
         
     img = cv2.imread(img_path)
     if img is None:
@@ -776,3 +939,122 @@ async def reset_system(db: Session = Depends(get_db)):
         return {"error": str(e)}
 
     return {"message": "Hệ thống đã được làm mới hoàn toàn!"}
+
+
+# ================================
+# --- CẬP NHẬT THÔNG TIN DỰ ÁN ---
+# ================================
+class UpdateBatchMetadataRequest(BaseModel):
+    batch_id: int
+    project_name: Optional[str] = None
+    location: Optional[str] = None
+    scan_time: Optional[str] = None
+    operator: Optional[str] = None
+    device: Optional[str] = None
+    scope: Optional[str] = None
+    panel_power: Optional[float] = 600.0
+
+@app.post("/api/v1/update-batch-metadata")
+def update_batch_metadata(req: UpdateBatchMetadataRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    batch = db.query(models.UploadBatch).filter(models.UploadBatch.id == req.batch_id).first()
+    if not batch:
+        return {"error": "Không tìm thấy đợt kiểm tra này"}
+    
+    # Cập nhật thông tin dự án
+    batch.project_name = req.project_name
+    batch.location = req.location
+    batch.scan_time = req.scan_time
+    batch.operator = req.operator
+    batch.device = req.device
+    batch.scope = req.scope
+    
+    new_power = req.panel_power if req.panel_power is not None else 600.0
+    batch.panel_power = new_power
+    
+    db.commit()
+    
+    # Tính toán lại công suất tổn thất nếu công suất tấm pin thay đổi
+    import json
+    ai_results = db.query(models.AiResult).join(models.Image).filter(models.Image.batch_id == batch.id).all()
+    for r in ai_results:
+        if r.defect_type and r.defect_type != "Healthy":
+            try:
+                panel_detail = json.loads(r.defect_type)
+                
+                # Chỉ tính lại hao hụt nếu panel này bị lỗi
+                if panel_detail.get("status") == "healthy":
+                    panel_detail["total_panel_loss"] = 0.0
+                    panel_detail["power_loss_w"] = 0.0
+                    r.loss_pct = 0.0
+                    r.defect_type = json.dumps(panel_detail)
+                    continue
+                
+                # Tính lại sản lượng hao hụt theo logic chia tấm pin làm 3 phần dọc
+                bbox = panel_detail.get("bbox") or panel_detail.get("box", [0, 0, 0, 0])
+                defects = panel_detail.get("defects", [])
+                
+                affected_parts = set()
+                has_crack = False
+                has_shading = False
+                
+                for d in defects:
+                    cls_name = d.get("class_name", "")
+                    if cls_name == "crack":
+                        has_crack = True
+                    elif cls_name == "shading":
+                        has_shading = True
+                    elif cls_name in ["hotspot_single_cell", "hotspot_multi_cell"]:
+                        pos = d.get("relative_position", {})
+                        v = pos.get("v", 0.5)
+                        part_idx = min(2, int(v * 3))
+                        affected_parts.add(part_idx)
+                        
+                if has_crack:
+                    power_loss_w = new_power
+                else:
+                    power_loss_w = len(affected_parts) * (new_power / 3.0)
+                
+                # Cập nhật lại các trường trong panel_detail JSON
+                panel_detail["total_panel_loss"] = round(power_loss_w, 2)
+                panel_detail["power_loss_w"] = round(power_loss_w, 2)
+                
+                # Cập nhật lại db ai_result
+                r.defect_type = json.dumps(panel_detail)
+                r.loss_pct = round(power_loss_w, 2)
+            except Exception as e:
+                logger.warning(f"Lỗi tính lại power loss cho AiResult {r.id}: {e}")
+                
+    db.commit()
+    
+    # Sinh lại tệp báo cáo PDF (Chạy bất đồng bộ dưới nền)
+    if ai_results:
+        report_name = f"Report_Batch_{batch.id}.pdf"
+        report_path = os.path.join("data", report_name)
+        # Xóa báo cáo cũ
+        if os.path.exists(report_path):
+            try:
+                os.remove(report_path)
+            except Exception:
+                pass
+        
+        # Đưa việc sinh báo cáo vào hàng đợi nền
+        background_tasks.add_task(ReportGenerator.generate_inspection_report, batch.id, ai_results, report_path)
+        
+        db_report = db.query(models.Report).filter(models.Report.batch_id == batch.id).first()
+        if not db_report:
+            db_report = models.Report(batch_id=batch.id, file_path=report_path)
+            db.add(db_report)
+        else:
+            db_report.file_path = report_path
+        db.commit()
+        
+    return {
+        "message": "Cập nhật thông tin dự án thành công!",
+        "project_name": batch.project_name,
+        "location": batch.location,
+        "scan_time": batch.scan_time,
+        "operator": batch.operator,
+        "device": batch.device,
+        "scope": batch.scope,
+        "panel_power": batch.panel_power
+    }

@@ -66,10 +66,15 @@ function FitBounds({ gridData, focusTarget }) {
  * Trục y leaflet: dương lên trên → yOffset là số âm (row * -imgH).
  */
 function pixelPolyToLeaflet(polygon, xOffset, yOffset) {
-    return polygon.map(([px, py]) => [yOffset - py, xOffset + px]);
+    if (!polygon) return [];
+    return polygon.map(([px, py]) => {
+        const x = Number(px) || 0;
+        const y = Number(py) || 0;
+        return [yOffset - y, xOffset + x];
+    });
 }
 
-export default function UnifiedDashboard({ data, focusTarget }) {
+export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }) {
     const PANEL_RATED_POWER_W = 400; // Công suất định mức tấm pin 400W
     const translateDefect = (cls) => {
         if (!cls) return "Điểm bất thường";
@@ -113,8 +118,12 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                 if (p.polygon && p.polygon.length >= 3) {
                     leafletPolygon = pixelPolyToLeaflet(p.polygon, xOffset, yOffset);
                 } else {
-                    // Fallback: tạo polygon từ bbox
-                    const [bx1, by1, bx2, by2] = p.bbox || p.box || [0, 0, 0, 0];
+                    // Fallback: tạo polygon từ bbox với phòng vệ tối đa
+                    const bbox = p.bbox && p.bbox.length === 4 ? p.bbox : (p.box && p.box.length === 4 ? p.box : [0, 0, 0, 0]);
+                    const bx1 = Number(bbox[0]) || 0;
+                    const by1 = Number(bbox[1]) || 0;
+                    const bx2 = Number(bbox[2]) || 0;
+                    const by2 = Number(bbox[3]) || 0;
                     leafletPolygon = [
                         [yOffset - by1, xOffset + bx1],
                         [yOffset - by1, xOffset + bx2],
@@ -257,7 +266,7 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                                 <div className="text-xs">
                                     {isHealthy
                                         ? "Bình thường"
-                                        : `${translateDefect(p.main_defect_class)} (-${(p.total_panel_loss || 0).toFixed(1)} W)`
+                                        : `${translateDefect(p.main_defect_class)} (-${Number(p.total_panel_loss || 0).toFixed(1)} W)`
                                     }
                                 </div>
                                 {p.worst_severity && !isHealthy && (
@@ -391,10 +400,10 @@ export default function UnifiedDashboard({ data, focusTarget }) {
                             </span>
                             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                                 <span style={{ color: themeColor, fontSize: 32, fontWeight: 900, textShadow: glowShadow, letterSpacing: "-0.5px" }}>
-                                    -{activePanel.total_panel_loss.toFixed(1)} W
+                                    -{Number(activePanel.total_panel_loss || 0).toFixed(1)} W
                                 </span>
                                 <span style={{ color: "#cbd5e1", fontSize: 14, fontWeight: 500 }}>
-                                    / 600.0 W định mức
+                                    / {Number(panelPower).toFixed(1)} W định mức
                                 </span>
                             </div>
                             <span style={{ color: "#64748b", fontSize: 10, fontStyle: "italic", marginTop: 2 }}>

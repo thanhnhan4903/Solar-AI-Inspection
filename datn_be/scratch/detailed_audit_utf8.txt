@@ -1,0 +1,2014 @@
+
+======================================================================
+IMAGE: DJI_0029_R
+======================================================================
+1. final_polygon_source counts:
+   - middle_locked_endpoint: 30
+   - string_lattice_middle: 58
+   - yolo_original: 17
+
+2. final_polygon_reason counts:
+   - geometry_gate_rejected_iou: 10
+   - geometry_gate_rejected_shift: 2
+   - lattice_projection: 58
+   - locked_by_middle_pitch: 30
+   - string_middle_failed_area_ratio_out: 2
+   - string_middle_failed_iou_too_low_0.390: 1
+   - string_middle_failed_iou_too_low_0.397: 1
+   - string_middle_failed_iou_too_low_0.398: 1
+
+3. geometry_gate_accept counts: True=58 / False=12 / missing=35
+4. string_lattice_propagation_accept counts: True=58 / False=12 / missing=35
+5. number of near_edge panels: 29
+6. number of clamped panels: 2 (max_delta: 2.0 px)
+
+7. TOP 30 SUSPICIOUS PANELS:
+
+   [1] raw_idx=25
+       - bbox: [515, 106, 575, 140]
+       - polygon: [[515, 108], [574, 106], [575, 138], [516, 140]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 3
+       - block_id: 0
+
+   [2] raw_idx=40
+       - bbox: [520, 264, 580, 297]
+       - polygon: [[520, 266], [579, 264], [580, 296], [521, 297]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 8
+       - block_id: 0
+
+   [3] raw_idx=46
+       - bbox: [521, 296, 581, 329]
+       - polygon: [[521, 297], [580, 296], [581, 327], [522, 329]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 9
+       - block_id: 0
+
+   [4] raw_idx=47
+       - bbox: [516, 138, 576, 171]
+       - polygon: [[516, 140], [575, 138], [576, 170], [517, 171]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 4
+       - block_id: 0
+
+   [5] raw_idx=52
+       - bbox: [523, 359, 583, 394]
+       - polygon: [[523, 361], [582, 359], [583, 392], [524, 394]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_shift
+       - geometry_gate_accept: False
+       - geometry_gate_reason: shift
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 11
+       - block_id: 0
+
+   [6] raw_idx=62
+       - bbox: [518, 201, 578, 234]
+       - polygon: [[518, 203], [577, 201], [578, 232], [519, 234]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_shift
+       - geometry_gate_accept: False
+       - geometry_gate_reason: shift
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: 0
+
+   [7] raw_idx=65
+       - bbox: [524, 392, 584, 427]
+       - polygon: [[524, 394], [583, 392], [584, 425], [525, 427]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 12
+       - block_id: 0
+
+   [8] raw_idx=67
+       - bbox: [522, 327, 582, 361]
+       - polygon: [[522, 329], [581, 327], [582, 359], [523, 361]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 10
+       - block_id: 0
+
+   [9] raw_idx=68
+       - bbox: [517, 170, 577, 203]
+       - polygon: [[517, 171], [576, 170], [577, 201], [518, 203]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 5
+       - block_id: 0
+
+   [10] raw_idx=77
+       - bbox: [519, 232, 579, 266]
+       - polygon: [[519, 234], [578, 232], [579, 264], [520, 266]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: 0
+
+   [11] raw_idx=78
+       - bbox: [525, 425, 585, 460]
+       - polygon: [[525, 427], [584, 425], [585, 458], [526, 460]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 13
+       - block_id: 0
+
+   [12] raw_idx=86
+       - bbox: [532, 460, 591, 491]
+       - polygon: [[532, 460], [591, 460], [591, 491], [532, 491]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: geometry_gate_fallback
+       - final_polygon_reason: geometry_gate_rejected_iou
+       - geometry_gate_accept: False
+       - geometry_gate_reason: iou
+       - string_lattice_propagation_accept: False
+       - string_lattice_propagation_reject_reason: gate_false
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 14
+       - block_id: 0
+
+   [13] raw_idx=0
+       - bbox: [389, 302, 443, 330]
+       - polygon: [[389, 302], [443, 302], [443, 330], [389, 330]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_middle_failed_area_ratio_out
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 9
+       - block_id: None
+
+   [14] raw_idx=36
+       - bbox: [386, 242, 440, 268]
+       - polygon: [[386, 242], [440, 242], [440, 268], [386, 268]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_middle_failed_area_ratio_out
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [15] raw_idx=45
+       - bbox: [514, 74, 574, 108]
+       - polygon: [[514, 76], [573, 74], [574, 106], [515, 108]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_middle_failed_iou_too_low_0.397
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: 0
+
+   [16] raw_idx=58
+       - bbox: [513, 42, 573, 76]
+       - polygon: [[513, 44], [572, 42], [573, 74], [514, 76]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_middle_failed_iou_too_low_0.398
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [17] raw_idx=100
+       - bbox: [512, 10, 572, 44]
+       - polygon: [[512, 12], [571, 10], [572, 42], [513, 44]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_middle_failed_iou_too_low_0.390
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 0
+       - block_id: 0
+
+   [18] raw_idx=93
+       - bbox: [582, 358, 641, 392]
+       - polygon: [[582, 359], [640, 358], [640, 390], [583, 392]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: True
+       - final_polygon_clamp_delta_max: 1
+       - near_edge: True
+       - string_id: 11
+       - block_id: 0
+
+   [19] raw_idx=98
+       - bbox: [583, 390, 642, 425]
+       - polygon: [[583, 392], [640, 390], [640, 423], [584, 425]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: True
+       - final_polygon_clamp_delta_max: 2
+       - near_edge: True
+       - string_id: 12
+       - block_id: 0
+
+   [20] raw_idx=17
+       - bbox: [575, 136, 634, 170]
+       - polygon: [[575, 138], [633, 136], [634, 168], [576, 170]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 4
+       - block_id: 0
+
+   [21] raw_idx=31
+       - bbox: [0, 159, 62, 187]
+       - polygon: [[0, 159], [62, 159], [62, 187], [0, 187]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 4
+       - block_id: None
+
+   [22] raw_idx=33
+       - bbox: [579, 262, 638, 296]
+       - polygon: [[579, 264], [637, 262], [638, 294], [580, 296]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 8
+       - block_id: 0
+
+   [23] raw_idx=50
+       - bbox: [0, 127, 61, 156]
+       - polygon: [[0, 127], [61, 127], [61, 156], [0, 156]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 3
+       - block_id: None
+
+   [24] raw_idx=53
+       - bbox: [574, 104, 633, 138]
+       - polygon: [[574, 106], [632, 104], [633, 136], [575, 138]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 3
+       - block_id: 0
+
+   [25] raw_idx=55
+       - bbox: [0, 95, 60, 124]
+       - polygon: [[0, 95], [60, 95], [60, 124], [0, 124]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 2
+       - block_id: None
+
+   [26] raw_idx=56
+       - bbox: [573, 72, 632, 106]
+       - polygon: [[573, 74], [631, 72], [632, 104], [574, 106]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 2
+       - block_id: 0
+
+   [27] raw_idx=57
+       - bbox: [0, 63, 58, 93]
+       - polygon: [[0, 63], [58, 63], [58, 93], [0, 93]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 1
+       - block_id: None
+
+   [28] raw_idx=59
+       - bbox: [576, 168, 635, 201]
+       - polygon: [[576, 170], [634, 168], [635, 199], [577, 201]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 5
+       - block_id: 0
+
+   [29] raw_idx=63
+       - bbox: [577, 199, 636, 232]
+       - polygon: [[577, 201], [635, 199], [636, 231], [578, 232]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 6
+       - block_id: 0
+
+   [30] raw_idx=66
+       - bbox: [578, 231, 637, 264]
+       - polygon: [[578, 232], [636, 231], [637, 262], [579, 264]]
+       - final_polygon_source: middle_locked_endpoint
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: locked_by_middle_pitch
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 7
+       - block_id: 0
+
+======================================================================
+IMAGE: DJI_0087_R
+======================================================================
+1. final_polygon_source counts:
+   - endpoint_original_fallback: 6
+   - yolo_original: 65
+
+2. final_polygon_reason counts:
+   - string_quality_failed_pass_ratio_low_0.14: 21
+   - string_quality_failed_pass_ratio_low_0.20: 15
+   - string_quality_failed_pass_ratio_low_0.22: 18
+   - yolo_detection_contour: 17
+
+3. geometry_gate_accept counts: True=0 / False=0 / missing=71
+4. string_lattice_propagation_accept counts: True=0 / False=0 / missing=71
+5. number of near_edge panels: 16
+6. number of clamped panels: 0 (max_delta: 0.0 px)
+
+7. TOP 30 SUSPICIOUS PANELS:
+
+   [1] raw_idx=41
+       - bbox: [388, 4, 447, 38]
+       - polygon: [[388, 7], [446, 4], [447, 35], [390, 38]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.22
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 2
+       - block_id: 2
+
+   [2] raw_idx=42
+       - bbox: [3, 124, 66, 153]
+       - polygon: [[3, 124], [66, 124], [66, 153], [3, 153]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [3] raw_idx=47
+       - bbox: [8, 216, 75, 251]
+       - polygon: [[8, 219], [74, 216], [75, 248], [9, 251]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.14
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 0
+       - block_id: 1
+
+   [4] raw_idx=51
+       - bbox: [1, 91, 64, 121]
+       - polygon: [[1, 91], [64, 91], [64, 121], [1, 121]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [5] raw_idx=55
+       - bbox: [5, 153, 72, 188]
+       - polygon: [[5, 156], [71, 153], [72, 185], [6, 188]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.14
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 0
+       - block_id: 1
+
+   [6] raw_idx=56
+       - bbox: [0, 58, 61, 88]
+       - polygon: [[0, 58], [61, 58], [61, 88], [0, 88]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [7] raw_idx=57
+       - bbox: [0, 25, 58, 55]
+       - polygon: [[0, 25], [58, 25], [58, 55], [0, 55]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [8] raw_idx=58
+       - bbox: [6, 185, 74, 219]
+       - polygon: [[6, 188], [72, 185], [74, 216], [8, 219]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.14
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 0
+       - block_id: 1
+
+   [9] raw_idx=60
+       - bbox: [594, 118, 640, 148]
+       - polygon: [[594, 118], [640, 118], [640, 148], [594, 148]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [10] raw_idx=62
+       - bbox: [591, 52, 640, 83]
+       - polygon: [[591, 52], [640, 52], [640, 83], [591, 83]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [11] raw_idx=64
+       - bbox: [592, 85, 640, 116]
+       - polygon: [[592, 85], [640, 85], [640, 116], [592, 116]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [12] raw_idx=66
+       - bbox: [596, 151, 640, 180]
+       - polygon: [[596, 151], [640, 151], [640, 180], [596, 180]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [13] raw_idx=67
+       - bbox: [590, 19, 640, 50]
+       - polygon: [[590, 19], [640, 19], [640, 50], [590, 50]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [14] raw_idx=69
+       - bbox: [87, 471, 148, 507]
+       - polygon: [[87, 471], [148, 471], [148, 507], [87, 507]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [15] raw_idx=70
+       - bbox: [59, 0, 121, 25]
+       - polygon: [[59, 0], [121, 0], [121, 25], [59, 25]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [16] raw_idx=0
+       - bbox: [265, 203, 324, 237]
+       - polygon: [[265, 206], [323, 203], [324, 234], [267, 237]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [17] raw_idx=1
+       - bbox: [267, 234, 326, 268]
+       - polygon: [[267, 237], [324, 234], [326, 265], [268, 268]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [18] raw_idx=2
+       - bbox: [77, 276, 142, 310]
+       - polygon: [[77, 279], [141, 276], [142, 307], [78, 310]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.14
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 0
+       - block_id: 1
+
+   [19] raw_idx=3
+       - bbox: [264, 173, 323, 206]
+       - polygon: [[264, 176], [321, 173], [323, 203], [265, 206]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [20] raw_idx=4
+       - bbox: [206, 206, 267, 240]
+       - polygon: [[206, 209], [265, 206], [267, 237], [208, 240]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [21] raw_idx=5
+       - bbox: [75, 245, 141, 279]
+       - polygon: [[75, 248], [139, 245], [141, 276], [77, 279]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.14
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 0
+       - block_id: 1
+
+   [22] raw_idx=6
+       - bbox: [262, 142, 321, 176]
+       - polygon: [[262, 144], [320, 142], [321, 173], [264, 176]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [23] raw_idx=7
+       - bbox: [261, 110, 320, 144]
+       - polygon: [[261, 113], [318, 110], [320, 142], [262, 144]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [24] raw_idx=8
+       - bbox: [205, 175, 265, 209]
+       - polygon: [[205, 178], [264, 175], [265, 206], [206, 209]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [25] raw_idx=9
+       - bbox: [399, 226, 458, 260]
+       - polygon: [[399, 228], [457, 226], [458, 257], [401, 260]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.22
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: 2
+
+   [26] raw_idx=10
+       - bbox: [395, 131, 453, 166]
+       - polygon: [[395, 134], [452, 131], [453, 163], [396, 166]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.22
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: 2
+
+   [27] raw_idx=11
+       - bbox: [74, 214, 139, 248]
+       - polygon: [[74, 217], [138, 214], [139, 245], [75, 248]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.14
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 0
+       - block_id: 1
+
+   [28] raw_idx=12
+       - bbox: [396, 163, 455, 197]
+       - polygon: [[396, 166], [453, 163], [455, 194], [398, 197]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.22
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: 2
+
+   [29] raw_idx=13
+       - bbox: [208, 237, 268, 272]
+       - polygon: [[208, 240], [267, 237], [268, 269], [209, 272]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.20
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: 0
+
+   [30] raw_idx=14
+       - bbox: [393, 100, 452, 134]
+       - polygon: [[393, 102], [450, 100], [452, 131], [395, 134]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.22
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: 2
+
+======================================================================
+IMAGE: DJI_0843_R
+======================================================================
+1. final_polygon_source counts:
+   - endpoint_original_fallback: 12
+   - string_lattice_middle: 24
+   - yolo_original: 51
+
+2. final_polygon_reason counts:
+   - lattice_projection: 24
+   - string_endpoint_failed_neighbor_overlap_0.031: 3
+   - string_endpoint_failed_neighbor_overlap_0.032: 6
+   - string_endpoint_failed_neighbor_overlap_0.035: 1
+   - string_endpoint_failed_out_of_bounds_2px|neighbor_overlap_0.036: 1
+   - string_endpoint_failed_out_of_bounds_2px|neighbor_overlap_0.039: 1
+   - string_quality_failed_pass_ratio_low_0.00: 8
+   - yolo_detection_contour: 43
+
+3. geometry_gate_accept counts: True=24 / False=0 / missing=63
+4. string_lattice_propagation_accept counts: True=24 / False=0 / missing=63
+5. number of near_edge panels: 7
+6. number of clamped panels: 0 (max_delta: 0.0 px)
+
+7. TOP 30 SUSPICIOUS PANELS:
+
+   [1] raw_idx=81
+       - bbox: [0, 38, 43, 68]
+       - polygon: [[0, 38], [43, 38], [43, 68], [0, 68]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [2] raw_idx=82
+       - bbox: [0, 6, 45, 37]
+       - polygon: [[0, 6], [45, 6], [45, 37], [0, 37]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [3] raw_idx=83
+       - bbox: [0, 70, 42, 99]
+       - polygon: [[0, 70], [42, 70], [42, 99], [0, 99]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [4] raw_idx=85
+       - bbox: [140, 485, 196, 512]
+       - polygon: [[140, 485], [196, 485], [196, 512], [140, 512]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [5] raw_idx=86
+       - bbox: [0, 101, 39, 130]
+       - polygon: [[0, 101], [39, 101], [39, 130], [0, 130]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [6] raw_idx=0
+       - bbox: [339, 374, 394, 405]
+       - polygon: [[339, 374], [394, 374], [394, 405], [339, 405]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 0
+
+   [7] raw_idx=1
+       - bbox: [152, 389, 207, 422]
+       - polygon: [[154, 389], [207, 392], [205, 422], [152, 419]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: 1
+
+   [8] raw_idx=2
+       - bbox: [150, 419, 205, 454]
+       - polygon: [[152, 419], [205, 422], [203, 454], [150, 451]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 1
+
+   [9] raw_idx=4
+       - bbox: [276, 429, 331, 461]
+       - polygon: [[276, 429], [331, 429], [331, 461], [276, 461]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [10] raw_idx=5
+       - bbox: [278, 398, 334, 430]
+       - polygon: [[278, 398], [334, 398], [334, 430], [278, 430]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [11] raw_idx=6
+       - bbox: [336, 405, 392, 437]
+       - polygon: [[336, 405], [392, 405], [392, 437], [336, 437]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [12] raw_idx=8
+       - bbox: [95, 291, 159, 325]
+       - polygon: [[97, 291], [159, 295], [157, 325], [95, 322]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 1
+
+   [13] raw_idx=10
+       - bbox: [340, 310, 400, 345]
+       - polygon: [[342, 310], [400, 315], [398, 345], [340, 341]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 0
+
+   [14] raw_idx=13
+       - bbox: [337, 341, 398, 376]
+       - polygon: [[340, 341], [398, 345], [395, 376], [337, 371]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 0
+
+   [15] raw_idx=15
+       - bbox: [334, 436, 390, 469]
+       - polygon: [[334, 436], [390, 436], [390, 469], [334, 469]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [16] raw_idx=16
+       - bbox: [154, 357, 209, 392]
+       - polygon: [[155, 357], [209, 360], [207, 392], [154, 389]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: 1
+
+   [17] raw_idx=17
+       - bbox: [155, 326, 211, 360]
+       - polygon: [[157, 326], [211, 329], [209, 360], [155, 357]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 1
+
+   [18] raw_idx=18
+       - bbox: [148, 451, 203, 485]
+       - polygon: [[150, 451], [203, 454], [202, 485], [148, 482]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 1
+
+   [19] raw_idx=19
+       - bbox: [469, 292, 530, 325]
+       - polygon: [[470, 292], [530, 295], [528, 325], [469, 322]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 5
+
+   [20] raw_idx=20
+       - bbox: [467, 322, 528, 356]
+       - polygon: [[469, 322], [528, 325], [527, 356], [467, 353]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 5
+
+   [21] raw_idx=21
+       - bbox: [287, 276, 345, 310]
+       - polygon: [[289, 276], [345, 280], [342, 310], [287, 306]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 0
+
+   [22] raw_idx=22
+       - bbox: [525, 359, 590, 393]
+       - polygon: [[526, 359], [590, 362], [588, 393], [525, 390]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 5
+
+   [23] raw_idx=23
+       - bbox: [281, 368, 336, 399]
+       - polygon: [[281, 368], [336, 368], [336, 399], [281, 399]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 0
+
+   [24] raw_idx=24
+       - bbox: [97, 261, 161, 295]
+       - polygon: [[99, 261], [161, 265], [159, 295], [97, 291]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 1
+
+   [25] raw_idx=25
+       - bbox: [90, 383, 154, 418]
+       - polygon: [[91, 383], [154, 387], [152, 418], [90, 415]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: 1
+
+   [26] raw_idx=27
+       - bbox: [528, 296, 593, 330]
+       - polygon: [[530, 296], [593, 299], [592, 330], [528, 327]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 5
+
+   [27] raw_idx=29
+       - bbox: [466, 353, 527, 387]
+       - polygon: [[467, 353], [527, 356], [525, 387], [466, 384]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 5
+
+   [28] raw_idx=30
+       - bbox: [157, 296, 212, 329]
+       - polygon: [[159, 296], [212, 299], [211, 329], [157, 326]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 1
+
+   [29] raw_idx=31
+       - bbox: [274, 460, 329, 494]
+       - polygon: [[274, 460], [329, 460], [329, 494], [274, 494]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: 0
+
+   [30] raw_idx=33
+       - bbox: [91, 352, 156, 387]
+       - polygon: [[93, 352], [156, 356], [154, 387], [91, 383]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: 1
+
+======================================================================
+IMAGE: DJI_0845_R
+======================================================================
+1. final_polygon_source counts:
+   - endpoint_original_fallback: 12
+   - string_lattice_middle: 60
+   - yolo_original: 14
+
+2. final_polygon_reason counts:
+   - lattice_projection: 60
+   - string_endpoint_failed_neighbor_overlap_0.031: 2
+   - string_endpoint_failed_neighbor_overlap_0.032: 8
+   - string_endpoint_failed_neighbor_overlap_0.033: 1
+   - string_endpoint_failed_neighbor_overlap_0.034: 1
+   - string_quality_failed_pass_ratio_low_0.00: 8
+   - yolo_detection_contour: 6
+
+3. geometry_gate_accept counts: True=60 / False=0 / missing=26
+4. string_lattice_propagation_accept counts: True=60 / False=0 / missing=26
+5. number of near_edge panels: 7
+6. number of clamped panels: 0 (max_delta: 0.0 px)
+
+7. TOP 30 SUSPICIOUS PANELS:
+
+   [1] raw_idx=51
+       - bbox: [335, 474, 392, 508]
+       - polygon: [[335, 474], [392, 474], [392, 508], [335, 508]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 7
+       - block_id: None
+
+   [2] raw_idx=78
+       - bbox: [0, 44, 45, 74]
+       - polygon: [[0, 44], [45, 44], [45, 74], [0, 74]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [3] raw_idx=82
+       - bbox: [0, 76, 43, 105]
+       - polygon: [[0, 76], [43, 76], [43, 105], [0, 105]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [4] raw_idx=83
+       - bbox: [0, 13, 48, 43]
+       - polygon: [[0, 13], [48, 13], [48, 43], [0, 43]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [5] raw_idx=84
+       - bbox: [0, 108, 42, 137]
+       - polygon: [[0, 108], [42, 108], [42, 137], [0, 137]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: None
+       - block_id: None
+
+   [6] raw_idx=21
+       - bbox: [146, 460, 202, 493]
+       - polygon: [[146, 460], [202, 460], [202, 493], [146, 493]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: None
+
+   [7] raw_idx=28
+       - bbox: [276, 467, 332, 501]
+       - polygon: [[276, 467], [332, 467], [332, 501], [276, 501]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [8] raw_idx=39
+       - bbox: [87, 455, 144, 487]
+       - polygon: [[87, 455], [144, 455], [144, 487], [87, 487]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: None
+
+   [9] raw_idx=44
+       - bbox: [337, 443, 394, 476]
+       - polygon: [[337, 443], [394, 443], [394, 476], [337, 476]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [10] raw_idx=49
+       - bbox: [149, 429, 205, 461]
+       - polygon: [[149, 429], [205, 429], [205, 461], [149, 461]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: None
+
+   [11] raw_idx=58
+       - bbox: [279, 437, 335, 469]
+       - polygon: [[279, 437], [335, 437], [335, 469], [279, 469]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 7
+       - block_id: None
+
+   [12] raw_idx=62
+       - bbox: [91, 424, 148, 455]
+       - polygon: [[91, 424], [148, 424], [148, 455], [91, 455]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_quality_failed_pass_ratio_low_0.00
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 6
+       - block_id: None
+
+   [13] raw_idx=76
+       - bbox: [528, 460, 590, 497]
+       - polygon: [[528, 460], [590, 460], [590, 497], [528, 497]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: None
+
+   [14] raw_idx=79
+       - bbox: [465, 453, 524, 488]
+       - polygon: [[465, 453], [524, 453], [524, 488], [465, 488]]
+       - final_polygon_source: yolo_original
+       - final_polygon_stage: yolo_refinement
+       - final_polygon_reason: yolo_detection_contour
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: None
+       - block_id: None
+
+   [15] raw_idx=59
+       - bbox: [186, 4, 240, 32]
+       - polygon: [[186, 4], [240, 4], [240, 32], [186, 32]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 1
+       - block_id: None
+
+   [16] raw_idx=85
+       - bbox: [129, 2, 184, 29]
+       - polygon: [[129, 2], [184, 2], [184, 29], [129, 29]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.033
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: True
+       - string_id: 0
+       - block_id: None
+
+   [17] raw_idx=57
+       - bbox: [312, 18, 367, 44]
+       - polygon: [[312, 18], [367, 18], [367, 44], [312, 44]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: None
+
+   [18] raw_idx=60
+       - bbox: [344, 351, 400, 381]
+       - polygon: [[344, 351], [400, 351], [400, 381], [344, 381]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 3
+       - block_id: None
+
+   [19] raw_idx=64
+       - bbox: [532, 366, 593, 400]
+       - polygon: [[532, 366], [593, 366], [593, 400], [532, 400]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.031
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 5
+       - block_id: None
+
+   [20] raw_idx=66
+       - bbox: [104, 333, 157, 362]
+       - polygon: [[104, 333], [157, 333], [157, 362], [104, 362]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 0
+       - block_id: None
+
+   [21] raw_idx=69
+       - bbox: [158, 337, 214, 367]
+       - polygon: [[158, 337], [214, 337], [214, 367], [158, 367]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: None
+
+   [22] raw_idx=71
+       - bbox: [287, 346, 342, 376]
+       - polygon: [[287, 346], [342, 346], [342, 376], [287, 376]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: None
+
+   [23] raw_idx=72
+       - bbox: [471, 361, 529, 393]
+       - polygon: [[471, 361], [529, 361], [529, 393], [471, 393]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 4
+       - block_id: None
+
+   [24] raw_idx=74
+       - bbox: [370, 18, 426, 46]
+       - polygon: [[370, 18], [426, 18], [426, 46], [370, 46]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.032
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 3
+       - block_id: None
+
+   [25] raw_idx=75
+       - bbox: [495, 29, 553, 57]
+       - polygon: [[495, 29], [553, 29], [553, 57], [495, 57]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.034
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 4
+       - block_id: None
+
+   [26] raw_idx=81
+       - bbox: [558, 27, 621, 56]
+       - polygon: [[558, 27], [621, 27], [621, 56], [558, 56]]
+       - final_polygon_source: endpoint_original_fallback
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: string_endpoint_failed_neighbor_overlap_0.031
+       - geometry_gate_accept: missing
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: missing
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 5
+       - block_id: None
+
+   [27] raw_idx=0
+       - bbox: [163, 243, 222, 277]
+       - polygon: [[163, 273], [165, 243], [222, 247], [219, 277]]
+       - final_polygon_source: string_lattice_middle
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: lattice_projection
+       - geometry_gate_accept: True
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: True
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: None
+
+   [28] raw_idx=1
+       - bbox: [165, 212, 224, 247]
+       - polygon: [[165, 243], [168, 212], [224, 216], [222, 247]]
+       - final_polygon_source: string_lattice_middle
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: lattice_projection
+       - geometry_gate_accept: True
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: True
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 1
+       - block_id: None
+
+   [29] raw_idx=2
+       - bbox: [349, 226, 409, 261]
+       - polygon: [[349, 256], [351, 226], [409, 231], [407, 261]]
+       - final_polygon_source: string_lattice_middle
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: lattice_projection
+       - geometry_gate_accept: True
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: True
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 3
+       - block_id: None
+
+   [30] raw_idx=3
+       - bbox: [290, 283, 347, 317]
+       - polygon: [[290, 313], [292, 283], [347, 287], [344, 317]]
+       - final_polygon_source: string_lattice_middle
+       - final_polygon_stage: string_lattice_refinement
+       - final_polygon_reason: lattice_projection
+       - geometry_gate_accept: True
+       - geometry_gate_reason: 
+       - string_lattice_propagation_accept: True
+       - string_lattice_propagation_reject_reason: 
+       - final_polygon_clamped: False
+       - final_polygon_clamp_delta_max: 0.0
+       - near_edge: False
+       - string_id: 2
+       - block_id: None
