@@ -1014,13 +1014,17 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
 
             const res = await axios.post(`${API}/api/v1/analyze-all`, analyzeForm);
 
-            if (onAnalysisComplete) {
-                onAnalysisComplete(res.data.data, res.data.batch_id, parseFloat(projectMetadata.panelPower) || 600);
+            if (res.data.data) {
+                if (onAnalysisComplete) {
+                    onAnalysisComplete(res.data.data, res.data.batch_id, parseFloat(projectMetadata.panelPower) || 600);
+                }
+                setQualityData(null);
+                setShowMetadataModal(false);
+                alert(`✅ Thành công! Đã phân tích xong ${res.data.data.length} ảnh.`);
+            } else {
+                // Không có ảnh mới (đã xử lý hết hoặc thông báo khác từ server)
+                alert(res.data.message || "Không có ảnh mới nào cần phân tích!");
             }
-
-            setQualityData(null);
-            setShowMetadataModal(false);
-            alert(`✅ Thành công! Đã phân tích xong ${res.data.data.length} ảnh.`);
         } catch (error) {
             alert("Lỗi AI: " + (error.response?.data?.detail || error.message));
         } finally {

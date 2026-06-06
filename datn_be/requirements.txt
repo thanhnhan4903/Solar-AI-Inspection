@@ -21,5 +21,5 @@ pyproj
 
 # Reporting
 jinja2
-fpdf
+fpdf2
 patool

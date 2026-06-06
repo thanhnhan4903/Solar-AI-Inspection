@@ -17,7 +17,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
 
     const allImages = useMemo(() => {
         return data.map((img, index) => {
-            const faultyPanels = img.panels.filter(p => p.total_panel_loss > 0);
+            const faultyPanels = (img.panels || []).filter(p => p.total_panel_loss > 0);
             return {
                 ...img,
                 id: `Image ${index + 1}`,
@@ -42,7 +42,7 @@ export default function PanelPage({ data, onSelect, onNavigate }) {
                 result = result.filter(img => img.status === statusFilter);
             } else {
                 result = result.filter(img => {
-                    return img.panels.some(p => p.defects && p.defects.some(d => d.type.toLowerCase().includes(statusFilter)));
+                    return (img.panels || []).some(p => p.defects && p.defects.some(d => d.type?.toLowerCase().includes(statusFilter)));
                 });
             }
         }
