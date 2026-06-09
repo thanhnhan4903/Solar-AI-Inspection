@@ -406,8 +406,8 @@ class ReportGenerator:
 
         for idx, (p, p_detail) in enumerate(faulty_panels):
             # Mỗi khối cần khoảng 100mm chiều cao, nếu không đủ thì ngắt trang tự động
-            if pdf.get_y() + 100 > 272:
-                pdf.add_page()
+            if pdf.get_y() > 180:
+              pdf.add_page()
 
             pdf._f("B", 13)
             pdf.set_text_color(15, 23, 42)
@@ -496,8 +496,23 @@ class ReportGenerator:
             # In ảnh kẹp song song ở trên trong lề mới (printable width 155mm)
             image_y = pdf.get_y() + 2
             if crop_success:
-                pdf.image(temp_thermal_path, x=35, y=image_y, w=73, h=30)
-                pdf.image(temp_rgb_path,     x=116, y=image_y, w=73, h=30)
+                IMG_W = 70
+
+                pdf.image(
+                    temp_thermal_path,
+                    x=35,
+                    y=image_y,
+                    w=IMG_W,
+                    h=30
+                )
+
+                pdf.image(
+                    temp_rgb_path,
+                    x=120,
+                    y=image_y,
+                    w=IMG_W,
+                    h=30
+                )
                 
                 # Bổ sung nhãn ảnh
                 pdf.set_xy(35, image_y + 30.5)
@@ -514,8 +529,9 @@ class ReportGenerator:
                 pdf.ln(2)
 
             # Vùng text chi tiết (Căn chữ Justify, Nội dung Size 14, Giãn dòng 1.5)
-            LABEL_W = 65
-            text_x  = 35
+            LABEL_W = 40
+            TEXT_W = pdf.w - pdf.l_margin - pdf.r_margin
+            text_x = pdf.l_margin
 
             pdf.ln(1)
 
@@ -524,36 +540,121 @@ class ReportGenerator:
             confidence_values = []
             relative_positions = []
 
+            def draw_table_row(pdf, cols):
+
+                widths = [40, 35, 25, 55]
+                line_h = 6
+
+                max_lines = max(
+                    len(str(c).split("\n"))
+                    for c in cols
+                )
+
+                row_h = max_lines * line_h + 2
+
+                if pdf.get_y() + row_h > 260:
+                    pdf.add_page()
+
+                x0 = pdf.l_margin
+                y0 = pdf.get_y()
+                x = x0
+
+                for txt, w in zip(cols, widths):
+
+                    pdf.rect(x, y0, w, row_h)
+
+                    pdf.set_xy(x + 1, y0 + 1)
+
+                    pdf.multi_cell(
+                        w - 2,
+                        line_h,
+                        str(txt),
+                        border=0,
+                        align="C"
+                    )
+
+                    x += w
+                    pdf.set_xy(x, y0)
+
+                pdf.set_xy(pdf.l_margin, y0 + row_h)
+                        
+            pdf.ln(5)
+
+                        # ==================================================
+                        # BẢNG CHI TIẾT LỖI GIỐNG HÌNH 2
+                        # ==================================================
+            loss = p_detail.get("total_panel_loss", 0.0)
+            loss_pct_calc = (
+                round((loss / panel_power) * 100, 1)
+                if panel_power > 0 else 0.0
+            )
+            rec = p_detail.get("recommendation", "Kiểm tra")
+
+            if rec == "Check":
+                rec = "Kiểm tra"
+            elif rec == "Replace":
+                rec = "Cần thay thế"
+            pdf._f("B", 11)
+
+            pdf.set_draw_color(0, 0, 0)
+            pdf.set_line_width(0.6)
+
+            COL1 = 40
+            COL2 = 35
+            COL3 = 25
+            COL4 = 55
+
+            pdf.cell(COL1, 10, "Lỗi phát hiện", 1, 0, "C")
+            pdf.cell(COL2, 10, "Mức độ & độ tin cậy", 1, 0, "C")
+            pdf.cell(COL3, 10, "Hao hụt", 1, 0, "C")
+            pdf.cell(COL4, 10, "Vị trí", 1, 1, "C")
+
+            pdf._f("", 10)
             for d in defects:
-                dname = VI_DEFECT_MAP.get(d.get("class_name", ""), str(d.get("class_name", "")))
-                defect_types.append(dname)
-                confidence_values.append(f"{round(d.get('confidence', 0.0) * 100, 1)}%")
-                loc = d.get("location_in_panel", "center")
-                vi_loc = VI_LOC_MAP.get(loc, loc)
-                u   = d.get("relative_position", {}).get("u", 0.5)
-                v   = d.get("relative_position", {}).get("v", 0.5)
-                relative_positions.append(f"{vi_loc} (u:{round(u,2)}, v:{round(v,2)})")
 
-            def print_row(label, value):
-                row_y = pdf.get_y()
-                pdf.set_xy(text_x, row_y)
-                pdf._f("B", 14)
-                pdf.set_text_color(51, 65, 85)
-                pdf.multi_cell(LABEL_W, 7.5, safe(label))
-                end_label_y = pdf.get_y()
-                
-                pdf._f("", 14)
-                val_w = TEXT_W - LABEL_W
-                pdf.set_xy(text_x + LABEL_W, row_y)
-                pdf.multi_cell(val_w, 7.5, safe(value), align="J")
-                end_val_y = pdf.get_y()
-                
-                pdf.set_y(max(end_label_y, end_val_y))
+                defect_name = VI_DEFECT_MAP.get(
+                    d.get("class_name", ""),
+                    d.get("class_name", "")
+                )
 
-            print_row("Lỗi phát hiện:",   ", ".join(defect_types) if defect_types else "Không có")
-            sev = VI_SEVERITY_MAP.get(p_detail.get("worst_severity", "minor"), "Nhẹ")
-            print_row("Mức độ & Độ tin cậy:", f"{sev} | {', '.join(confidence_values)}")
-            
+                confidence = f"{round(d.get('confidence',0)*100,1)}%"
+
+                severity = VI_SEVERITY_MAP.get(
+                    d.get("severity","minor"),
+                    "Nhẹ"
+                )
+
+                power_loss = f"{loss:.1f} W"
+
+                location = d.get(
+                    "location_in_panel",
+                    "center"
+                )
+
+                u = round(
+                    d.get("relative_position", {}).get("u", 0.5),
+                    2
+                )
+
+                v = round(
+                    d.get("relative_position", {}).get("v", 0.5),
+                    2
+                )
+
+                location_text = (
+                    f"{location}\n"
+                    f"(u:{u}, v:{v})"
+                )
+
+                draw_table_row(
+                    pdf,
+                    [
+                        defect_name,
+                        f"{severity}\n{confidence}",
+                        power_loss,
+                        location_text
+                    ]
+                )
             # Tính toán hao hụt và sản lượng hao hụt
             loss = p_detail.get("total_panel_loss", 0.0)
             loss_pct_calc = round((loss / panel_power) * 100, 1) if panel_power > 0 else 0.0
@@ -562,16 +663,16 @@ class ReportGenerator:
                 rec = "Kiểm tra"
             elif rec == "Replace":
                 rec = "Cần thay thế"
-            print_row("Hao hụt công suất:",      f"{loss} W ({loss_pct_calc}% công suất tấm pin) | {rec}")
+            #print_row("Hao hụt công suất:",      f"{loss} W ({loss_pct_calc}% công suất tấm pin) | {rec}")
             
             # Giả định 4 giờ nắng đỉnh mỗi ngày và đơn giá điện tự tiêu thụ/phát thải trung bình là 2,000 VND / kWh
             yearly_loss_kwh = (loss * 4.0 * 365) / 1000.0
             yearly_cost_vnd = int(yearly_loss_kwh * 2000)
-            print_row("Hao hụt sản lượng ước tính:", f"{round(yearly_loss_kwh, 1)} kWh/năm (Thiệt hại ước tính: {yearly_cost_vnd:,} VNĐ/năm)")
+            #print_row("Hao hụt sản lượng ước tính:", f"{round(yearly_loss_kwh, 1)} kWh/năm (Thiệt hại ước tính: {yearly_cost_vnd:,} VNĐ/năm)")
             
-            print_row("Vị trí tương đối:",   ", ".join(relative_positions) if relative_positions else "N/A")
-            print_row("Ảnh nhiệt:",   thermal_filename)
-            print_row("Ảnh quang học:",       rgb_filename or "Không khớp ảnh")
+           # print_row("Vị trí tương đối:",   ", ".join(relative_positions) if relative_positions else "N/A")
+           #print_row("Ảnh nhiệt:",   thermal_filename)
+           #print_row("Ảnh quang học:",       rgb_filename or "Không khớp ảnh")
 
             pdf.ln(5)
 
