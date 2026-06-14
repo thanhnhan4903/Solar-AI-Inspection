@@ -1,0 +1,87 @@
+Created At: 2026-06-05T13:36:07Z
+Completed At: 2026-06-05T13:36:09Z
+The following changes were made by the replace_file_content tool to: c:\Solar_Inspection_Project\datn_be\scratch\edge_grid_full_image_DJI_0029.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -537,63 +537,246 @@
+             for k, f in enumerate(fits):
+                 if not diags[k]["fallback_used"]:
+                     all_slopes.append(f[0])
++        # Determine vertical direction of the block
++        all_slopes = []
++        for bkey in boundary_keys:
++            fits = boundaries_local_fits[bkey]
++            diags = boundaries_diags[bkey]
++            for k, f in enumerate(fits):
++                if not diags[k]["fallback_used"]:
++                    all_slopes.append(f[0])
+         a_avg = np.mean(all_slopes) if all_slopes else 0.0
+         
+-        # Oriented slope: m_perp = -a_avg
+-        m_perp = -a_avg
+-        vertical_angle_deg = np.degrees(np.arctan(1.0 / a_avg if a_avg != 0 else 9999))
+-        horizontal_angle_deg = np.degrees(np.arctan(m_perp))
++        # Base horizontal direction perpendicular to the vertical boundary
++        theta_base = math.atan(-a_avg)
+         
+         # Detect initial horizontal gap anchors (y-coordinates)
+         raw_horiz_gaps = detect_horizontal_gap_lines(gray, b["panels"])
+-        
+-        # 2. Build family of parallel oriented lines and snap them to the local 1D profile valleys
+         x_mid = (x_min_roi + x_max_roi) / 2.0
+-        snapped_horiz_gaps = []
+-        
++        
++        # 1. Search for best shared angle within +/- 2 degrees of base
++        best_theta = theta_base
++        max_score = -1.0
++        for delta_deg in np.linspace(-2.0, 2.0, 21):
++            theta_cand = theta_base + math.radians(delta_deg)
++            score = evaluate_angle_candidate(gray, raw_horiz_gaps, x_mid, theta_cand, n_samples=30)
++            if score > max_score:
++                max_score = score
++                be
+<truncated 11904 bytes>
+tl2, tr2, br2, bl2], dtype=np.int32)], True, (0, 255, 255), 1, cv2.LINE_AA)
+-
+-        # --- DRAW ON IMAGE: VERIFIED PANELS (With regularized oriented parallel lines) ---
++                
++        # --- DRAW ON IMAGE: VERIFIED PANELS ---
+         left_pts = boundaries["left_outer"]
+         right_pts = boundaries["right_outer"]
+         draw_polyline(img_panels_verified, left_pts, (180, 0, 0), 2)
+@@ -674,8 +674,13 @@
+             
+         verified_panel_count = 0
+         for row_idx in range(len(snapped_horiz_gaps) - 1):
+-            y_snap_t = snapped_horiz_gaps[row_idx]["y_snap"]
+-            y_snap_b = snapped_horiz_gaps[row_idx + 1]["y_snap"]
++            g_t = snapped_horiz_gaps[row_idx]
++            g_b = snapped_horiz_gaps[row_idx + 1]
++            if not g_t["is_good"] or not g_b["is_good"]:
++                continue
++                
++            y_snap_t = g_t["y_snap"]
++            y_snap_b = g_b["y_snap"]
+             
+             if n_cols == 1:
+                 tl = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, left_pts)
+@@ -700,11 +700,11 @@
+                 
+         stats.append({
+             "name": block_name,
+-            "horizontal_angle": horizontal_angle_deg,
+-            "estimated_pitch": estimated_pitch,
+-            "pitch_std": pitch_std,
+-            "interpolated_missing_count": interpolated_missing_count,
+-            "rejected_count": rejected_count,
++            "horizontal_angle_deg": horizontal_angle_deg,
++            "estimated_pitch_px": estimated_pitch,
++            "pitch_std_px": pitch_std,
++            "number_of_interpolated_missing_lines": interpolated_missing_count,
++            "rejected_horizontal_lines_count": rejected_count,
+             "verified_panel_count": verified_panel_count
+         })
+         
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.

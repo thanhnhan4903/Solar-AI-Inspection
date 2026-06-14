@@ -1,0 +1,14094 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+pv_fullsnap_universal_v63_full.py
+
+One-file V63 build.
+- No external engine files.
+- No zip.
+- No _ENGINE_V34_BODY/_ENGINE_V42_BODY string blobs.
+- Keeps full v34/v42 line-snap logic as Python functions with prefixed namespaces.
+- Removes YOLO 4-edge polygon filter.
+- Keeps only inner-area filter, now per connected block/component using top 50% mean and 80% threshold.
+"""
+
+
+# ===== V34 FULL CORE ENGINE NAMESPACE =====
+import os
+import json
+import math
+import copy
+import numpy as np
+import cv2
+import csv
+import argparse
+from pathlib import Path
+V34__HORIZONTAL_OUTER_MARGIN_PX = 0.3
+V34__THERMAL_GAP_SNAP_WINDOW = 4
+V34__PITCH_REGULARIZATION_WEIGHT = 0.4
+V34__MAX_HORIZONTAL_ROW_ANGLE_DEG = 4.0
+V34__BAD_BLOCK_RAW_ANGLE_DEG = 10.0
+V34__VERTICAL_OUTER_INSET_PX = 1.2
+V34__MIDDLE_DIVIDER_INSET_PX = 0.7
+V34__LAST_ROW_SNAP_WINDOW = 5
+V34__LAST_ROW_PITCH_WEIGHT = 0.05
+V34__IMAGE_STEM = ''
+V34__CURRENT_IMAGE_PATH = None
+V34__CURRENT_PANELS_PATH = None
+V34__OUTPUT_DEBUG_DIR = 'data/results/debug'
+V34__VISUAL_PANEL_THICKNESS = 3
+V34__INNER_MARGIN_BASE_PX = 3
+V34__INNER_MARGIN_FACTORS = (1, 2, 3)
+V34__SAVE_INNER_MASK_DEBUG = False
+V34__DRAW_INNER_CONTOUR_DEBUG = False
+V34__INNER_PANEL_MARGIN_PX = 3
+V34__USE_INNER_PANEL_FOR_CALC = True
+V34__DRAW_INNER_PANEL_DEBUG = True
+V34__GLOBAL_SMALL_RAIL_SLOPES = []
+V34__GLOBAL_LARGE_BLOCK_INFOS = []
+V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG = None
+V34__V34_ROW_X_SAMPLE_STEP_PX = 0.85
+V34__V34_ROW_DY_STEP_PX = 0.5
+V34__V34_ROW_SEARCH_RADIUS_PX = 6.0
+V34__V34_MIDDLE_RAIL_Y_STEP_PX = 3.0
+V34__V34_MIDDLE_RAIL_SEARCH_RADIUS_PX = 7.0
+
+def V34__extract_input_image():
+    """Return the currently selected image path.
+
+    In the original research script this function extracted one hard-coded image
+    from Dataset.zip.  In this universal runner it is intentionally reduced to a
+    path resolver so the rest of the 18th-version geometry pipeline remains
+    unchanged.
+    """
+    global V34__CURRENT_IMAGE_PATH
+    if V34__CURRENT_IMAGE_PATH is None:
+        candidate = Path(f'data/precalib/{V34__IMAGE_STEM}.JPG')
+    else:
+        candidate = Path(V34__CURRENT_IMAGE_PATH)
+    if not candidate.exists():
+        raise FileNotFoundError(f'Missing input image: {candidate}')
+    return candidate
+
+def V34__load_panels_from_logs():
+    """Load panel detections from the currently selected json/jsonl file."""
+    global V34__CURRENT_PANELS_PATH
+    log_path = Path(V34__CURRENT_PANELS_PATH) if V34__CURRENT_PANELS_PATH is not None else Path(f'data/results/debug_logs/{V34__IMAGE_STEM}_panel_refine.jsonl')
+    if not log_path.exists():
+        raise FileNotFoundError(f'Missing panel detection log at {log_path}')
+    panels = []
+    if log_path.suffix.lower() == '.json':
+        data = json.loads(log_path.read_text(encoding='utf-8'))
+        if isinstance(data, dict):
+            data = data.get('panels', data.get('detections', []))
+        if not isinstance(data, list):
+            raise ValueError(f'Unsupported panel JSON structure: {log_path}')
+        panels = data
+    else:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                panels.append(json.loads(line))
+    if not panels:
+        raise ValueError(f'No panels loaded from {log_path}')
+    return panels
+
+def V34__is_generic_small_block(row_count, panel_count, n_cols=None):
+    """Route compact 1x1/1x2/2x1/2x2 blocks to the shared-quad small-block logic.
+
+    This replaces image-name rules such as DJI_0845_R + block_3/block_5/block_7.
+    Long strings remain on the consensus rail + horizontal support pipeline.
+    """
+    if panel_count < 2 or panel_count > 4:
+        return False
+    if row_count > 2:
+        return False
+    if n_cols is not None and n_cols > 2:
+        return False
+    return True
+
+def V34__is_single_row_two_col_block(row_count, n_cols, panel_count):
+    """Generalized replacement for the old block_7 branch."""
+    return row_count == 1 and n_cols == 2 and (panel_count == 2)
+
+def V34__clamp_horizontal_slope_to_reasonable(m, max_abs_angle_deg=4.0):
+    """Keep generic horizontal separators from turning into diagonal panel-body lines.
+
+    In the block-local coordinate system used by this script, true row separators
+    should be close to horizontal. Some bad YOLO priors can make all row priors
+    in a block lean diagonally; support points then look clean but are still the
+    wrong structure. This helper clamps only the slope, not the row location.
+    """
+    try:
+        ang = math.degrees(math.atan(float(m)))
+        lim = float(max_abs_angle_deg)
+        if abs(ang) <= lim:
+            return (float(m), False, ang)
+        return (math.tan(math.radians(lim if ang > 0 else -lim)), True, ang)
+    except Exception:
+        return (0.0, True, 999.0)
+
+def V34__clamp_slope_about_anchor(m_src, c_src, m_ref, x_anchor, max_angle_deg=4.0):
+    """Clamp a horizontal line slope around a reference slope while preserving y at x_anchor."""
+    a_src = math.atan(float(m_src))
+    a_ref = math.atan(float(m_ref))
+    diff = a_src - a_ref
+    max_diff = math.radians(float(max_angle_deg))
+    if abs(diff) <= max_diff:
+        return (float(m_src), float(c_src), False, math.degrees(abs(diff)))
+    a_new = a_ref + math.copysign(max_diff, diff)
+    m_new = math.tan(a_new)
+    y_anchor = float(m_src) * float(x_anchor) + float(c_src)
+    c_new = y_anchor - m_new * float(x_anchor)
+    return (float(m_new), float(c_new), True, math.degrees(abs(diff)))
+
+def V34__apply_horizontal_snap_slope_guard(snapped_horiz_gaps, m_consensus, x_mid, block_name, max_angle_deg=2.0, reject_angle_deg=3.0):
+    """Reject or gently clamp bad horizontal support lines.
+
+    v19 still allowed support-fitted lines to keep a wrong center after clamping
+    their slope. In low-contrast/purple panels this created long diagonal magenta
+    lines inside the panel body, and the final polygons followed those wrong lines.
+
+    v20 rule:
+    - If support slope differs too much from the block consensus, reject support
+      evidence entirely and fall back to the YOLO/pitch row prior.
+    - If the slope is only mildly different, clamp it around x_mid.
+    """
+    for r, g in enumerate(snapped_horiz_gaps):
+        if not g.get('support_valid', False):
+            continue
+        m_s = g.get('support_line_m', None)
+        c_s = g.get('support_line_c', None)
+        if m_s is None or c_s is None:
+            continue
+        angle_diff = abs(math.degrees(math.atan(float(m_s))) - math.degrees(math.atan(float(m_consensus))))
+        while angle_diff > 90:
+            angle_diff = abs(angle_diff - 180)
+        if angle_diff > reject_angle_deg:
+            fallback_c = g.get('c_row_yolo', None)
+            fallback_src = 'yolo'
+            if fallback_c is None:
+                fallback_c = g.get('c_row_pitch', g.get('c_row', c_s))
+                fallback_src = 'pitch'
+            g['support_valid'] = False
+            g['support_line_m_rejected'] = float(m_s)
+            g['support_line_c_rejected'] = float(c_s)
+            g['support_reject_reason'] = f'slope_angle_{angle_diff:.2f}>{reject_angle_deg:.2f}'
+            g['support_line_m'] = None
+            g['support_line_c'] = None
+            g['m_row'] = float(m_consensus)
+            g['c_row'] = float(fallback_c)
+            g['y_snap'] = float(m_consensus) * float(x_mid) + float(fallback_c)
+            old_src = g.get('selected_cand', 'support')
+            g['selected_cand'] = f'{old_src}_rejected_slope_{fallback_src}'
+            print(f'[HORIZ_REJECT_BAD_SUPPORT] block={block_name} r={r} angle_diff={angle_diff:.2f} reject>{reject_angle_deg:.2f} fallback={fallback_src} m_raw={float(m_s):.5f} m_consensus={float(m_consensus):.5f}')
+            continue
+        m_new, c_new, changed, _ = V34__clamp_slope_about_anchor(m_s, c_s, m_consensus, x_mid, max_angle_deg=max_angle_deg)
+        if changed:
+            g['support_line_m_raw'] = float(m_s)
+            g['support_line_c_raw'] = float(c_s)
+            g['support_line_m'] = m_new
+            g['support_line_c'] = c_new
+            g['m_row'] = m_new
+            g['c_row'] = c_new
+            g['y_snap'] = m_new * x_mid + c_new
+            old_src = g.get('selected_cand', 'support')
+            g['selected_cand'] = f'{old_src}_slope_guard'
+            print(f'[HORIZ_SLOPE_GUARD] block={block_name} r={r} angle_diff={angle_diff:.2f} max={max_angle_deg:.2f} m_raw={float(m_s):.5f} m_new={m_new:.5f}')
+    return snapped_horiz_gaps
+
+def V34__inset_quad_polygon(poly, margin_px):
+    """
+    Input:
+        poly: np.ndarray shape (4,2), final polygon.
+        margin_px: number of pixels to inset.
+    Output:
+        inner_poly: np.ndarray shape (4,2)
+        source: "geometric_inset" or "centroid_fallback"
+        valid: bool
+    """
+    poly_f = np.array(poly, dtype=np.float32)
+    if poly_f.shape != (4, 2):
+        return (poly_f, 'invalid_shape', False)
+    centroid = np.mean(poly_f, axis=0)
+    angles = np.arctan2(poly_f[:, 1] - centroid[1], poly_f[:, 0] - centroid[0])
+    sorted_indices = np.argsort(angles)
+    q = poly_f[sorted_indices]
+    lines = []
+    has_zero_edge = False
+    for i in range(4):
+        p_i = q[i]
+        p_j = q[(i + 1) % 4]
+        dx = p_j[0] - p_i[0]
+        dy = p_j[1] - p_i[1]
+        edge_len = math.sqrt(dx * dx + dy * dy)
+        if edge_len < 1e-06:
+            has_zero_edge = True
+            break
+        nx = -dy / edge_len
+        ny = dx / edge_len
+        midpoint = (p_i + p_j) / 2.0
+        to_centroid_x = centroid[0] - midpoint[0]
+        to_centroid_y = centroid[1] - midpoint[1]
+        dot_val = nx * to_centroid_x + ny * to_centroid_y
+        if dot_val < 0:
+            nx = -nx
+            ny = -ny
+        d = nx * p_i[0] + ny * p_i[1] + margin_px
+        lines.append((nx, ny, d))
+    q_inner = []
+    intersect_fail = False
+    if not has_zero_edge:
+        for i in range(4):
+            nx1, ny1, d1 = lines[(i - 1) % 4]
+            nx2, ny2, d2 = lines[i]
+            det = nx1 * ny2 - ny1 * nx2
+            if abs(det) < 1e-06:
+                intersect_fail = True
+                break
+            x = (d1 * ny2 - ny1 * d2) / det
+            y = (nx1 * d2 - d1 * nx2) / det
+            if not np.isfinite(x) or not np.isfinite(y):
+                intersect_fail = True
+                break
+            q_inner.append([x, y])
+    valid = False
+    source = 'geometric_inset'
+    inner_poly = None
+    if not has_zero_edge and (not intersect_fail) and (len(q_inner) == 4):
+        q_inner_np = np.array(q_inner, dtype=np.float32)
+        area = cv2.contourArea(q_inner_np)
+        is_convex = cv2.isContourConvex(q_inner_np.astype(np.int32))
+        if area > 0 and is_convex:
+            inner_poly = np.zeros_like(poly_f)
+            for original_idx in range(4):
+                sorted_idx_pos = np.where(sorted_indices == original_idx)[0][0]
+                inner_poly[original_idx] = q_inner_np[sorted_idx_pos]
+            valid = True
+    if not valid:
+        source = 'centroid_fallback'
+        dists = np.linalg.norm(poly_f - centroid, axis=1)
+        avg_radius = np.mean(dists)
+        scale = max(0.0, 1.0 - margin_px / max(avg_radius, 1.0))
+        inner_poly = centroid + scale * (poly_f - centroid)
+        fallback_area = cv2.contourArea(inner_poly)
+        fallback_is_convex = cv2.isContourConvex(inner_poly.astype(np.int32))
+        if fallback_area > 0 and fallback_is_convex:
+            valid = True
+        else:
+            valid = False
+    return (inner_poly, source, valid)
+
+def V34__polygon_to_mask(image_shape, polygon):
+    h, w = image_shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    poly_np = np.array(polygon, dtype=np.int32)
+    cv2.fillPoly(mask, [poly_np], 255)
+    return mask
+
+def V34__build_panel_inner_mask(image_shape, polygon, margin_px):
+    h, w = image_shape[:2]
+    raw_mask = np.zeros((h, w), dtype=np.uint8)
+    poly_np = np.array(polygon, dtype=np.int32)
+    cv2.fillPoly(raw_mask, [poly_np], 255)
+    if margin_px <= 0:
+        inner_mask = raw_mask.copy()
+    else:
+        kernel_size = 2 * margin_px + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        inner_mask = cv2.erode(raw_mask, kernel, iterations=1)
+    raw_area = int(np.count_nonzero(raw_mask))
+    inner_area = int(np.count_nonzero(inner_mask))
+    area_ratio = float(inner_area / raw_area) if raw_area > 0 else 0.0
+    return (raw_mask, inner_mask, raw_area, inner_area, area_ratio)
+
+def V34__summarize_panel_inner_areas(image_shape, panel_polygons, panel_sources=None, image_stem=None, debug_img_base=None):
+    if image_stem is None:
+        image_stem = 'unknown'
+    if panel_sources is None:
+        panel_sources = ['unknown'] * len(panel_polygons)
+    n = len(panel_polygons)
+    raw_total = 0
+    m1_total = 0
+    m2_total = 0
+    m3_total = 0
+    ratios_m1 = []
+    ratios_m2 = []
+    ratios_m3 = []
+    rows_csv = []
+    debug_img = None
+    if debug_img_base is not None:
+        debug_img = debug_img_base.copy()
+    for idx, poly in enumerate(panel_polygons):
+        poly_np = np.array(poly, dtype=np.float32)
+        source = panel_sources[idx]
+        _, mask_m1, raw_a, m1_a, r1 = V34__build_panel_inner_mask(image_shape, poly_np, V34__INNER_MARGIN_BASE_PX * 1)
+        _, mask_m2, _, m2_a, r2 = V34__build_panel_inner_mask(image_shape, poly_np, V34__INNER_MARGIN_BASE_PX * 2)
+        _, mask_m3, _, m3_a, r3 = V34__build_panel_inner_mask(image_shape, poly_np, V34__INNER_MARGIN_BASE_PX * 3)
+        if not raw_a >= m1_a >= m2_a >= m3_a:
+            print(f'[PANEL_INNER_AREA_WARN] idx={idx} reason=non_monotonic raw={raw_a} m1={m1_a} m2={m2_a} m3={m3_a}')
+        raw_total += raw_a
+        m1_total += m1_a
+        m2_total += m2_a
+        m3_total += m3_a
+        ratios_m1.append(r1)
+        ratios_m2.append(r2)
+        ratios_m3.append(r3)
+        print(f'[PANEL_INNER_AREA] image={image_stem} idx={idx} source={source} raw={raw_a} m1={m1_a} ratio1={r1:.3f} m2={m2_a} ratio2={r2:.3f} m3={m3_a} ratio3={r3:.3f}')
+        rows_csv.append({'image': image_stem, 'idx': idx, 'source': source, 'raw_area': raw_a, 'margin_1_area': m1_a, 'margin_1_ratio': f'{r1:.3f}', 'margin_2_area': m2_a, 'margin_2_ratio': f'{r2:.3f}', 'margin_3_area': m3_a, 'margin_3_ratio': f'{r3:.3f}'})
+        if debug_img is not None:
+            cv2.polylines(debug_img, [poly_np.astype(np.int32)], True, (0, 255, 255), V34__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            contours, _ = cv2.findContours(mask_m2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid_contours = [c for c in contours if cv2.contourArea(c) > 5]
+            if valid_contours:
+                cv2.drawContours(debug_img, valid_contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+            else:
+                cv2.drawContours(debug_img, contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+    if V34__SAVE_INNER_MASK_DEBUG and debug_img is not None:
+        out_dir = Path(V34__OUTPUT_DEBUG_DIR)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out_dir / f'debug_{image_stem}_inner_margin_x2.JPG'), debug_img)
+    if V34__DRAW_INNER_CONTOUR_DEBUG and debug_img_base is not None:
+        for idx, poly in enumerate(panel_polygons):
+            poly_np = np.array(poly, dtype=np.float32)
+            _, mask_m2, _, _, _ = V34__build_panel_inner_mask(image_shape, poly_np, V34__INNER_MARGIN_BASE_PX * 2)
+            contours, _ = cv2.findContours(mask_m2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid_contours = [c for c in contours if cv2.contourArea(c) > 5]
+            if valid_contours:
+                cv2.drawContours(debug_img_base, valid_contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+            else:
+                cv2.drawContours(debug_img_base, contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+    r1_total = m1_total / raw_total if raw_total > 0 else 0.0
+    r2_total = m2_total / raw_total if raw_total > 0 else 0.0
+    r3_total = m3_total / raw_total if raw_total > 0 else 0.0
+    print(f'[PANEL_INNER_AREA_SUMMARY] image={image_stem} n={n} raw_total={raw_total} m1_total={m1_total} ratio1={r1_total:.3f} m2_total={m2_total} ratio2={r2_total:.3f} m3_total={m3_total} ratio3={r3_total:.3f}')
+    if ratios_m1:
+        print(f'[PANEL_INNER_AREA_STATS] image={image_stem} margin=1 min={np.min(ratios_m1):.3f} mean={np.mean(ratios_m1):.3f} max={np.max(ratios_m1):.3f}')
+        print(f'[PANEL_INNER_AREA_STATS] image={image_stem} margin=2 min={np.min(ratios_m2):.3f} mean={np.mean(ratios_m2):.3f} max={np.max(ratios_m2):.3f}')
+        print(f'[PANEL_INNER_AREA_STATS] image={image_stem} margin=3 min={np.min(ratios_m3):.3f} mean={np.mean(ratios_m3):.3f} max={np.max(ratios_m3):.3f}')
+    out_dir = Path(V34__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / f'panel_inner_area_{image_stem}.csv'
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['image', 'idx', 'source', 'raw_area', 'margin_1_area', 'margin_1_ratio', 'margin_2_area', 'margin_2_ratio', 'margin_3_area', 'margin_3_ratio'])
+        writer.writeheader()
+        writer.writerows(rows_csv)
+
+def V34__group_into_blocks(panels):
+    """Groups panels into 1-column or 2-column blocks based on X coordinate."""
+    panels_with_cx = []
+    for p in panels:
+        x1, y1, x2, y2 = p['bbox']
+        cx = (x1 + x2) / 2.0
+        panels_with_cx.append((cx, p))
+    panels_with_cx.sort(key=lambda x: x[0])
+    columns = []
+    for cx, p in panels_with_cx:
+        if not columns:
+            columns.append([p])
+        else:
+            mean_x = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in columns[-1]])
+            if cx - mean_x > 40:
+                columns.append([p])
+            else:
+                columns[-1].append(p)
+    for col in columns:
+        col.sort(key=lambda p: (p['bbox'][1] + p['bbox'][3]) / 2.0)
+    columns.sort(key=lambda col: np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in col]))
+    blocks = []
+    i = 0
+    n_cols = len(columns)
+    while i < n_cols:
+        col_curr = columns[i]
+        cx_curr = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in col_curr])
+        if i + 1 < n_cols:
+            col_next = columns[i + 1]
+            cx_next = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in col_next])
+            if cx_next - cx_curr < 70:
+                blocks.append({'columns': [col_curr, col_next], 'panels': col_curr + col_next})
+                i += 2
+                continue
+        blocks.append({'columns': [col_curr], 'panels': col_curr})
+        i += 1
+    return blocks
+
+def V34__split_block_by_y_gap(block):
+    """Split a single block into sub-blocks along Y when a large vertical gap exists.
+    
+    - Sort panels by y_top inside each column, then across the full block.
+    - Compute median panel height as the reference scale.
+    - Split when gap between consecutive row-groups exceeds max(45px, 1.8 * median_height).
+    # Discard sub-blocks with too few panels: <2.
+    """
+    n_cols = len(block['columns'])
+    min_panels = 2
+    all_panels = sorted(block['panels'], key=lambda p: p['bbox'][1])
+    heights = [p['bbox'][3] - p['bbox'][1] for p in all_panels]
+    median_h = float(np.median(heights)) if heights else 30.0
+    gap_threshold = max(45.0, 1.8 * median_h)
+    row_clusters = []
+    for p in all_panels:
+        placed = False
+        for rc in row_clusters:
+            rc_mid_y = np.mean([(rp['bbox'][1] + rp['bbox'][3]) / 2.0 for rp in rc])
+            p_mid_y = (p['bbox'][1] + p['bbox'][3]) / 2.0
+            if abs(p_mid_y - rc_mid_y) < median_h:
+                rc.append(p)
+                placed = True
+                break
+        if not placed:
+            row_clusters.append([p])
+    row_clusters.sort(key=lambda rc: np.mean([(p['bbox'][1] + p['bbox'][3]) / 2.0 for p in rc]))
+    split_indices = []
+    for k in range(len(row_clusters) - 1):
+        bottom_k = max((p['bbox'][3] for p in row_clusters[k]))
+        top_k1 = min((p['bbox'][1] for p in row_clusters[k + 1]))
+        gap = top_k1 - bottom_k
+        if gap > gap_threshold:
+            split_indices.append(k + 1)
+    if not split_indices:
+        block['y_range'] = (min((p['bbox'][1] for p in all_panels)), max((p['bbox'][3] for p in all_panels)))
+        block['panel_count'] = len(all_panels)
+        block['median_panel_height'] = median_h
+        block['max_gap_used'] = gap_threshold
+        return ([block], median_h, [])
+    all_split_points = [0] + split_indices + [len(row_clusters)]
+    sub_row_groups = []
+    for i in range(len(all_split_points) - 1):
+        start_idx = all_split_points[i]
+        end_idx = all_split_points[i + 1]
+        sub_rows = row_clusters[start_idx:end_idx]
+        sub_panels = [p for rc in sub_rows for p in rc]
+        sub_row_groups.append((sub_panels, sub_rows))
+    sub_blocks = []
+    gaps_used = []
+    for i, (sub_panels_list, sub_rows) in enumerate(sub_row_groups):
+        if len(sub_panels_list) < min_panels:
+            continue
+        sub_panels_sorted_x = sorted(sub_panels_list, key=lambda p: (p['bbox'][0] + p['bbox'][2]) / 2.0)
+        sub_cols = []
+        for p in sub_panels_sorted_x:
+            px_cx = (p['bbox'][0] + p['bbox'][2]) / 2.0
+            if not sub_cols:
+                sub_cols.append([p])
+            else:
+                mean_x = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in sub_cols[-1]])
+                if px_cx - mean_x > 40:
+                    sub_cols.append([p])
+                else:
+                    sub_cols[-1].append(p)
+        for sc in sub_cols:
+            sc.sort(key=lambda p: (p['bbox'][1] + p['bbox'][3]) / 2.0)
+        sub_cols.sort(key=lambda sc: np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in sc]))
+        if i > 0:
+            prev_rows = sub_row_groups[i - 1][1]
+            prev_bottom = max((p['bbox'][3] for rc in prev_rows for p in rc))
+            curr_top = min((p['bbox'][1] for p in sub_panels_list))
+            gaps_used.append(float(curr_top - prev_bottom))
+        sub_blocks.append({'columns': sub_cols, 'panels': sub_panels_list, 'y_range': (min((p['bbox'][1] for p in sub_panels_list)), max((p['bbox'][3] for p in sub_panels_list))), 'panel_count': len(sub_panels_list), 'median_panel_height': median_h, 'max_gap_used': gap_threshold})
+    if not sub_blocks:
+        block['y_range'] = (min((p['bbox'][1] for p in all_panels)), max((p['bbox'][3] for p in all_panels)))
+        block['panel_count'] = len(all_panels)
+        block['median_panel_height'] = median_h
+        block['max_gap_used'] = gap_threshold
+        return ([block], median_h, [])
+    return (sub_blocks, median_h, gaps_used)
+
+def V34__get_boundary_x_at_y(boundary_pts, y_val):
+    if not boundary_pts:
+        return 0.0
+    if len(boundary_pts) == 1:
+        return boundary_pts[0][0]
+    pts = sorted(boundary_pts, key=lambda p: p[1])
+    if y_val <= pts[0][1]:
+        return pts[0][0]
+    if y_val >= pts[-1][1]:
+        return pts[-1][0]
+    for i in range(len(pts) - 1):
+        p0, p1 = (pts[i], pts[i + 1])
+        if p0[1] <= y_val <= p1[1]:
+            if abs(p1[1] - p0[1]) < 1e-05:
+                return p0[0]
+            t = (y_val - p0[1]) / (p1[1] - p0[1])
+            return p0[0] + t * (p1[0] - p0[0])
+    return pts[0][0]
+
+def V34__intersect_line_y_eq_mx_c_with_polyline(m, c, rail_pts):
+    if not rail_pts or len(rail_pts) < 2:
+        return None
+    for i in range(len(rail_pts) - 1):
+        x0, y0 = rail_pts[i]
+        x1, y1 = rail_pts[i + 1]
+        dx = x1 - x0
+        dy = y1 - y0
+        denom = dy - m * dx
+        if abs(denom) > 1e-06:
+            t = (m * x0 + c - y0) / denom
+            if 0.0 <= t <= 1.0:
+                return (x0 + t * dx, y0 + t * dy)
+    return None
+
+def V34__intersect_horizontal_line_with_vertical_boundary(m, c, boundary_pts):
+    for i in range(len(boundary_pts) - 1):
+        x0, y0 = boundary_pts[i]
+        x1, y1 = boundary_pts[i + 1]
+        dy = y1 - y0
+        dx = x1 - x0
+        if abs(dy) < 1e-05:
+            continue
+        denom = 1.0 - m * (dx / dy)
+        if abs(denom) < 1e-05:
+            continue
+        y_intersect = (m * x0 - m * y0 * (dx / dy) + c) / denom
+        if y0 <= y_intersect <= y1:
+            x_intersect = x0 + (y_intersect - y0) * (dx / dy)
+            return (x_intersect, y_intersect)
+    x0, y0 = boundary_pts[0]
+    x1, y1 = boundary_pts[1]
+    dy = y1 - y0
+    dx = x1 - x0
+    y_intersect = (m * x0 - m * y0 * (dx / (dy or 1.0)) + c) / (1.0 - m * (dx / (dy or 1.0)))
+    x_intersect = x0 + (y_intersect - y0) * (dx / (dy or 1.0))
+    return (x_intersect, y_intersect)
+
+def V34__draw_polyline(img, pts, color, thickness=2):
+    for idx in range(len(pts) - 1):
+        p1 = (int(round(pts[idx][0])), int(round(pts[idx][1])))
+        p2 = (int(round(pts[idx + 1][0])), int(round(pts[idx + 1][1])))
+        cv2.line(img, p1, p2, color, thickness, lineType=cv2.LINE_AA)
+
+def V34__detect_horizontal_gap_lines(gray, panels):
+    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    sobel_y_abs = np.abs(sobel_y)
+    gap_lines = []
+    rows = []
+    sorted_panels = sorted(panels, key=lambda p: (p['bbox'][1] + p['bbox'][3]) / 2.0)
+    for p in sorted_panels:
+        yc = (p['bbox'][1] + p['bbox'][3]) / 2.0
+        placed = False
+        for r in rows:
+            r_yc = np.mean([(pt['bbox'][1] + pt['bbox'][3]) / 2.0 for pt in r])
+            if abs(yc - r_yc) < 20:
+                r.append(p)
+                placed = True
+                break
+        if not placed:
+            rows.append([p])
+    rows.sort(key=lambda r: np.mean([(pt['bbox'][1] + pt['bbox'][3]) / 2.0 for pt in r]))
+    search_regions = []
+    r_top_y = min((p['bbox'][1] for p in rows[0]))
+    search_regions.append((r_top_y - 6, r_top_y + 6, rows[0]))
+    for i in range(len(rows) - 1):
+        r_bot_y = max((p['bbox'][3] for p in rows[i]))
+        r_top_y_next = min((p['bbox'][1] for p in rows[i + 1]))
+        y_mid = (r_bot_y + r_top_y_next) / 2.0
+        combined_panels = rows[i] + rows[i + 1]
+        search_regions.append((y_mid - 8, y_mid + 8, combined_panels))
+    r_bot_y_last = max((p['bbox'][3] for p in rows[-1]))
+    search_regions.append((r_bot_y_last - 6, r_bot_y_last + 6, rows[-1]))
+    h_img, w_img = gray.shape[:2]
+    for idx_reg, (y_start, y_end, reg_panels) in enumerate(search_regions):
+        y_start_int = int(max(0, math.floor(y_start)))
+        y_end_int = int(min(h_img - 1, math.ceil(y_end)))
+        if y_start_int >= y_end_int:
+            y_mid = int(round((y_start + y_end) / 2.0))
+            x_min = int(max(0, min((p['bbox'][0] for p in reg_panels)) - 5))
+            x_max = int(min(w_img - 1, max((p['bbox'][2] for p in reg_panels)) + 5))
+            gap_lines.append((y_mid, x_min, x_max))
+            continue
+        x_min = int(max(0, min((p['bbox'][0] for p in reg_panels)) - 5))
+        x_max = int(min(w_img - 1, max((p['bbox'][2] for p in reg_panels)) + 5))
+        intensities = []
+        for y_coord in range(y_start_int, y_end_int + 1):
+            val = np.mean(sobel_y_abs[y_coord, x_min:x_max])
+            intensities.append((val, y_coord))
+        best_y = max(intensities, key=lambda x: x[0])[1]
+        gap_lines.append((best_y, x_min, x_max))
+    return gap_lines
+
+def V34__evaluate_angle_candidate(gray, raw_gaps, x_mid, theta, n_samples=25):
+    m = math.tan(theta)
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    total_depth = 0.0
+    max_offset = 6
+    for y_anchor, x_start, x_end in raw_gaps:
+        xs = np.linspace(x_start, x_end, n_samples)
+        profile_sums = np.zeros(2 * max_offset + 1)
+        profile_counts = np.zeros(2 * max_offset + 1)
+        for dn in range(-max_offset, max_offset + 1):
+            for x in xs:
+                x_sample = x - dn * sin_theta
+                y_sample = m * (x - x_mid) + y_anchor + dn * cos_theta
+                x_idx = int(round(x_sample))
+                y_idx = int(round(y_sample))
+                if 0 <= x_idx < gray.shape[1] and 0 <= y_idx < gray.shape[0]:
+                    profile_sums[dn + max_offset] += gray[y_idx, x_idx]
+                    profile_counts[dn + max_offset] += 1
+        profile = profile_sums / np.maximum(profile_counts, 1)
+        smoothed = np.convolve(profile, np.ones(3) / 3.0, mode='same')
+        best_depth = 0.0
+        for v in range(1, len(smoothed) - 1):
+            if smoothed[v] < smoothed[v - 1] and smoothed[v] < smoothed[v + 1]:
+                left_peak = np.max(smoothed[:v])
+                right_peak = np.max(smoothed[v + 1:]) if v + 1 < len(smoothed) else smoothed[v]
+                depth = min(left_peak, right_peak) - smoothed[v]
+                if depth > best_depth:
+                    best_depth = depth
+        total_depth += best_depth
+    return total_depth
+
+def V34__get_oriented_line_y_at_x(m, x_mid, y_anchor, x_val):
+    return m * (x_val - x_mid) + y_anchor
+
+def V34__intersect_oriented_line_with_boundary(m_perp, x_mid, y_anchor, boundary_pts):
+    c = y_anchor - m_perp * x_mid
+    return V34__intersect_horizontal_line_with_vertical_boundary(m_perp, c, boundary_pts)
+
+def V34__shift_boundary_x(boundary_pts, dx):
+    return [(float(x) + float(dx), float(y)) for x, y in boundary_pts]
+
+def V34__sort_panel_corners(poly):
+    if len(poly) != 4:
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        x1, y1, x2, y2 = (min(xs), min(ys), max(xs), max(ys))
+        corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    else:
+        corners = poly
+    sorted_by_y = sorted(corners, key=lambda p: p[1])
+    top_two = sorted(sorted_by_y[:2], key=lambda p: p[0])
+    bottom_two = sorted(sorted_by_y[2:], key=lambda p: p[0])
+    TL = top_two[0]
+    TR = top_two[1]
+    BR = bottom_two[1]
+    BL = bottom_two[0]
+    return (TL, TR, BR, BL)
+
+def V34__fit_consensus_vertical_boundary(points, y_min, y_max, row_count):
+    ys = [p[1] for p in points]
+    xs = [p[0] for p in points]
+    if len(xs) < 2:
+        val = float(np.mean(xs) if xs else 0.0)
+        return [(val, float(y)) for y in np.linspace(y_min, y_max, 11)]
+    a_base, b_base = np.polyfit(ys, xs, 1)
+    if row_count < 8:
+        return [(a_base * y + b_base, y) for y in np.linspace(y_min, y_max, 11)]
+    else:
+        try:
+            coeffs = np.polyfit(ys, xs, 2)
+            fn = np.poly1d(coeffs)
+            pts = []
+            for y in np.linspace(y_min, y_max, 11):
+                x_val = fn(y)
+                x_base = a_base * y + b_base
+                x_val = max(x_base - 4.0, min(x_base + 4.0, x_val))
+                pts.append((x_val, y))
+            return pts
+        except Exception:
+            return [(a_base * y + b_base, y) for y in np.linspace(y_min, y_max, 11)]
+
+def V34__extract_support_points_for_horizontal_edge(rotated_gray, m_ref, c_ref, x_left, x_right, block_name, row_idx, row_count, is_outer_edge=False):
+    num_samples = max(80, int(abs(x_right - x_left) / 2))
+    sample_xs = np.linspace(x_left, x_right, num_samples)
+    length = math.sqrt(1.0 + m_ref ** 2)
+    nx = -m_ref / length
+    ny = 1.0 / length
+    win = 3 if is_outer_edge else 4
+    support_pts = []
+    min_x = x_left + 4 if is_outer_edge else x_left
+    max_x = x_right - 4 if is_outer_edge else x_right
+    for sx in sample_xs:
+        if sx < min_x or sx > max_x:
+            continue
+        sy_est = m_ref * sx + c_ref
+        profile = []
+        for d in range(-win, win + 1):
+            px = sx + d * nx
+            py = sy_est + d * ny
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(rotated_gray[y_idx, x_idx])
+        if len(profile) < 3:
+            continue
+        min_idx = np.argmin(profile)
+        if 0 < min_idx < len(profile) - 1:
+            if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                left_peak = np.max(profile[:min_idx])
+                right_peak = np.max(profile[min_idx + 1:])
+                valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                    px_val = sx + (min_idx - win) * nx
+                    py_val = sy_est + (min_idx - win) * ny
+                    support_pts.append((px_val, py_val))
+    clean_pts = []
+    if len(support_pts) >= 4:
+        xs = np.array([pt[0] for pt in support_pts])
+        ys = np.array([pt[1] for pt in support_pts])
+        res = ys - (m_ref * xs + c_ref)
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep_step1 = devs <= max(2.0, 2.5 * mad)
+        xs_s1 = xs[keep_step1]
+        ys_s1 = ys[keep_step1]
+        if len(xs_s1) >= 4:
+            curr_xs = xs_s1.copy()
+            curr_ys = ys_s1.copy()
+            m_fit, c_fit = (m_ref, c_ref)
+            for _ in range(3):
+                if len(curr_xs) < 4:
+                    break
+                try:
+                    m_fit, c_fit = np.polyfit(curr_xs, curr_ys, 1)
+                    res_fit = np.abs(curr_ys - (m_fit * curr_xs + c_fit))
+                    keep_step2 = res_fit <= 2.0
+                    if np.sum(keep_step2) == len(curr_xs):
+                        break
+                    curr_xs = curr_xs[keep_step2]
+                    curr_ys = curr_ys[keep_step2]
+                except Exception:
+                    break
+            if len(curr_xs) >= 4:
+                clean_pts = [(float(x), float(y)) for x, y in zip(curr_xs, curr_ys)]
+    support_valid = False
+    support_line_m = m_ref
+    support_line_c = c_ref
+    support_coverage = 0.0
+    support_residual_std = 0.0
+    if len(clean_pts) >= max(8, int(0.35 * num_samples)):
+        xs_clean = np.array([pt[0] for pt in clean_pts])
+        ys_clean = np.array([pt[1] for pt in clean_pts])
+        try:
+            residuals_to_ref = ys_clean - float(m_ref) * xs_clean
+            c_ref_fit = float(np.median(residuals_to_ref))
+            std_res_fit = float(np.std(ys_clean - (float(m_ref) * xs_clean + c_ref_fit)))
+            n_bins = 8
+            bins = np.linspace(x_left, x_right, n_bins + 1)
+            bin_indices = np.digitize(xs_clean, bins) - 1
+            unique_bins = np.unique(bin_indices)
+            unique_bins = unique_bins[(unique_bins >= 0) & (unique_bins < n_bins)]
+            coverage = len(unique_bins) / n_bins
+            center_x = 0.5 * (float(x_left) + float(x_right))
+            center_shift = float(m_ref) * center_x + c_ref_fit - (float(m_ref) * center_x + float(c_ref))
+            max_shift = 7.0 if not is_outer_edge else 5.0
+            if coverage >= 0.65 and std_res_fit <= 2.0 and (abs(center_shift) <= max_shift):
+                support_valid = True
+                support_line_m = float(m_ref)
+                support_line_c = c_ref_fit
+                support_coverage = coverage
+                support_residual_std = std_res_fit
+        except Exception:
+            pass
+    return (support_line_m, support_line_c, clean_pts, support_coverage, support_residual_std, support_valid, len(support_pts))
+
+def V34__snap_horizontal_boundary(rotated_gray, m_row, c_row_yolo, c_row_pitch, left_bound_x, right_bound_x, r, row_count, block_name, x_mid):
+    win = V34__LAST_ROW_SNAP_WINDOW if r == row_count else V34__THERMAL_GAP_SNAP_WINDOW
+    is_outer = r == 0 or r == row_count
+    m_fit, c_fit, clean_pts, coverage, std_res, support_valid, n_raw = V34__extract_support_points_for_horizontal_edge(rotated_gray, m_row, c_row_yolo, left_bound_x, right_bound_x, block_name, r, row_count, is_outer_edge=is_outer)
+    sample_xs = np.linspace(left_bound_x, right_bound_x, 30)
+    best_thermal_dy = 0
+    min_thermal_val = 99999.0
+    for dy in range(-win, win + 1):
+        vals = []
+        for sx in sample_xs:
+            y_val = int(round(m_row * sx + c_row_yolo)) + dy
+            y_val = max(0, min(rotated_gray.shape[0] - 1, y_val))
+            x_val = max(0, min(rotated_gray.shape[1] - 1, int(round(sx))))
+            vals.append(rotated_gray[y_val, x_val])
+        avg_v = np.mean(vals) if vals else 255.0
+        if avg_v < min_thermal_val:
+            min_thermal_val = avg_v
+            best_thermal_dy = dy
+    c_row_thermal = c_row_yolo + best_thermal_dy
+    thermal_ok = min_thermal_val < 135.0
+    if support_valid:
+        c_final = m_fit * x_mid + c_fit
+        selected_cand = 'support'
+        reason = 'valid_support'
+    elif c_row_yolo is not None:
+        c_final = c_row_yolo
+        selected_cand = 'yolo'
+        reason = 'support_invalid_fallback_yolo'
+    elif thermal_ok:
+        c_final = c_row_thermal
+        selected_cand = 'thermal'
+        reason = 'support_invalid_fallback_thermal'
+    else:
+        c_final = c_row_pitch
+        selected_cand = 'pitch'
+        reason = 'support_invalid_fallback_pitch'
+    print(f'[SUPPORT_EDGE] {block_name} {r} raw={n_raw} clean={len(clean_pts)} coverage={coverage:.3f} residual={std_res:.3f} source={selected_cand} reason={reason}')
+    return (c_final, selected_cand, coverage, clean_pts, c_fit, c_row_thermal, c_row_yolo, c_row_pitch, c_final, m_fit, c_fit, clean_pts, coverage, std_res, support_valid)
+
+def V34__recover_bad_orientation_horizontal_gaps_from_profile(rotated_gray, boundaries, row_count, y_min, y_max, x_mid, m_base, block_name):
+    """Recover horizontal separators from the thermal image when row priors are unusable.
+
+    This is intentionally NOT a YOLO-polygon fallback. YOLO only gives row_count and a
+    coarse y-range. The actual row positions are selected from a dark-line projection
+    between the fitted vertical rails. The result is allowed to draw/build polygons
+    because every row line is reconstructed from image intensity inside the rail span.
+    """
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    right_rail = boundaries.get('right_outer')
+    if left_rail is None or right_rail is None or row_count <= 0:
+        return None
+    y0 = max(0.0, float(y_min))
+    y1 = min(float(h - 1), float(y_max))
+    if y1 <= y0 + 8:
+        return None
+    pitch = (y1 - y0) / float(row_count)
+    prof = {}
+    for yi in range(int(math.floor(y0)), int(math.ceil(y1)) + 1):
+        xL = V34__get_boundary_x_at_y(left_rail, yi) + 7.0
+        xR = V34__get_boundary_x_at_y(right_rail, yi) - 7.0
+        if not xR > xL + 10:
+            continue
+        xs = np.linspace(max(0, xL), min(w - 1, xR), max(25, int((xR - xL) / 3)))
+        vals = []
+        for xx in xs:
+            vals.append(float(rotated_gray[int(max(0, min(h - 1, yi))), int(max(0, min(w - 1, round(xx))))]))
+        if vals:
+            prof[yi] = float(np.percentile(vals, 20))
+    if len(prof) < max(10, row_count):
+        return None
+    ys_all = sorted(prof.keys())
+    vals_all = np.array([prof[y] for y in ys_all], dtype=np.float32)
+    vals_sm = vals_all.copy()
+    for i in range(len(vals_all)):
+        a = max(0, i - 2)
+        b = min(len(vals_all), i + 3)
+        vals_sm[i] = float(np.median(vals_all[a:b]))
+    prof_sm = {y: float(v) for y, v in zip(ys_all, vals_sm)}
+    chosen_y = []
+    for r in range(row_count + 1):
+        seed = y0 + r * pitch
+        win = max(4, min(14, 0.33 * pitch))
+        if r in (0, row_count):
+            win = max(3, min(9, 0.22 * pitch))
+        lo = int(max(y0, seed - win))
+        hi = int(min(y1, seed + win))
+        cand = [yy for yy in range(lo, hi + 1) if yy in prof_sm]
+        if not cand:
+            yy_best = seed
+        else:
+            yy_best = min(cand, key=lambda yy: prof_sm[yy] + 0.45 * abs(yy - seed))
+        chosen_y.append(float(yy_best))
+    for r in range(1, len(chosen_y)):
+        min_step = max(6.0, 0.45 * pitch)
+        if chosen_y[r] <= chosen_y[r - 1] + min_step:
+            chosen_y[r] = chosen_y[r - 1] + pitch
+    if chosen_y[-1] > y1 + 2:
+        shift = chosen_y[-1] - (y1 + 2)
+        chosen_y = [yy - shift for yy in chosen_y]
+    recovered = []
+    m_ref = float(m_base)
+    for r, y_seed in enumerate(chosen_y):
+        xL_seed = V34__get_boundary_x_at_y(left_rail, y_seed) + 8.0
+        xR_seed = V34__get_boundary_x_at_y(right_rail, y_seed) - 8.0
+        xs = np.linspace(max(0, xL_seed), min(w - 1, xR_seed), max(30, int(max(10, xR_seed - xL_seed) / 2)))
+        pts = []
+        for sx in xs:
+            best_y = None
+            best_score = 1000000000.0
+            for dy in range(-5, 6):
+                yy = int(round(y_seed + dy))
+                if yy < 1 or yy >= h - 1:
+                    continue
+                xx = int(max(0, min(w - 1, round(sx))))
+                center = float(rotated_gray[yy, xx])
+                above = float(rotated_gray[max(0, yy - 3), xx])
+                below = float(rotated_gray[min(h - 1, yy + 3), xx])
+                contrast = min(above, below) - center
+                score = center - 0.35 * max(contrast, 0.0) + 1.0 * abs(dy)
+                if center < 170 and score < best_score:
+                    best_score = score
+                    best_y = float(yy)
+            if best_y is not None:
+                pts.append((float(sx), best_y))
+        if len(pts) >= 8:
+            xs_arr = np.array([q[0] for q in pts], dtype=np.float32)
+            ys_arr = np.array([q[1] for q in pts], dtype=np.float32)
+            try:
+                m_raw, c_raw = np.polyfit(xs_arr, ys_arr, 1)
+                pred = m_raw * xs_arr + c_raw
+                resid = ys_arr - pred
+                mad = float(np.median(np.abs(resid - np.median(resid)))) + 1e-06
+                keep = np.abs(resid) <= max(1.5, 2.5 * mad)
+                if int(np.sum(keep)) >= 8:
+                    m_raw, c_raw = np.polyfit(xs_arr[keep], ys_arr[keep], 1)
+                    pts_clean = [(float(x), float(y)) for x, y, k in zip(xs_arr, ys_arr, keep) if bool(k)]
+                else:
+                    pts_clean = pts
+                x_anchor = float(np.mean([xL_seed, xR_seed]))
+                m_line, c_line, changed, angle_diff = V34__clamp_slope_about_anchor(float(m_raw), float(c_raw), m_ref, x_anchor, max_angle_deg=3.0)
+                y_center = m_line * x_mid + c_line
+                if abs(y_center - y_seed) > max(4.0, 0.18 * pitch):
+                    c_line += y_seed - y_center
+                source = 'profile_recovered'
+                support_valid = True
+                residual_std = float(np.std([y - (m_line * x + c_line) for x, y in pts_clean])) if pts_clean else 0.0
+            except Exception:
+                m_line = m_ref
+                c_line = y_seed - m_line * x_mid
+                pts_clean = []
+                source = 'profile_pitch'
+                support_valid = True
+                residual_std = 0.0
+        else:
+            m_line = m_ref
+            c_line = y_seed - m_line * x_mid
+            pts_clean = []
+            source = 'profile_pitch'
+            support_valid = True
+            residual_std = 0.0
+        recovered.append({'y_snap': float(m_line * x_mid + c_line), 'is_good': True, 'support_ratio': 1.0, 'mean_offset': 0.0, 'pitch_deviation': 0.0, 'support_pts': pts_clean, 'x_start': float(xL_seed), 'x_end': float(xR_seed), 'm_row': float(m_line), 'c_row': float(c_line), 'c_selected': float(c_line), 'c_row_yolo': None, 'c_row_thermal': None, 'c_row_pitch': float(y_seed - m_ref * x_mid), 'c_row_support': float(c_line), 'selected_cand': source, 'support_valid': support_valid, 'support_line_m': float(m_line), 'support_line_c': float(c_line), 'support_clean_pts': pts_clean, 'support_coverage': 1.0 if pts_clean else 0.0, 'support_residual_std': residual_std})
+        print(f'[PROFILE_ROW_RECOVER] block={block_name} r={r} source={source} y={m_line * x_mid + c_line:.2f} n={len(pts_clean)} m={m_line:.5f}')
+    if recovered:
+        m_candidates = []
+        for g in recovered:
+            src = g.get('selected_cand')
+            n_pts = len(g.get('support_clean_pts', []) or [])
+            if src in ('profile_recovered', 'profile_pitch') and g.get('support_line_m') is not None and (n_pts >= 8):
+                m_candidates.append(float(g['support_line_m']))
+        if len(m_candidates) >= max(2, min(5, len(recovered) // 3)):
+            m_locked = float(np.median(m_candidates))
+        else:
+            m_locked = float(m_ref)
+        for r_idx, g in enumerate(recovered):
+            y_anchor_old = float(g.get('y_snap', m_locked * x_mid + g.get('c_row', 0.0)))
+            pts_for_anchor = g.get('support_clean_pts', []) or []
+            if len(pts_for_anchor) >= 8:
+                c_from_pts = float(np.median([float(y) - m_locked * float(x) for x, y in pts_for_anchor]))
+                y_from_pts = m_locked * float(x_mid) + c_from_pts
+                max_center_shift = 2.0
+                if abs(y_from_pts - y_anchor_old) > max_center_shift:
+                    c_from_pts += math.copysign(abs(y_anchor_old - y_from_pts) - max_center_shift, y_anchor_old - y_from_pts)
+                c_locked = c_from_pts
+                anchor_src = 'median_support_residual'
+            else:
+                c_locked = y_anchor_old - m_locked * float(x_mid)
+                anchor_src = 'x_mid_anchor'
+            y_anchor = m_locked * float(x_mid) + c_locked
+            g['m_row_raw'] = float(g.get('m_row', m_locked))
+            g['c_row_raw'] = float(g.get('c_row', c_locked))
+            g['support_line_m_raw'] = float(g.get('support_line_m', m_locked))
+            g['support_line_c_raw'] = float(g.get('support_line_c', c_locked))
+            g['m_row'] = m_locked
+            g['c_row'] = c_locked
+            g['c_selected'] = c_locked
+            g['support_line_m'] = m_locked
+            g['support_line_c'] = c_locked
+            g['y_snap'] = y_anchor
+            g['selected_cand'] = 'profile_recovered_locked' if g.get('selected_cand') == 'profile_recovered' else g.get('selected_cand')
+            g['profile_lock_anchor_source'] = anchor_src
+            print(f'[PROFILE_ROW_LOCK_ANCHOR] block={block_name} r={r_idx} source={anchor_src} y_old={y_anchor_old:.2f} y_new={y_anchor:.2f} n={len(pts_for_anchor)}')
+        print(f'[PROFILE_ROW_SLOPE_LOCK] block={block_name} m_locked={m_locked:.5f} n_rows={len(recovered)} n_candidates={len(m_candidates)}')
+    print(f'[BAD_BLOCK_RECOVERED] block={block_name} source=dark_profile rows={len(recovered)} pitch={pitch:.2f} action=use_snap_not_yolo')
+    return recovered
+
+def V34__refine_horizontal_rows_to_dark_groove(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=2, margin_px=8.0, min_samples=20):
+    """Small post-refinement: keep row slope, nudge only intercept so the snapped
+    row sits tighter on the actual dark groove between the fitted rails.
+
+    This is intentionally conservative: only a tiny +/-search_radius pixel search is
+    allowed, and the row is moved only when the dark-groove score improves clearly.
+    """
+    if not snapped_horiz_gaps:
+        return snapped_horiz_gaps
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    right_rail = boundaries.get('right_outer')
+    if left_rail is None or right_rail is None:
+        return snapped_horiz_gaps
+    refined = []
+    for r_idx, g in enumerate(snapped_horiz_gaps):
+        try:
+            m_row = float(g.get('support_line_m') if g.get('support_line_m') is not None else g.get('m_row', 0.0))
+            c_row = float(g.get('support_line_c') if g.get('support_line_c') is not None else g.get('c_row', 0.0))
+            y_mid = float(m_row * x_mid + c_row)
+            x0 = float(g.get('x_start', V34__get_boundary_x_at_y(left_rail, y_mid) + margin_px))
+            x1 = float(g.get('x_end', V34__get_boundary_x_at_y(right_rail, y_mid) - margin_px))
+            if not x1 > x0 + 10:
+                x0 = float(V34__get_boundary_x_at_y(left_rail, y_mid) + margin_px)
+                x1 = float(V34__get_boundary_x_at_y(right_rail, y_mid) - margin_px)
+            if not x1 > x0 + 10:
+                refined.append(g)
+                continue
+            xs = np.linspace(max(0.0, x0), min(float(w - 1), x1), max(min_samples, int((x1 - x0) / 3)))
+            base_score = None
+            best_score = None
+            best_dy = 0.0
+            best_stats = None
+            for dy in range(-int(search_radius), int(search_radius) + 1):
+                vals_c = []
+                vals_a = []
+                vals_b = []
+                for xx in xs:
+                    yy = int(round(m_row * float(xx) + c_row + float(dy)))
+                    xi = int(round(xx))
+                    if yy < 2 or yy >= h - 2 or xi < 0 or (xi >= w):
+                        continue
+                    vals_c.append(float(rotated_gray[yy, xi]))
+                    vals_a.append(float(rotated_gray[yy - 2, xi]))
+                    vals_b.append(float(rotated_gray[yy + 2, xi]))
+                if len(vals_c) < min_samples:
+                    continue
+                center_med = float(np.median(vals_c))
+                center_q25 = float(np.percentile(vals_c, 25))
+                contrasts = [min(a, b) - c for a, b, c in zip(vals_a, vals_b, vals_c)]
+                contrast_pos = [max(0.0, v) for v in contrasts]
+                contrast_med = float(np.median(contrast_pos)) if contrast_pos else 0.0
+                dark_ratio = float(sum((1 for v in vals_c if v < 135.0)) / max(1, len(vals_c)))
+                score = center_q25 + 0.35 * center_med - 0.85 * contrast_med - 10.0 * dark_ratio + 0.4 * abs(float(dy))
+                stats = (center_med, center_q25, contrast_med, dark_ratio, len(vals_c))
+                if dy == 0:
+                    base_score = score
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_dy = float(dy)
+                    best_stats = stats
+            if best_score is None or base_score is None:
+                refined.append(g)
+                continue
+            improve = float(base_score - best_score)
+            if abs(best_dy) >= 0.5 and improve >= 1.2:
+                new_c = c_row + best_dy
+                g = dict(g)
+                g['c_row'] = float(new_c)
+                g['c_selected'] = float(new_c)
+                g['y_snap'] = float(m_row * x_mid + new_c)
+                if g.get('support_line_c') is not None:
+                    g['support_line_c'] = float(new_c)
+                if g.get('c_row_support') is not None and str(g.get('selected_cand')) in ('support', 'support_prefit', 'profile_recovered', 'profile_recovered_locked', 'profile_pitch', 'thermal'):
+                    g['c_row_support'] = float(new_c)
+                g['dark_refine_dy'] = float(best_dy)
+                g['dark_refine_improve'] = improve
+                cm, cq25, ccontr, dr, ns = best_stats
+                print(f'[ROW_DARK_REFINE] block={block_name} r={r_idx} dy={best_dy:+.2f} improve={improve:.2f} med={cm:.1f} q25={cq25:.1f} contrast={ccontr:.2f} dark_ratio={dr:.2f} n={ns}')
+                refined.append(g)
+            else:
+                refined.append(g)
+        except Exception:
+            refined.append(g)
+    return refined
+
+def V34__refine_horizontal_rows_by_local_valley_anchors(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=V34__V34_ROW_SEARCH_RADIUS_PX, margin_px=7.0, max_shift_px=4.0, min_coverage=0.5, max_residual_std=2.6):
+    """V34 row refinement: denser sub-pixel valley anchors + guarded slope refit.
+
+    Compared with V33, this pass increases x-density and searches at 0.5 px vertical
+    increments using bilinear sampling. It keeps the previous safety rules: rows are
+    built only from fitted rails and image dark valleys; YOLO polygons are not used
+    as final geometry.
+    """
+    if not snapped_horiz_gaps:
+        return snapped_horiz_gaps
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    right_rail = boundaries.get('right_outer')
+    if left_rail is None or right_rail is None:
+        return snapped_horiz_gaps
+
+    def _angle_delta_deg(m1, m2):
+        return abs(math.degrees(math.atan(float(m1))) - math.degrees(math.atan(float(m2))))
+
+    def _line_residual_std(points, m, c):
+        if not points:
+            return 999.0
+        arr = np.array(points, dtype=np.float32)
+        return float(np.std(arr[:, 1] - (float(m) * arr[:, 0] + float(c))))
+
+    def _sample_gray_bilinear(img, x, y):
+        h2, w2 = img.shape[:2]
+        if x < 0 or y < 0 or x >= w2 - 1 or (y >= h2 - 1):
+            xi = int(max(0, min(w2 - 1, round(x))))
+            yi = int(max(0, min(h2 - 1, round(y))))
+            return float(img[yi, xi])
+        x0i = int(math.floor(x))
+        y0i = int(math.floor(y))
+        dx = float(x - x0i)
+        dy = float(y - y0i)
+        v00 = float(img[y0i, x0i])
+        v10 = float(img[y0i, x0i + 1])
+        v01 = float(img[y0i + 1, x0i])
+        v11 = float(img[y0i + 1, x0i + 1])
+        return (1 - dx) * (1 - dy) * v00 + dx * (1 - dy) * v10 + (1 - dx) * dy * v01 + dx * dy * v11
+    refined = []
+    for r_idx, g0 in enumerate(snapped_horiz_gaps):
+        g = dict(g0)
+        try:
+            m_row = float(g.get('support_line_m') if g.get('support_line_m') is not None else g.get('m_row', 0.0))
+            c_row = float(g.get('support_line_c') if g.get('support_line_c') is not None else g.get('c_row', 0.0))
+            y_mid = float(m_row * x_mid + c_row)
+            rail_x0 = float(V34__get_boundary_x_at_y(left_rail, y_mid) + margin_px)
+            rail_x1 = float(V34__get_boundary_x_at_y(right_rail, y_mid) - margin_px)
+            x0 = float(g.get('x_start', rail_x0))
+            x1 = float(g.get('x_end', rail_x1))
+            if not x1 > x0 + 12:
+                x0, x1 = (rail_x0, rail_x1)
+            x0 = max(0.0, min(max(x0, rail_x0), rail_x1 - 14.0))
+            x1 = min(float(w - 1), max(min(x1, rail_x1), rail_x0 + 14.0))
+            if not x1 > x0 + 20:
+                refined.append(g0)
+                continue
+            xs = np.linspace(x0, x1, max(72, int((x1 - x0) / V34__V34_ROW_X_SAMPLE_STEP_PX)))
+            anchor_pts = []
+            for xx in xs:
+                xi = int(round(xx))
+                if xi < 1 or xi >= w - 1:
+                    continue
+                y_ref = m_row * float(xx) + c_row
+                best = None
+                for dy in np.arange(-float(search_radius), float(search_radius) + 0.001, V34__V34_ROW_DY_STEP_PX):
+                    yyf = float(y_ref + float(dy))
+                    if yyf < 4 or yyf >= h - 4:
+                        continue
+                    center = _sample_gray_bilinear(rotated_gray, float(xx), yyf)
+                    up2 = _sample_gray_bilinear(rotated_gray, float(xx), yyf - 2.0)
+                    dn2 = _sample_gray_bilinear(rotated_gray, float(xx), yyf + 2.0)
+                    up4 = _sample_gray_bilinear(rotated_gray, float(xx), yyf - 4.0)
+                    dn4 = _sample_gray_bilinear(rotated_gray, float(xx), yyf + 4.0)
+                    side_min = min(up2, dn2, up4, dn4)
+                    side_med = float(np.median([up2, dn2, up4, dn4]))
+                    contrast = max(0.0, side_min - center)
+                    valley_shape = max(0.0, side_med - center)
+                    score = center - 0.85 * contrast - 0.35 * valley_shape + 0.22 * abs(float(dy))
+                    if best is None or score < best[0]:
+                        best = (score, float(yyf), center, contrast, valley_shape, float(dy))
+                if best is None:
+                    continue
+                _, yy_best, center_best, contrast_best, valley_shape, dy_best = best
+                if center_best < 165.0 or contrast_best >= 3.5 or valley_shape >= 7.0:
+                    anchor_pts.append((float(xx), float(yy_best), float(center_best), float(contrast_best), float(dy_best)))
+            if len(anchor_pts) < 9:
+                refined.append(g0)
+                continue
+            xs_a = np.array([p[0] for p in anchor_pts], dtype=np.float32)
+            ys_a = np.array([p[1] for p in anchor_pts], dtype=np.float32)
+            c_intercept = float(np.median(ys_a - m_row * xs_a))
+            resid0 = ys_a - (m_row * xs_a + c_intercept)
+            med0 = float(np.median(resid0))
+            mad0 = float(np.median(np.abs(resid0 - med0))) + 1e-06
+            keep0 = np.abs(resid0 - med0) <= max(1.5, 2.6 * mad0)
+            if int(np.sum(keep0)) < 9:
+                keep0 = np.ones_like(xs_a, dtype=bool)
+            xs_k = xs_a[keep0]
+            ys_k = ys_a[keep0]
+            pts_kept = [(float(x), float(y)) for x, y in zip(xs_k, ys_k)]
+            n_bins = 10
+            bins = np.linspace(x0, x1, n_bins + 1)
+            bin_ids = np.digitize([p[0] for p in pts_kept], bins) - 1
+            unique_bins = sorted(set((int(b) for b in bin_ids if 0 <= int(b) < n_bins)))
+            coverage = float(len(unique_bins) / n_bins)
+            if coverage < min_coverage:
+                refined.append(g0)
+                continue
+            m_fit = m_row
+            c_fit = float(np.median(ys_k - m_row * xs_k))
+            used_slope_fit = False
+            if len(xs_k) >= 12 and float(np.max(xs_k) - np.min(xs_k)) >= 0.55 * (x1 - x0):
+                try:
+                    contrast_w = np.array([max(1.0, min(4.0, 1.0 + p[3] / 22.0)) for p in anchor_pts], dtype=np.float32)[keep0]
+                    m_raw, c_raw = np.polyfit(xs_k, ys_k, 1, w=contrast_w)
+                    pred = m_raw * xs_k + c_raw
+                    res = ys_k - pred
+                    mad = float(np.median(np.abs(res - np.median(res)))) + 1e-06
+                    keep1 = np.abs(res - np.median(res)) <= max(1.25, 2.3 * mad)
+                    if int(np.sum(keep1)) >= 10:
+                        m_raw, c_raw = np.polyfit(xs_k[keep1], ys_k[keep1], 1, w=contrast_w[keep1])
+                    src = str(g.get('selected_cand'))
+                    max_angle_delta = 1.8
+                    if src in ('profile_recovered', 'profile_recovered_locked', 'profile_pitch'):
+                        max_angle_delta = 2.75
+                    angle_delta = _angle_delta_deg(m_raw, m_row)
+                    if angle_delta > max_angle_delta:
+                        a_ref = math.atan(m_row)
+                        a_raw = math.atan(float(m_raw))
+                        a_new = a_ref + math.copysign(math.radians(max_angle_delta), a_raw - a_ref)
+                        m_fit = math.tan(a_new)
+                    else:
+                        m_fit = float(m_raw)
+                    c_fit = float(np.median(ys_k - m_fit * xs_k))
+                    used_slope_fit = True
+                except Exception:
+                    m_fit = m_row
+                    c_fit = float(np.median(ys_k - m_row * xs_k))
+            c_old_slope = float(np.median(ys_k - m_row * xs_k))
+            residual_old = _line_residual_std(pts_kept, m_row, c_old_slope)
+            residual_new = _line_residual_std(pts_kept, m_fit, c_fit)
+            if used_slope_fit and residual_new <= residual_old + 0.15:
+                m_new = float(m_fit)
+                c_new = float(c_fit)
+                slope_mode = 'slope_anchor'
+            else:
+                m_new = float(m_row)
+                c_new = float(c_old_slope)
+                residual_new = residual_old
+                slope_mode = 'intercept_anchor'
+            old_y = float(m_row * x_mid + c_row)
+            new_y_raw = float(m_new * x_mid + c_new)
+            shift = new_y_raw - old_y
+            if abs(shift) > max_shift_px:
+                c_new += math.copysign(max_shift_px - abs(shift), shift)
+                shift = math.copysign(max_shift_px, shift)
+            dark_med = float(np.median([p[2] for p in anchor_pts]))
+            contrast_med = float(np.median([p[3] for p in anchor_pts]))
+            src = str(g.get('selected_cand'))
+            residual_limit = max_residual_std + (0.55 if src in ('profile_recovered', 'profile_recovered_locked', 'profile_pitch') else 0.0)
+            min_shift = 0.1 if src in ('profile_recovered', 'profile_recovered_locked', 'profile_pitch') else 0.16
+            angle_delta_final = _angle_delta_deg(m_new, m_row)
+            accept = coverage >= min_coverage and residual_new <= residual_limit and (abs(shift) >= min_shift or angle_delta_final >= 0.15)
+            if accept:
+                g['c_row'] = float(c_new)
+                g['c_selected'] = float(c_new)
+                g['y_snap'] = float(m_new * x_mid + c_new)
+                g['m_row'] = float(m_new)
+                g['support_line_m'] = float(m_new)
+                g['support_line_c'] = float(c_new)
+                g['support_valid'] = True
+                g['support_clean_pts'] = pts_kept
+                g['support_pts'] = pts_kept
+                g['support_coverage'] = coverage
+                g['support_residual_std'] = float(residual_new)
+                g['valley_anchor_shift'] = float(shift)
+                g['valley_anchor_slope_delta_deg'] = float(angle_delta_final)
+                g['valley_anchor_source'] = 'local_dark_valley_slope' if slope_mode == 'slope_anchor' else 'local_dark_valley_intercept'
+                print(f'[ROW_VALLEY_ANCHOR_REFINE_V34] block={block_name} r={r_idx} mode={slope_mode} shift={shift:+.2f} dangle={angle_delta_final:.2f} coverage={coverage:.2f} residual={residual_new:.2f} dark_med={dark_med:.1f} contrast_med={contrast_med:.2f} n={len(pts_kept)}')
+                refined.append(g)
+            else:
+                refined.append(g0)
+        except Exception:
+            refined.append(g0)
+    return refined
+
+def V34__refine_middle_divider_by_dense_vertical_valley(rotated_gray, boundaries, y_min, y_max, row_count, block_name):
+    """V34: densify/refit the middle blue rail from real vertical dark-valley samples.
+
+    The middle divider must split the two panel halves reasonably evenly.  This pass
+    samples many y cross-sections, searches around the current middle rail, rejects
+    weak/short evidence, and fits x = m*y + c from the dark vertical groove.  The
+    final rail is still constrained by the left/right fitted rails, not by YOLO panel
+    polygons, so downstream calc polygons remain rail+row derived.
+    """
+    if not all((k in boundaries for k in ('left_outer', 'middle_divider', 'right_outer'))):
+        return boundaries
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    mid_rail = boundaries.get('middle_divider')
+    right_rail = boundaries.get('right_outer')
+    if not left_rail or not mid_rail or (not right_rail):
+        return boundaries
+
+    def _sample(img, x, y):
+        h2, w2 = img.shape[:2]
+        if x < 0 or y < 0 or x >= w2 - 1 or (y >= h2 - 1):
+            xi = int(max(0, min(w2 - 1, round(x))))
+            yi = int(max(0, min(h2 - 1, round(y))))
+            return float(img[yi, xi])
+        x0i = int(math.floor(x))
+        y0i = int(math.floor(y))
+        dx = float(x - x0i)
+        dy = float(y - y0i)
+        v00 = float(img[y0i, x0i])
+        v10 = float(img[y0i, x0i + 1])
+        v01 = float(img[y0i + 1, x0i])
+        v11 = float(img[y0i + 1, x0i + 1])
+        return (1 - dx) * (1 - dy) * v00 + dx * (1 - dy) * v10 + (1 - dx) * dy * v01 + dx * dy * v11
+    y0 = max(2.0, float(y_min) + 3.0)
+    y1 = min(float(h - 3), float(y_max) - 3.0)
+    if y1 <= y0 + 30:
+        return boundaries
+    y_samples = np.linspace(y0, y1, max(80, int((y1 - y0) / V34__V34_MIDDLE_RAIL_Y_STEP_PX)))
+    pts = []
+    for yy in y_samples:
+        x_left = V34__get_boundary_x_at_y(left_rail, yy)
+        x_right = V34__get_boundary_x_at_y(right_rail, yy)
+        x_mid_old = V34__get_boundary_x_at_y(mid_rail, yy)
+        if not x_left + 16.0 < x_mid_old < x_right - 16.0:
+            continue
+        x_balance = 0.5 * (x_left + x_right)
+        width = max(1.0, x_right - x_left)
+        best = None
+        for dx in np.arange(-V34__V34_MIDDLE_RAIL_SEARCH_RADIUS_PX, V34__V34_MIDDLE_RAIL_SEARCH_RADIUS_PX + 0.001, 0.5):
+            xx = float(x_mid_old + dx)
+            if xx <= x_left + 6 or xx >= x_right - 6 or xx < 4 or (xx >= w - 4):
+                continue
+            center = _sample(rotated_gray, xx, yy)
+            l2 = _sample(rotated_gray, xx - 2.0, yy)
+            r2 = _sample(rotated_gray, xx + 2.0, yy)
+            l4 = _sample(rotated_gray, xx - 4.0, yy)
+            r4 = _sample(rotated_gray, xx + 4.0, yy)
+            side_min = min(l2, r2, l4, r4)
+            side_med = float(np.median([l2, r2, l4, r4]))
+            contrast = max(0.0, side_min - center)
+            valley_shape = max(0.0, side_med - center)
+            score = center - 0.85 * contrast - 0.3 * valley_shape + 0.08 * abs(dx) + 0.018 * abs(xx - x_balance)
+            if best is None or score < best[0]:
+                best = (score, xx, center, contrast, valley_shape, x_balance, width)
+        if best is None:
+            continue
+        _, xx, center, contrast, valley_shape, x_balance, width = best
+        if abs(xx - x_balance) > max(5.0, 0.14 * width):
+            continue
+        if center < 165.0 or contrast >= 3.5 or valley_shape >= 7.0:
+            pts.append((float(xx), float(yy), float(center), float(contrast)))
+    if len(pts) < max(18, int(0.25 * len(y_samples))):
+        print(f'[V34_MIDDLE_RAIL_SKIP] block={block_name} reason=insufficient_pts n={len(pts)} samples={len(y_samples)}')
+        return boundaries
+    arr = np.array([[p[0], p[1], p[3]] for p in pts], dtype=np.float32)
+    xs = arr[:, 0]
+    ys = arr[:, 1]
+    wts = np.clip(1.0 + arr[:, 2] / 22.0, 1.0, 4.0)
+    try:
+        m_raw, c_raw = np.polyfit(ys, xs, 1, w=wts)
+        res = xs - (m_raw * ys + c_raw)
+        mad = float(np.median(np.abs(res - np.median(res)))) + 1e-06
+        keep = np.abs(res - np.median(res)) <= max(1.5, 2.4 * mad)
+        if int(np.sum(keep)) >= 16:
+            m_raw, c_raw = np.polyfit(ys[keep], xs[keep], 1, w=wts[keep])
+            xs_fit, ys_fit = (xs[keep], ys[keep])
+        else:
+            xs_fit, ys_fit = (xs, ys)
+    except Exception:
+        return boundaries
+    old_ys = np.array([p[1] for p in mid_rail], dtype=np.float32)
+    old_xs = np.array([p[0] for p in mid_rail], dtype=np.float32)
+    try:
+        m_old, c_old = np.polyfit(old_ys, old_xs, 1)
+    except Exception:
+        m_old, c_old = (0.0, V34__get_boundary_x_at_y(mid_rail, 0.5 * (y_min + y_max)))
+    y_mid = 0.5 * (float(y_min) + float(y_max))
+    old_mid_x = float(m_old * y_mid + c_old)
+    raw_mid_x = float(m_raw * y_mid + c_raw)
+    shift = raw_mid_x - old_mid_x
+    max_shift = 3.0
+    if abs(shift) > max_shift:
+        c_raw += math.copysign(max_shift - abs(shift), shift)
+        shift = math.copysign(max_shift, shift)
+    a_old = math.atan(float(m_old))
+    a_raw = math.atan(float(m_raw))
+    max_da = math.radians(2.0)
+    if abs(a_raw - a_old) > max_da:
+        m_new = math.tan(a_old + math.copysign(max_da, a_raw - a_old))
+        x_anchor = old_mid_x + shift
+        c_new = x_anchor - m_new * y_mid
+    else:
+        m_new, c_new = (float(m_raw), float(c_raw))
+    new_pts = []
+    for yy in np.linspace(float(y_min), float(y_max), 15):
+        x_left = V34__get_boundary_x_at_y(left_rail, yy)
+        x_right = V34__get_boundary_x_at_y(right_rail, yy)
+        xx = float(m_new * yy + c_new)
+        xx = max(x_left + 8.0, min(x_right - 8.0, xx))
+        new_pts.append((xx, float(yy)))
+    boundaries = dict(boundaries)
+    boundaries['middle_divider'] = new_pts
+    residual = float(np.std(xs_fit - (m_new * ys_fit + c_new))) if len(xs_fit) else 999.0
+    print(f'[V34_MIDDLE_RAIL_DENSE_REFIT] block={block_name} n={len(pts)} shift={shift:+.2f} residual={residual:.2f} m_old={m_old:.5f} m_new={m_new:.5f}')
+    return boundaries
+
+def V34__build_grid_from_yolo_edge_consensus(rotated_gray, rotated_sobel_x_abs, b_local, y_min, y_max, n_cols, row_count, x_min_roi, x_max_roi, block_name, img_w=640, img_h=512):
+    col_corners = []
+    for col in b_local['columns']:
+        col_c = []
+        for p in col:
+            TL, TR, BR, BL = V34__sort_panel_corners(p['refined_polygon'])
+            col_c.append((TL, TR, BR, BL))
+        col_corners.append(col_c)
+    boundaries = {}
+    boundaries_n_segments_used = {}
+    boundaries_max_jumps = {}
+    boundaries_max_turns = {}
+    boundaries_fallback_to_baseline = {}
+    has_crop_left_col = False
+    if n_cols >= 2 and len(b_local['columns']) > 0:
+        for p in b_local['columns'][0]:
+            if p['orig_ref']['bbox'][0] < 15 or p['orig_ref']['bbox'][2] > img_w - 15 or p['orig_ref']['bbox'][1] < 15 or (p['orig_ref']['bbox'][3] > img_h - 15):
+                has_crop_left_col = True
+                break
+    if n_cols == 1:
+        col0 = col_corners[0]
+        left_pts = [c[0] for c in col0] + [c[3] for c in col0]
+        right_pts = [c[1] for c in col0] + [c[2] for c in col0]
+        boundaries['left_outer'] = V34__fit_consensus_vertical_boundary(left_pts, y_min, y_max, row_count)
+        boundaries['right_outer'] = V34__fit_consensus_vertical_boundary(right_pts, y_min, y_max, row_count)
+        boundary_keys = ['left_outer', 'right_outer']
+    else:
+        col0 = col_corners[0]
+        col1 = col_corners[1]
+        left_pts = [c[0] for c in col0] + [c[3] for c in col0]
+        if has_crop_left_col:
+            mid_pts = [c[0] for c in col1] + [c[3] for c in col1]
+        else:
+            mid_pts = [c[1] for c in col0] + [c[2] for c in col0] + [c[0] for c in col1] + [c[3] for c in col1]
+        right_pts = [c[1] for c in col1] + [c[2] for c in col1]
+        boundaries['left_outer'] = V34__fit_consensus_vertical_boundary(left_pts, y_min, y_max, row_count)
+        boundaries['middle_divider'] = V34__fit_consensus_vertical_boundary(mid_pts, y_min, y_max, row_count)
+        boundaries['right_outer'] = V34__fit_consensus_vertical_boundary(right_pts, y_min, y_max, row_count)
+        boundary_keys = ['left_outer', 'middle_divider', 'right_outer']
+    for k in boundary_keys:
+        boundaries_n_segments_used[k] = min(10, max(4, row_count - 2))
+        boundaries_max_jumps[k] = 0.0
+        boundaries_max_turns[k] = 0.0
+        boundaries_fallback_to_baseline[k] = False
+    boundaries = V34__refine_middle_divider_by_dense_vertical_valley(rotated_gray, boundaries, y_min, y_max, row_count, block_name)
+    m_independent = []
+    row_points_list = []
+    for r in range(row_count + 1):
+        row_pts = []
+        for col_idx, col in enumerate(b_local['columns']):
+            if has_crop_left_col and col_idx == 0:
+                continue
+            if r == 0:
+                if len(col) > 0:
+                    p = col[0]
+                    TL_c, TR_c, BR_c, BL_c = V34__sort_panel_corners(p['refined_polygon'])
+                    row_pts.extend([TL_c, TR_c])
+            elif r == row_count:
+                if len(col) >= row_count:
+                    p = col[row_count - 1]
+                    TL_c, TR_c, BR_c, BL_c = V34__sort_panel_corners(p['refined_polygon'])
+                    row_pts.extend([BL_c, BR_c])
+            else:
+                if len(col) > r - 1:
+                    p_prev = col[r - 1]
+                    TL_c, TR_c, BR_c, BL_c = V34__sort_panel_corners(p_prev['refined_polygon'])
+                    row_pts.extend([BL_c, BR_c])
+                if len(col) > r:
+                    p_curr = col[r]
+                    TL_c, TR_c, BR_c, BL_c = V34__sort_panel_corners(p_curr['refined_polygon'])
+                    row_pts.extend([TL_c, TR_c])
+        row_points_list.append(row_pts)
+        if len(row_pts) >= 2:
+            xs_r = [pt[0] for pt in row_pts]
+            ys_r = [pt[1] for pt in row_pts]
+            try:
+                m_r, _ = np.polyfit(xs_r, ys_r, 1)
+                m_independent.append(m_r)
+            except Exception:
+                pass
+    m_consensus_raw = float(np.median(m_independent)) if m_independent else 0.0
+    m_consensus, _mcons_clamped, _mcons_ang = V34__clamp_horizontal_slope_to_reasonable(m_consensus_raw, max_abs_angle_deg=V34__MAX_HORIZONTAL_ROW_ANGLE_DEG)
+    bad_block_orientation = abs(float(_mcons_ang)) > V34__BAD_BLOCK_RAW_ANGLE_DEG
+    if _mcons_clamped:
+        print(f'[BLOCK_SLOPE_QUARANTINE] block={block_name} m_raw={m_consensus_raw:.6f} angle_raw={_mcons_ang:.2f} m_used={m_consensus:.6f} max_abs_angle={V34__MAX_HORIZONTAL_ROW_ANGLE_DEG}')
+    if bad_block_orientation:
+        print(f'[BAD_BLOCK_ORIENTATION] block={block_name} angle_raw={_mcons_ang:.2f} action=disable_support_use_pitch_grid threshold={V34__BAD_BLOCK_RAW_ANGLE_DEG}')
+    pitches = []
+    for r in range(row_count):
+        y_r = np.mean([pt[1] for pt in row_points_list[r]]) if row_points_list[r] else y_min
+        y_r1 = np.mean([pt[1] for pt in row_points_list[r + 1]]) if row_points_list[r + 1] else y_max
+        pitches.append(y_r1 - y_r)
+    estimated_pitch = float(np.median(pitches)) if pitches else 30.0
+    pitch_std = float(np.std(pitches)) if pitches else 1.0
+    snapped_horiz_gaps = []
+    rejected_count = 0
+    interpolated_missing_count = 0
+    x_mid = (x_min_roi + x_max_roi) / 2.0
+    for r in range(row_count + 1):
+        row_pts = row_points_list[r]
+        if not row_pts:
+            y_est = y_min + r * estimated_pitch
+            m_row = m_consensus
+            c_row = y_est - m_row * x_mid
+        else:
+            xs_r = np.array([pt[0] for pt in row_pts])
+            ys_r = np.array([pt[1] for pt in row_pts])
+            try:
+                m_r, _ = np.polyfit(xs_r, ys_r, 1)
+            except Exception:
+                m_r = m_consensus
+            m_row_raw = 0.7 * float(m_r) + 0.3 * float(m_consensus)
+            y_anchor_raw = float(np.mean(ys_r - m_row_raw * xs_r) + m_row_raw * x_mid)
+            m_row, _mrow_clamped, _mrow_ang = V34__clamp_horizontal_slope_to_reasonable(m_row_raw, max_abs_angle_deg=V34__MAX_HORIZONTAL_ROW_ANGLE_DEG)
+            c_row = y_anchor_raw - m_row * x_mid
+            if _mrow_clamped:
+                print(f'[ROW_SLOPE_QUARANTINE] block={block_name} r={r} m_raw={m_row_raw:.6f} angle_raw={_mrow_ang:.2f} m_used={m_row:.6f}')
+        left_bound_x = V34__get_boundary_x_at_y(boundaries['left_outer'], m_row * x_mid + c_row)
+        if has_crop_left_col and 'middle_divider' in boundaries:
+            left_bound_x = V34__get_boundary_x_at_y(boundaries['middle_divider'], m_row * x_mid + c_row)
+        right_bound_x = V34__get_boundary_x_at_y(boundaries['right_outer'], m_row * x_mid + c_row)
+        c_row_yolo = c_row
+        y_pitch_est = y_min + r * estimated_pitch
+        c_row_pitch = y_pitch_est - m_row * x_mid
+        c_final, selected_cand, selected_score, support_pts, c_row_support, c_row_thermal, _, _, c_selected, support_line_m, support_line_c, support_clean_pts, support_coverage, support_residual_std, support_valid = V34__snap_horizontal_boundary(rotated_gray, m_row, c_row_yolo, c_row_pitch, left_bound_x, right_bound_x, r, row_count, block_name, x_mid)
+        if bad_block_orientation and selected_cand in ('support', 'thermal'):
+            c_final = c_row_pitch
+            c_selected = c_row_pitch
+            selected_cand = 'pitch_quarantine'
+            support_valid = False
+            support_line_m = None
+            support_line_c = None
+            support_clean_pts = []
+            print(f'[ROW_SUPPORT_SUPPRESSED] block={block_name} r={r} reason=bad_block_orientation')
+        pitch_used = selected_cand in ('pitch', 'pitch_quarantine')
+        print(f'[ROW] {block_name} {r} {selected_cand} {len(support_pts)} {pitch_used}')
+        if r == row_count:
+            y_before = m_row * x_mid + ((1.0 - 0.25) * c_selected + 0.25 * c_row_pitch)
+            y_after = m_row * x_mid + c_final
+            delta = y_after - y_before
+            print(f'[LAST_ROW] {block_name} {r} {selected_cand} {delta:.2f}')
+        if selected_cand not in ('support', 'thermal'):
+            rejected_count += 1
+            if selected_cand == 'pitch':
+                interpolated_missing_count += 1
+        snapped_horiz_gaps.append({'y_snap': m_row * x_mid + c_final, 'is_good': selected_cand in ('support', 'thermal'), 'support_ratio': selected_score, 'mean_offset': 0.0, 'pitch_deviation': abs(c_final - c_row_pitch), 'support_pts': support_pts, 'x_start': left_bound_x, 'x_end': right_bound_x, 'm_row': m_row, 'c_row': c_final, 'c_selected': c_selected, 'c_row_yolo': c_row_yolo, 'c_row_thermal': c_row_thermal, 'c_row_pitch': c_row_pitch, 'c_row_support': c_row_support, 'selected_cand': selected_cand, 'support_valid': support_valid, 'support_line_m': support_line_m, 'support_line_c': support_line_c, 'support_clean_pts': support_clean_pts, 'support_coverage': support_coverage, 'support_residual_std': support_residual_std})
+    snapped_horiz_gaps = V34__apply_horizontal_snap_slope_guard(snapped_horiz_gaps, m_consensus, x_mid, block_name, max_angle_deg=2.0, reject_angle_deg=3.0)
+    recovered_from_profile = False
+    if bad_block_orientation and (not has_crop_left_col):
+        recovered = V34__recover_bad_orientation_horizontal_gaps_from_profile(rotated_gray, boundaries, row_count, y_min, y_max, x_mid, m_consensus, block_name)
+        if recovered is not None and len(recovered) == row_count + 1:
+            snapped_horiz_gaps = recovered
+            bad_block_orientation = False
+            recovered_from_profile = True
+            print(f'[BAD_BLOCK_ORIENTATION_RECOVERED] block={block_name} action=use_profile_snap_rows no_yolo_geometry=true')
+        else:
+            print(f'[BAD_BLOCK_ORIENTATION_RECOVERY_FAILED] block={block_name} action=no_snap_polygon')
+    snapped_horiz_gaps = V34__refine_horizontal_rows_to_dark_groove(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=2, margin_px=8.0)
+    snapped_horiz_gaps = V34__refine_horizontal_rows_by_local_valley_anchors(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=V34__V34_ROW_SEARCH_RADIUS_PX, margin_px=7.0, max_shift_px=4.0)
+    left_snapped_horiz_gaps = []
+    left_snapped_horiz_gaps_by_col = None
+    if has_crop_left_col:
+
+        def get_yolo_line_col(col_idx, r_idx):
+            col_panels = b_local['columns'][col_idx]
+            if not col_panels:
+                return (m_consensus, y_min + r_idx * estimated_pitch - m_consensus * x_mid)
+            N = len(col_panels)
+            clamped_r = min(r_idx, N)
+            p = col_panels[0] if clamped_r == 0 else col_panels[-1] if clamped_r == N else None
+            if p:
+                corners = V34__sort_panel_corners(p['refined_polygon'])
+                xs_y = [corners[0][0], corners[1][0]] if clamped_r == 0 else [corners[3][0], corners[2][0]]
+                ys_y = [corners[0][1], corners[1][1]] if clamped_r == 0 else [corners[3][1], corners[2][1]]
+            else:
+                p_prev, p_curr = (col_panels[clamped_r - 1], col_panels[clamped_r])
+                c_prev = V34__sort_panel_corners(p_prev['refined_polygon'])
+                c_curr = V34__sort_panel_corners(p_curr['refined_polygon'])
+                xs_y = [c_prev[3][0], c_prev[2][0], c_curr[0][0], c_curr[1][0]]
+                ys_y = [c_prev[3][1], c_prev[2][1], c_curr[0][1], c_curr[1][1]]
+            try:
+                m_y, c_y = np.polyfit(xs_y, ys_y, 1)
+                return (m_y, c_y)
+            except Exception:
+                return (m_consensus, np.mean(ys_y) - m_consensus * np.mean(xs_y))
+        left_snapped_horiz_gaps_by_col = {0: {}, 1: {}}
+        crop_debug_img = None
+        jsonl_lines = []
+        if has_crop_left_col:
+            crop_debug_img = cv2.cvtColor(rotated_gray, cv2.COLOR_GRAY2BGR)
+        for r in range(row_count + 1):
+            for col_idx in [0, 1]:
+                m_yolo, c_yolo = get_yolo_line_col(col_idx, r)
+                y_val_ref = m_yolo * x_mid + c_yolo
+                x_left_outer = V34__get_boundary_x_at_y(boundaries['left_outer'], y_val_ref)
+                x_middle_rail = V34__get_boundary_x_at_y(boundaries['middle_divider'], y_val_ref)
+                x_right_outer = V34__get_boundary_x_at_y(boundaries['right_outer'], y_val_ref)
+                x0, x1 = (x_left_outer + 8, x_middle_rail - 6) if col_idx == 0 else (x_middle_rail + 6, x_right_outer - 8)
+                is_accepted, best_dy, min_score, contrast, median_pixel, dark_band, seg_clean_pts = (False, 0.0, 999999.0, 0.0, 255.0, [], [])
+                sorted_dys = []
+                x0_cand, x1_cand = (x_left_outer + 8, x_middle_rail - 6) if col_idx == 0 else (x_middle_rail + 6, x_right_outer - 8)
+                if x1_cand - x0_cand >= 20:
+                    xs_profile = np.linspace(x0_cand, x1_cand, max(15, int(x1_cand - x0_cand)))
+                    candidates = {}
+                    for dy in range(-7, 8):
+                        values = [int(rotated_gray[int(round(m_yolo * x + c_yolo + dy)), int(round(x))]) for x in xs_profile if 0 <= int(round(m_yolo * x + c_yolo + dy)) < rotated_gray.shape[0] and 0 <= int(round(x)) < rotated_gray.shape[1]]
+                        if len(values) >= 10:
+                            median_val = float(np.median(values))
+                            p10_val = float(np.percentile(values, 10))
+                            mean_val = float(np.mean(values))
+                            dark_ratio = float(sum((1 for v in values if v < 130)) / len(values))
+                            candidates[dy] = {'score': p10_val + 0.35 * median_val - 20.0 * dark_ratio, 'median_val': median_val, 'p10_val': p10_val, 'mean_val': mean_val, 'dark_ratio': dark_ratio}
+                    if candidates:
+                        min_score = min((candidates[dy]['score'] for dy in candidates))
+                        dark_band = [dy for dy in sorted(candidates.keys()) if candidates[dy]['score'] <= min_score + 6.0 and (candidates[dy]['dark_ratio'] >= 0.25 or candidates[dy]['median_val'] < 135.0)]
+                        if dark_band:
+                            best_dy = float(np.median(dark_band))
+                            far_scores = [candidates[dy]['score'] for dy in candidates if abs(dy) >= 5]
+                            contrast = float(np.median(far_scores) - min_score) if far_scores else 0.0
+                            min_median_val = min((candidates[dy]['median_val'] for dy in candidates))
+                            is_accepted = 1 <= len(dark_band) <= 5 and (contrast >= 8.0 or min_median_val < 125.0) and (abs(best_dy) <= 7.0)
+                            median_pixel = candidates.get(int(round(best_dy)), {}).get('median_val', 255.0)
+                            sorted_dys = sorted(candidates.keys(), key=lambda dy: candidates[dy]['score'])
+                support_pts = []
+                x0_fit = x_left_outer + 6 if col_idx == 0 else x_middle_rail + 4
+                x1_fit = x_middle_rail - 4 if col_idx == 0 else x_right_outer - 6
+                if x1_fit - x0_fit >= 10:
+                    xs_fit = np.linspace(x0_fit, x1_fit, max(30, int((x1_fit - x0_fit) / 2)))
+                    for x_val in xs_fit:
+                        xi = int(round(x_val))
+                        y_ref = m_yolo * x_val + c_yolo
+                        best_val = 999.0
+                        best_y = None
+                        y_start = int(round(y_ref - 6))
+                        y_end = int(round(y_ref + 6))
+                        for y_scan in range(y_start, y_end + 1):
+                            if 0 <= y_scan < rotated_gray.shape[0] and 0 <= xi < rotated_gray.shape[1]:
+                                val = float(rotated_gray[y_scan, xi])
+                                if val < best_val:
+                                    best_val = val
+                                    best_y = float(y_scan)
+                        if best_y is not None:
+                            yi = int(round(best_y))
+                            pixel_val = rotated_gray[yi, xi]
+                            y_prev = yi - 2
+                            y_next = yi + 2
+                            val_prev = float(rotated_gray[y_prev, xi]) if 0 <= y_prev < rotated_gray.shape[0] else 255.0
+                            val_next = float(rotated_gray[y_next, xi]) if 0 <= y_next < rotated_gray.shape[0] else 255.0
+                            local_contrast = max(val_prev, val_next) - pixel_val
+                            if pixel_val < 135 or local_contrast >= 8:
+                                support_pts.append((x_val, best_y))
+                fit_success = False
+                m_fit, c_fit, residual_std, angle_diff, coverage = (0.0, 0.0, 999.0, 999.0, 0.0)
+                clean_pts = []
+                if len(support_pts) >= 5:
+                    xs_arr = np.array([pt[0] for pt in support_pts])
+                    ys_arr = np.array([pt[1] for pt in support_pts])
+                    try:
+                        m_f, c_f = np.polyfit(xs_arr, ys_arr, 1)
+                        res = ys_arr - (m_f * xs_arr + c_f)
+                        med = np.median(res)
+                        mad = np.median(np.abs(res - med))
+                        keep = np.abs(res - med) <= max(1.5, 2.5 * mad)
+                        xs_clean = xs_arr[keep]
+                        ys_clean = ys_arr[keep]
+                        if len(xs_clean) >= 5:
+                            m_fit, c_fit = np.polyfit(xs_clean, ys_clean, 1)
+                            res_clean = ys_clean - (m_fit * xs_clean + c_fit)
+                            residual_std = float(np.std(res_clean))
+                            coverage = (max(xs_clean) - min(xs_clean)) / (x1_fit - x0_fit + 1e-09)
+                            angle_diff = abs(np.degrees(math.atan(m_fit)) - np.degrees(math.atan(m_yolo)))
+                            while angle_diff > 90:
+                                angle_diff = abs(angle_diff - 180)
+                            if len(xs_clean) >= 5 and coverage >= 0.3 and (residual_std <= 2.0) and (angle_diff <= 6.0):
+                                fit_success = True
+                                clean_pts = [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)]
+                    except Exception:
+                        pass
+                if fit_success:
+                    source = 'crop_left_support_points_line'
+                    m_final = m_fit
+                    c_final = c_fit
+                    best_dy = c_fit - c_yolo
+                elif is_accepted:
+                    source = 'crop_left_dy_fallback'
+                    m_final = m_yolo
+                    c_final = c_yolo + best_dy
+                else:
+                    source = 'crop_left_yolo'
+                    m_final = m_yolo
+                    c_final = c_yolo
+                    best_dy = 0.0
+                seg_clean_pts = clean_pts if fit_success else support_pts
+                print(f'[CROP_LEFT_FIT] block={block_name} r={r} col={col_idx} source={source} n={len(support_pts)} coverage={coverage:.3f} residual={residual_std:.3f} angle_diff={angle_diff:.3f}')
+                if crop_debug_img is not None:
+                    for pt in seg_clean_pts:
+                        cv2.circle(crop_debug_img, (int(round(pt[0])), int(round(pt[1]))), 2, (255, 0, 255), -1)
+                second_score_val = candidates.get(sorted_dys[1], {}).get('score', 999999.0) if len(sorted_dys) >= 2 else 999999.0
+                best_dy_idx = int(round(best_dy if is_accepted else 0.0))
+                best_dark_ratio = candidates.get(best_dy_idx, {}).get('dark_ratio', 0.0) if candidates else 0.0
+                print(f'[CROP_DEBUG] {block_name} {r} {col_idx} yolo_c={c_yolo:.2f} chosen_c={c_final:.2f} chosen_dy={(best_dy if is_accepted else 0.0):.2f} best_score={min_score:.2f} second_score={second_score_val:.2f} dark_ratio={best_dark_ratio:.2f} contrast={contrast:.2f} median={median_pixel:.1f} n_pts={len(seg_clean_pts)}')
+                dy_scores_list = []
+                if candidates:
+                    for dy_cand in sorted(candidates.keys()):
+                        info = candidates[dy_cand]
+                        dy_scores_list.append({'dy': int(dy_cand), 'score': float(info['score']), 'p10': float(info['p10_val']), 'median': float(info['median_val']), 'mean': float(info['mean_val']), 'dark_ratio': float(info['dark_ratio']), 'contrast': float(contrast)})
+                jsonl_lines.append({'r': int(r), 'col': int(col_idx), 'dy_scores': dy_scores_list, 'chosen_dy': float(best_dy if is_accepted else 0.0), 'chosen_source': str(source), 'n_support_pts': int(len(seg_clean_pts)), 'x_min': float(x0), 'x_max': float(x1)})
+                left_snapped_horiz_gaps_by_col[col_idx][r] = {'y_snap': m_final * x_mid + c_final, 'selected_cand': source, 'm_row': m_final, 'c_row': c_final, 'support_pts': seg_clean_pts, 'support_valid': source in ('crop_left_support_points_line', 'crop_left_borrow_right_line', 'crop_left_support_fit'), 'support_line_m': m_final, 'support_line_c': c_final, 'support_clean_pts': seg_clean_pts, 'support_coverage': coverage, 'support_residual_std': residual_std, 'best_dy': best_dy, 'm_yolo': m_yolo, 'c_yolo': c_yolo, 'm_fit_raw': m_fit if fit_success else m_final, 'c_fit_raw': c_fit if fit_success else c_final, 'm_final': m_final, 'c_final': c_final, 'fit_preserved': fit_success}
+        if has_crop_left_col:
+            real_fit_sources = ('crop_left_support_points_line', 'crop_left_support_fit')
+            delta_candidates = []
+            for row_i in range(row_count + 1):
+                g0_i = left_snapped_horiz_gaps_by_col[0][row_i]
+                g1_i = left_snapped_horiz_gaps_by_col[1][row_i]
+                src0_i = g0_i.get('selected_cand') or g0_i.get('source')
+                src1_i = g1_i.get('selected_cand') or g1_i.get('source')
+                if src0_i in real_fit_sources and src1_i in real_fit_sources:
+                    delta_candidates.append(g0_i['c_row'] - g1_i['c_row'])
+            if delta_candidates:
+                delta_col = float(np.median(delta_candidates))
+            else:
+                delta_col = 0.0
+            main_pitches = []
+            for r_i in range(1, len(snapped_horiz_gaps)):
+                main_pitches.append(snapped_horiz_gaps[r_i]['y_snap'] - snapped_horiz_gaps[r_i - 1]['y_snap'])
+            median_pitch = float(np.median(main_pitches)) if main_pitches else 32.0
+            valid_crop_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+            valid_neighbor_parent_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line')
+
+            def extrapolate_pitch_for_row(c_idx, row_r):
+                for dr in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+                    cand_r = row_r + dr
+                    if 0 <= cand_r <= row_count:
+                        cand_g = left_snapped_horiz_gaps_by_col[c_idx][cand_r]
+                        cand_src = cand_g.get('selected_cand') or cand_g.get('source')
+                        if cand_src in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_borrow_same_row_right'):
+                            m_ref = cand_g['support_line_m']
+                            c_ref = cand_g['support_line_c']
+                            c_ext = c_ref + dr * -1.0 * median_pitch
+                            return (m_ref, c_ext)
+                g_curr = left_snapped_horiz_gaps_by_col[c_idx][row_r]
+                return (g_curr['m_yolo'], g_curr['c_yolo'])
+            for col_idx in [1, 0]:
+                for r in range(row_count + 1):
+                    g = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    src = g.get('selected_cand') or g.get('source')
+                    if src in real_fit_sources:
+                        continue
+                    borrowed = False
+                    if col_idx == 0:
+                        g1 = left_snapped_horiz_gaps_by_col[1][r]
+                        src1 = g1.get('selected_cand') or g1.get('source')
+                        allowed_borrow_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit')
+                        if src1 in allowed_borrow_sources:
+                            m_col0 = g1['support_line_m']
+                            c_col0 = g1['support_line_c'] + delta_col
+                            collapsed = False
+                            if r > 0:
+                                g_prev = left_snapped_horiz_gaps_by_col[0][r - 1]
+                                if g_prev.get('selected_cand') in valid_crop_sources:
+                                    if abs(c_col0 - g_prev['c_row']) < 5.0:
+                                        collapsed = True
+                            if r < row_count:
+                                g_next = left_snapped_horiz_gaps_by_col[0][r + 1]
+                                if g_next.get('selected_cand') in valid_crop_sources:
+                                    if abs(c_col0 - g_next['c_row']) < 5.0:
+                                        collapsed = True
+                            if not collapsed:
+                                g['selected_cand'] = 'crop_left_borrow_same_row_right'
+                                g['source'] = 'crop_left_borrow_same_row_right'
+                                g['m_row'] = m_col0
+                                g['c_row'] = c_col0
+                                g['m_final'] = m_col0
+                                g['c_final'] = c_col0
+                                g['support_line_m'] = m_col0
+                                g['support_line_c'] = c_col0
+                                g['support_valid'] = True
+                                g['y_snap'] = m_col0 * x_mid + c_col0
+                                print(f'[CROP_LEFT_BORROW_SAME_ROW] block={block_name} r={r} col=0 from_col=1 delta={delta_col:.2f}')
+                                borrowed = True
+                    if borrowed:
+                        continue
+                    neighbor_r = None
+                    for dr in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+                        cand_r = r + dr
+                        if 0 <= cand_r <= row_count:
+                            cand_g = left_snapped_horiz_gaps_by_col[col_idx][cand_r]
+                            cand_src = cand_g.get('selected_cand') or cand_g.get('source')
+                            if cand_src in valid_neighbor_parent_sources:
+                                neighbor_r = cand_r
+                                break
+                    if neighbor_r is not None:
+                        neighbor = left_snapped_horiz_gaps_by_col[col_idx][neighbor_r]
+                        m_new = neighbor['support_line_m']
+                        m_yolo_current = g['m_yolo']
+                        c_yolo_current = g['c_yolo']
+                        y_val_ref = m_yolo_current * x_mid + c_yolo_current
+                        x_left_outer = V34__get_boundary_x_at_y(boundaries['left_outer'], y_val_ref)
+                        x_middle_rail = V34__get_boundary_x_at_y(boundaries['middle_divider'], y_val_ref)
+                        x_right_outer = V34__get_boundary_x_at_y(boundaries['right_outer'], y_val_ref)
+                        x_segment_left = x_left_outer if col_idx == 0 else x_middle_rail
+                        x_segment_right = x_middle_rail if col_idx == 0 else x_right_outer
+                        x_anchor = 0.5 * (x_segment_left + x_segment_right)
+                        y_anchor = m_yolo_current * x_anchor + c_yolo_current
+                        c_new = y_anchor - m_new * x_anchor
+                        support_pts = g.get('support_pts', [])
+                        if len(support_pts) >= 3:
+                            xs_sup = np.array([pt[0] for pt in support_pts])
+                            ys_sup = np.array([pt[1] for pt in support_pts])
+                            delta = np.median(ys_sup - (m_new * xs_sup + c_new))
+                            delta = np.clip(delta, -1.25, 1.25)
+                            c_new += delta
+                        collapsed = False
+                        if r > 0:
+                            g_prev = left_snapped_horiz_gaps_by_col[col_idx][r - 1]
+                            if g_prev.get('selected_cand') in valid_crop_sources:
+                                if abs(c_new - g_prev['c_row']) < 5.0:
+                                    collapsed = True
+                        if r < row_count:
+                            g_next = left_snapped_horiz_gaps_by_col[col_idx][r + 1]
+                            if g_next.get('selected_cand') in valid_crop_sources:
+                                if abs(c_new - g_next['c_row']) < 5.0:
+                                    collapsed = True
+                        if collapsed:
+                            m_ext, c_ext = extrapolate_pitch_for_row(col_idx, r)
+                            g['selected_cand'] = 'crop_left_pitch_extrapolate'
+                            g['source'] = 'crop_left_pitch_extrapolate'
+                            g['m_row'] = m_ext
+                            g['c_row'] = c_ext
+                            g['m_final'] = m_ext
+                            g['c_final'] = c_ext
+                            g['support_line_m'] = m_ext
+                            g['support_line_c'] = c_ext
+                            g['support_valid'] = True
+                            g['y_snap'] = g['m_row'] * x_mid + g['c_row']
+                            print(f'[CROP_LEFT_FIX_COLLAPSE] block={block_name} col={col_idx} r={r} old_c={c_new:.4f} new_c={c_ext:.4f} median_pitch={median_pitch:.4f} source=collapse_neighbor')
+                        else:
+                            g['selected_cand'] = 'crop_left_neighbor_inherit'
+                            g['source'] = 'crop_left_neighbor_inherit'
+                            g['m_row'] = m_new
+                            g['c_row'] = c_new
+                            g['m_final'] = m_new
+                            g['c_final'] = c_new
+                            g['support_line_m'] = m_new
+                            g['support_line_c'] = c_new
+                            g['support_valid'] = True
+                            g['inherited_from'] = neighbor_r
+                            g['y_snap'] = m_new * x_mid + c_new
+                            print(f'[CROP_LEFT_INHERIT] block={block_name} r={r} col={col_idx} from_r={neighbor_r} m={m_new:.5f} c={c_new:.2f} n_support={len(support_pts)}')
+                    else:
+                        m_ext, c_ext = extrapolate_pitch_for_row(col_idx, r)
+                        g['selected_cand'] = 'crop_left_pitch_extrapolate'
+                        g['source'] = 'crop_left_pitch_extrapolate'
+                        g['m_row'] = m_ext
+                        g['c_row'] = c_ext
+                        g['m_final'] = m_ext
+                        g['c_final'] = c_ext
+                        g['support_line_m'] = m_ext
+                        g['support_line_c'] = c_ext
+                        g['support_valid'] = True
+                        g['y_snap'] = g['m_row'] * x_mid + g['c_row']
+                        print(f"[CROP_LEFT_FIX_COLLAPSE] block={block_name} col={col_idx} r={r} old_c={g['c_yolo']:.4f} new_c={c_ext:.4f} median_pitch={median_pitch:.4f} source=no_neighbor")
+            for col_idx in [0, 1]:
+                for r in range(1, row_count + 1):
+                    g_prev = left_snapped_horiz_gaps_by_col[col_idx][r - 1]
+                    g_curr = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    y_center_prev = g_prev['m_row'] * x_mid + g_prev['c_row']
+                    y_center_curr = g_curr['m_row'] * x_mid + g_curr['c_row']
+                    if abs(y_center_curr - y_center_prev) < 0.45 * median_pitch:
+                        old_c = g_curr['c_row']
+                        m_new = g_prev['m_row']
+                        c_new = g_prev['c_row'] + median_pitch
+                        g_curr['selected_cand'] = 'crop_left_pitch_extrapolate'
+                        g_curr['source'] = 'crop_left_pitch_extrapolate'
+                        g_curr['m_row'] = m_new
+                        g_curr['c_row'] = c_new
+                        g_curr['m_final'] = m_new
+                        g_curr['c_final'] = c_new
+                        g_curr['support_line_m'] = m_new
+                        g_curr['support_line_c'] = c_new
+                        g_curr['support_valid'] = True
+                        g_curr['y_snap'] = m_new * x_mid + c_new
+                        print(f'[CROP_LEFT_FIX_COLLAPSE] block={block_name} col={col_idx} r={r} old_c={old_c:.4f} new_c={c_new:.4f} median_pitch={median_pitch:.4f} source=post_guard')
+        tan_2_deg = math.tan(np.radians(2.0))
+        for r in range(row_count + 1):
+            g0 = left_snapped_horiz_gaps_by_col[0][r]
+            g1 = left_snapped_horiz_gaps_by_col[1][r]
+            for col_idx, g in enumerate([g0, g1]):
+                if g['selected_cand'] in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate'):
+                    continue
+                g_other = g1 if col_idx == 0 else g0
+                if g_other['selected_cand'] != 'crop_left_support_fit':
+                    m_col = g['m_row']
+                    m_other = g_other['m_row']
+                    m_med = float(np.median([m_col, m_other]))
+                    if abs(m_col - m_med) > tan_2_deg:
+                        m_new = m_med + np.sign(m_col - m_med) * tan_2_deg
+                        y_val_ref = m_col * x_mid + g['c_row']
+                        x_left_outer = V34__get_boundary_x_at_y(boundaries['left_outer'], y_val_ref)
+                        x_middle_rail = V34__get_boundary_x_at_y(boundaries['middle_divider'], y_val_ref)
+                        x_right_outer = V34__get_boundary_x_at_y(boundaries['right_outer'], y_val_ref)
+                        x_center = (x_left_outer + x_middle_rail) / 2.0 if col_idx == 0 else (x_middle_rail + x_right_outer) / 2.0
+                        c_new = g['c_row'] + (m_col - m_new) * x_center
+                        g['m_row'] = m_new
+                        g['c_row'] = c_new
+                        g['support_line_m'] = m_new
+                        g['support_line_c'] = c_new
+                        g['y_snap'] = m_new * x_mid + c_new
+        if crop_debug_img is not None:
+            for r in range(row_count + 1):
+                for col_idx in [0, 1]:
+                    g = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    src = g['selected_cand']
+                    if src not in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate'):
+                        print(f'[CROP_LEFT_SKIP_LINE] block={block_name} r={r} col={col_idx} source={src} reason=no_support_line')
+                        continue
+                    m_final = float(g['support_line_m'])
+                    c_final = float(g['support_line_c'])
+                    left_boundary = boundaries['left_outer'] if col_idx == 0 else boundaries['middle_divider']
+                    right_boundary = boundaries['middle_divider'] if col_idx == 0 else boundaries['right_outer']
+                    pL = V34__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, left_boundary)
+                    if pL is not None:
+                        xL, yL = pL
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xL = V34__get_boundary_x_at_y(left_boundary, y_ref)
+                        yL = m_final * xL + c_final
+                    pR = V34__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, right_boundary)
+                    if pR is not None:
+                        xR, yR = pR
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xR = V34__get_boundary_x_at_y(right_boundary, y_ref)
+                        yR = m_final * xR + c_final
+                    vx = xR - xL
+                    vy = yR - yL
+                    norm = max(1e-06, math.sqrt(vx * vx + vy * vy))
+                    ux, uy = (vx / norm, vy / norm)
+                    extend_px = 2.0
+                    xL2 = xL - extend_px * ux
+                    yL2 = yL - extend_px * uy
+                    xR2 = xR + extend_px * ux
+                    yR2 = yR + extend_px * uy
+                    print(f'[CROP_LEFT_DRAW_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source={src} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f}')
+                    p1_d = (int(round(xL2)), int(round(yL2)))
+                    p2_d = (int(round(xR2)), int(round(yR2)))
+                    cv2.line(crop_debug_img, p1_d, p2_d, (255, 0, 255), 1, lineType=cv2.LINE_AA)
+        if False and crop_debug_img is not None:
+            pass
+    consensus_stats = {'estimated_pitch_px': estimated_pitch, 'pitch_std_px': pitch_std, 'rejected_horizontal_lines_count': rejected_count, 'number_of_interpolated_missing_lines': interpolated_missing_count, 'boundaries_n_segments_used': boundaries_n_segments_used, 'boundaries_max_jumps': boundaries_max_jumps, 'boundaries_max_turns': boundaries_max_turns, 'boundaries_fallback_to_baseline': boundaries_fallback_to_baseline, 'm_consensus': m_consensus, 'bad_block_orientation': bool(bad_block_orientation), 'bad_block_orientation_angle_deg': float(_mcons_ang), 'bad_block_orientation_action': 'no_snap_polygon' if bad_block_orientation else 'profile_recovered' if recovered_from_profile else 'none', 'bad_block_orientation_recovered': bool(recovered_from_profile)}
+    if has_crop_left_col:
+        consensus_stats['left_snapped_horiz_gaps_by_col'] = left_snapped_horiz_gaps_by_col
+        if block_name == 'block_1':
+            valid_crop_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+            for col in [0, 1]:
+                for r in range(row_count + 1):
+                    col_gaps = left_snapped_horiz_gaps_by_col.get(col, {})
+                    exists_val = r in col_gaps
+                    if exists_val:
+                        g = col_gaps[r]
+                        src = g.get('selected_cand') or g.get('source') or 'unknown'
+                        support_valid_val = g.get('support_valid', False)
+                        n_support = len(g.get('support_pts', []))
+                        m_val = g.get('support_line_m', 'None')
+                        c_val = g.get('support_line_c', 'None')
+                        inherited_from_val = g.get('inherited_from', 'None')
+                        draw_allowed_val = src in valid_crop_sources
+                    else:
+                        src = 'None'
+                        support_valid_val = 'False'
+                        n_support = 0
+                        m_val = 'None'
+                        c_val = 'None'
+                        inherited_from_val = 'None'
+                        draw_allowed_val = False
+                    print(f'[CROP_LEFT_TABLE] block={block_name} r={r} col={col} exists={str(exists_val).lower()} source={src} support_valid={str(support_valid_val).lower()} n_support={n_support} m={m_val} c={c_val} inherited_from={inherited_from_val} draw_allowed={str(draw_allowed_val).lower()}')
+    return (boundaries, snapped_horiz_gaps, consensus_stats)
+
+def V34__get_panel_hybrid_anchors(panel):
+    poly = None
+    source = None
+    if 'raw_yolo_poly' in panel and panel['raw_yolo_poly'] is not None and (len(panel['raw_yolo_poly']) >= 3):
+        pts = np.array(panel['raw_yolo_poly'], dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        poly = [tuple(pt) for pt in box]
+        source = 'raw_yolo_minarearect'
+    if poly is None and 'polygon' in panel and (panel['polygon'] is not None) and (len(panel['polygon']) >= 3):
+        pts = np.array(panel['polygon'], dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        poly = [tuple(pt) for pt in box]
+        source = 'polygon_minarearect'
+    if poly is None and 'refined_polygon' in panel and (panel['refined_polygon'] is not None) and (len(panel['refined_polygon']) >= 3):
+        pts = np.array(panel['refined_polygon'], dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        poly = [tuple(pt) for pt in box]
+        source = 'refined_polygon_minarearect'
+    if poly is None:
+        x1, y1, x2, y2 = panel['bbox']
+        poly = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        source = 'bbox_fallback'
+    TL, TR, BR, BL = V34__sort_panel_corners(poly)
+    cx = (TL[0] + TR[0] + BR[0] + BL[0]) / 4.0
+    cy = (TL[1] + TR[1] + BR[1] + BL[1]) / 4.0
+    width = math.sqrt((TR[0] - TL[0]) ** 2 + (TR[1] - TL[1]) ** 2)
+    height = math.sqrt((BL[0] - TL[0]) ** 2 + (BL[1] - TL[1]) ** 2)
+    angle_rad = math.atan2(TR[1] - TL[1], TR[0] - TL[0])
+    angle_deg = np.degrees(angle_rad)
+    while angle_deg > 90:
+        angle_deg -= 180
+    while angle_deg < -90:
+        angle_deg += 180
+    if angle_deg > 45:
+        angle_deg -= 90
+    elif angle_deg < -45:
+        angle_deg += 90
+    return {'center': (cx, cy), 'width': width, 'height': height, 'angle_deg': angle_deg, 'top_edge': (TL, TR), 'bottom_edge': (BL, BR), 'left_edge': (TL, BL), 'right_edge': (TR, BR), 'poly_4pts': [TL, TR, BR, BL], 'source': source}
+
+def V34__get_rotated_rect_points(cx, cy, w, h, angle_deg):
+    angle_rad = np.radians(angle_deg)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    dx_tl = -w / 2.0 * cos_a - -h / 2.0 * sin_a
+    dy_tl = -w / 2.0 * sin_a + -h / 2.0 * cos_a
+    dx_tr = w / 2.0 * cos_a - -h / 2.0 * sin_a
+    dy_tr = w / 2.0 * sin_a + -h / 2.0 * cos_a
+    dx_br = w / 2.0 * cos_a - h / 2.0 * sin_a
+    dy_br = w / 2.0 * sin_a + h / 2.0 * cos_a
+    dx_bl = -w / 2.0 * cos_a - h / 2.0 * sin_a
+    dy_bl = -w / 2.0 * sin_a + h / 2.0 * cos_a
+    TL = (cx + dx_tl, cy + dy_tl)
+    TR = (cx + dx_tr, cy + dy_tr)
+    BR = (cx + dx_br, cy + dy_br)
+    BL = (cx + dx_bl, cy + dy_bl)
+    return [TL, TR, BR, BL]
+
+def V34__refine_edge_with_thermal_gap(img_gray, p1, p2, search_window=3):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length == 0:
+        return (p1, p2)
+    nx = -dy / length
+    ny = dx / length
+    num_samples = 15
+    profile = []
+    for d in range(-search_window, search_window + 1):
+        vals = []
+        for i in range(num_samples):
+            t = i / (num_samples - 1)
+            x_sample = p1[0] + t * dx + d * nx
+            y_sample = p1[1] + t * dy + d * ny
+            x_idx = int(round(x_sample))
+            y_idx = int(round(y_sample))
+            if 0 <= x_idx < img_gray.shape[1] and 0 <= y_idx < img_gray.shape[0]:
+                vals.append(img_gray[y_idx, x_idx])
+        profile.append(np.mean(vals) if vals else 255.0)
+    best_d = 0
+    has_support = False
+    min_val = 255.0
+    for idx in range(1, len(profile) - 1):
+        if profile[idx] < profile[idx - 1] and profile[idx] < profile[idx + 1]:
+            if profile[idx] < 130 and profile[idx] < min_val:
+                min_val = profile[idx]
+                best_d = idx - search_window
+                has_support = True
+    if has_support:
+        p1_refined = (p1[0] + best_d * nx, p1[1] + best_d * ny)
+        p2_refined = (p2[0] + best_d * nx, p2[1] + best_d * ny)
+        return (p1_refined, p2_refined)
+    else:
+        return (p1, p2)
+
+def V34__get_polygon_intersection_area(poly1, poly2):
+    p1 = np.array(poly1, dtype=np.float32)
+    p2 = np.array(poly2, dtype=np.float32)
+    ret, inter_poly = cv2.intersectConvexConvex(p1, p2)
+    if ret > 0 and inter_poly is not None:
+        return cv2.contourArea(inter_poly)
+    return 0.0
+
+def V34__validate_and_fallback_panel(poly_proposal_orig, p_orig, gray, block_panels_polys=None):
+    poly_proposal_orig = np.array(poly_proposal_orig, dtype=np.float32)
+    is_convex = cv2.isContourConvex(poly_proposal_orig.astype(np.int32))
+    anchors = V34__get_panel_hybrid_anchors(p_orig)
+    yolo_poly = np.array(anchors['poly_4pts'], dtype=np.float32)
+    area_orig = cv2.contourArea(yolo_poly)
+    if area_orig <= 0:
+        x1, y1, x2, y2 = p_orig['bbox']
+        area_orig = (x2 - x1) * (y2 - y1)
+    area_prop = cv2.contourArea(poly_proposal_orig)
+    area_ratio = area_prop / area_orig if area_orig > 0 else 0.0
+    area_ok = 0.7 <= area_ratio <= 1.4
+    cx_prop = np.mean(poly_proposal_orig[:, 0])
+    cy_prop = np.mean(poly_proposal_orig[:, 1])
+    cx_orig = anchors['center'][0]
+    cy_orig = anchors['center'][1]
+    c_shift = math.sqrt((cx_prop - cx_orig) ** 2 + (cy_prop - cy_orig) ** 2)
+    panel_height = anchors['height']
+    shift_ok = c_shift <= max(12.0, 0.4 * panel_height)
+    overlap_ok = True
+    if block_panels_polys is not None:
+        for other_poly in block_panels_polys:
+            inter_area = V34__get_polygon_intersection_area(poly_proposal_orig, other_poly)
+            if inter_area > 0.35 * min(area_prop, cv2.contourArea(other_poly)):
+                overlap_ok = False
+                break
+    is_valid = is_convex and area_ok and shift_ok and overlap_ok
+    if is_valid:
+        return ([(float(pt[0]), float(pt[1])) for pt in poly_proposal_orig], 'pass')
+    else:
+        TL_ref, TR_ref = V34__refine_edge_with_thermal_gap(gray, anchors['poly_4pts'][0], anchors['poly_4pts'][1])
+        BL_ref, BR_ref = V34__refine_edge_with_thermal_gap(gray, anchors['poly_4pts'][3], anchors['poly_4pts'][2])
+        poly_fallback = [TL_ref, TR_ref, BR_ref, BL_ref]
+        return (poly_fallback, 'warning')
+
+def V34__refine_oriented_polygon(gray, poly):
+    TL, TR, BR, BL = V34__sort_panel_corners(poly)
+    TL_t, TR_t = V34__refine_edge_with_thermal_gap(gray, TL, TR, search_window=3)
+    BL_b, BR_b = V34__refine_edge_with_thermal_gap(gray, BL, BR, search_window=3)
+    TL_l, BL_l = V34__refine_edge_with_thermal_gap(gray, TL, BL, search_window=3)
+    TR_r, BR_r = V34__refine_edge_with_thermal_gap(gray, TR, BR, search_window=3)
+
+    def intersect_lines(p1, p2, q1, q2):
+        A1 = p2[1] - p1[1]
+        B1 = p1[0] - p2[0]
+        C1 = A1 * p1[0] + B1 * p1[1]
+        A2 = q2[1] - q1[1]
+        B2 = q1[0] - q2[0]
+        C2 = A2 * q1[0] + B2 * q1[1]
+        det = A1 * B2 - A2 * B1
+        if abs(det) < 1e-05:
+            return p1
+        x = (B2 * C1 - B1 * C2) / det
+        y = (A1 * C2 - A2 * C1) / det
+        return (x, y)
+    tl_new = intersect_lines(TL_t, TR_t, TL_l, BL_l)
+    tr_new = intersect_lines(TL_t, TR_t, TR_r, BR_r)
+    br_new = intersect_lines(BL_b, BR_b, TR_r, BR_r)
+    bl_new = intersect_lines(BL_b, BR_b, TL_l, BL_l)
+    return [tl_new, tr_new, br_new, bl_new]
+
+def V34__is_polygon_valid(poly, anchors, block_panels_polys=None):
+    poly_np = np.array(poly, dtype=np.float32)
+    if not cv2.isContourConvex(poly_np.astype(np.int32)):
+        return (False, 'not_convex')
+    area = cv2.contourArea(poly_np)
+    yolo_poly = np.array(anchors['poly_4pts'], dtype=np.float32)
+    area_orig = cv2.contourArea(yolo_poly)
+    if area_orig <= 0:
+        return (True, 'ok')
+    area_ratio = area / area_orig
+    if not 0.6 <= area_ratio <= 1.45:
+        return (False, 'bad_area')
+    dx_top = math.sqrt((poly[1][0] - poly[0][0]) ** 2 + (poly[1][1] - poly[0][1]) ** 2)
+    dy_left = math.sqrt((poly[3][0] - poly[0][0]) ** 2 + (poly[3][1] - poly[0][1]) ** 2)
+    if dy_left <= 0:
+        return (False, 'zero_height')
+    aspect_ratio = dx_top / dy_left
+    yolo_w = anchors['width']
+    yolo_h = anchors['height']
+    if yolo_h > 0:
+        yolo_aspect = yolo_w / yolo_h
+        if not 0.65 * yolo_aspect <= aspect_ratio <= 1.35 * yolo_aspect:
+            return (False, 'bad_aspect_ratio')
+    if block_panels_polys is not None:
+        for other_poly in block_panels_polys:
+            inter_area = V34__get_polygon_intersection_area(poly_np, other_poly)
+            if inter_area > 0.35 * min(area, cv2.contourArea(other_poly)):
+                return (False, 'overlap')
+    return (True, 'ok')
+
+def V34__intersect_snap_horizontal_with_rail(m, x_mid, y_snap, rail_pts):
+    A = -m
+    B = 1.0
+    C = m * x_mid - y_snap
+    for i in range(len(rail_pts) - 1):
+        x0, y0 = rail_pts[i]
+        x1, y1 = rail_pts[i + 1]
+        dx = x1 - x0
+        dy = y1 - y0
+        denom = A * dx + B * dy
+        if abs(denom) > 1e-06:
+            t = -(A * x0 + B * y0 + C) / denom
+            if 0.0 <= t <= 1.0:
+                return (x0 + t * dx, y0 + t * dy)
+    return None
+
+def V34__transform_points_local_to_orig(points, transform_info):
+    Minv = transform_info['rot_M_inv']
+    roi_x1 = transform_info['roi_x1']
+    roi_y1 = transform_info['roi_y1']
+    orig_pts = []
+    for x_local, y_local in points:
+        x_rel = Minv[0, 0] * float(x_local) + Minv[0, 1] * float(y_local) + Minv[0, 2]
+        y_rel = Minv[1, 0] * float(x_local) + Minv[1, 1] * float(y_local) + Minv[1, 2]
+        orig_pts.append((float(x_rel + roi_x1), float(y_rel + roi_y1)))
+    return orig_pts
+
+def V34__build_panel_polygons_from_visible_snap_evidence(img, snap_blocks, img_support=None, img_snap=None):
+    if img_support is None:
+        img_support = img.copy()
+    if img_snap is None:
+        img_snap = img.copy()
+    drawn_count = 0
+    all_polygons = []
+    all_sources = []
+    all_panel_dicts = []
+    for sb in snap_blocks:
+        block_name = sb['block_name']
+        n_cols = sb['n_cols']
+        row_count = sb['row_count']
+        drawn_block_polys = []
+        is_large_grid = sb['is_large_grid']
+        boundaries = sb['boundaries']
+        snapped_horiz_gaps = sb['snapped_horiz_gaps']
+        m_perp = sb['m_perp']
+        x_mid = sb['x_mid']
+        b_local = sb['b_local']
+        transform_info = sb['transform_info']
+        is_small_block = sb.get('is_small_block', False)
+        rotated_gray = sb.get('rotated_gray', None)
+        bad_block_orientation = bool(sb.get('bad_block_orientation', False))
+        bad_block_orientation_angle_deg = float(sb.get('bad_block_orientation_angle_deg', 0.0))
+        if bad_block_orientation:
+            print(f'[GEOMETRY_BLOCK_REJECT] block={block_name} reason=bad_block_orientation angle={bad_block_orientation_angle_deg:.2f} action=no_snap_polygon')
+        if is_small_block:
+            for col_idx, col in enumerate(b_local['columns']):
+                for row_idx in range(len(col)):
+                    p = col[row_idx]
+                    poly_proposal_local = p['polygon']
+                    poly_final_orig = V34__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                    poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                    drawn_count += 1
+                    source = p.get('source', 'small_block_yolo_limited')
+                    reason = p.get('reason', 'valid_refine')
+                    shift = p.get('shift', 0.0)
+                    area_ratio = p.get('area_ratio', 1.0)
+                    overlap = p.get('overlap', 0.0)
+                    print(f'[GEOMETRY_SOURCE] {block_name} {row_idx} {col_idx} source={source} reason={reason} shift={shift:.2f} area_ratio={area_ratio:.2f} overlap={overlap:.2f}')
+                    all_polygons.append(poly_final_orig)
+                    all_sources.append(source)
+                    all_panel_dicts.append(p)
+            continue
+        bx_min = min((panel['orig_ref']['bbox'][0] for panel in b_local['panels'])) if b_local['panels'] else 9999.0
+        fitted_horiz_lines = []
+        for r, g in enumerate(snapped_horiz_gaps):
+            support_valid = g.get('support_valid', False)
+            support_line_m = g.get('support_line_m', None)
+            support_line_c = g.get('support_line_c', None)
+            m_row_base = g.get('m_row', 0.0)
+            c_row_base = g.get('c_row', g.get('c_yolo', 0.0))
+            if support_valid and support_line_m is not None and (support_line_c is not None):
+                m_row = float(support_line_m)
+                c_row = float(support_line_c)
+                selected_cand = str(g.get('selected_cand', 'support_prefit'))
+                std_res = float(g.get('support_residual_std', 0.0))
+            else:
+                m_row = float(m_row_base)
+                c_row = float(c_row_base)
+                selected_cand = str(g.get('selected_cand', 'yolo_fallback'))
+                std_res = 0.0
+            print(f'[HORIZ_LINE] {block_name} r={r} source={selected_cand} m={m_row:.5f} c={c_row:.2f} residual={std_res:.3f}')
+            fitted_horiz_lines.append({'m_row': m_row, 'c_row': c_row, 'selected_cand': selected_cand, 'y_snap': m_row * x_mid + c_row})
+        left_snapped_horiz_gaps_by_col = sb.get('left_snapped_horiz_gaps_by_col', None)
+        has_crop_left_col = left_snapped_horiz_gaps_by_col is not None
+        left_fitted_horiz_lines_by_col = {0: [], 1: []}
+        if has_crop_left_col:
+            for col_idx in [0, 1]:
+                gaps = left_snapped_horiz_gaps_by_col[col_idx]
+                for r in sorted(gaps.keys()):
+                    g = gaps[r]
+                    cand = g.get('selected_cand')
+                    support_valid = cand in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    support_line_m = g.get('support_line_m', None)
+                    support_line_c = g.get('support_line_c', None)
+                    m_row_base = g.get('m_row', 0.0)
+                    c_row_base = g.get('c_row', 0.0)
+                    if support_valid and support_line_m is not None and (support_line_c is not None):
+                        m_row = float(support_line_m)
+                        c_row = float(support_line_c)
+                        selected_cand = cand
+                        std_res = float(g.get('support_residual_std', 0.0))
+                    else:
+                        m_row = float(g.get('m_yolo', m_row_base))
+                        c_row = float(g.get('c_yolo', c_row_base))
+                        selected_cand = 'yolo_fallback'
+                        std_res = 0.0
+                    offset = 0.0
+                    if r < len(snapped_horiz_gaps):
+                        g_adj = snapped_horiz_gaps[r]
+                        c_ref = g_adj['c_row']
+                        offset = c_row - c_ref
+                    print(f"[CROP_LEFT_LINE_USE] {block_name} {r} {col_idx} source={selected_cand} clean={len(g.get('support_clean_pts', []))} residual={std_res:.3f} offset={offset:.2f}")
+                    left_fitted_horiz_lines_by_col[col_idx].append({'m_row': m_row, 'c_row': c_row, 'support_line_m': g.get('support_line_m'), 'support_line_c': g.get('support_line_c'), 'selected_cand': selected_cand, 'y_snap': m_row * x_mid + c_row})
+        if bool(sb.get('bad_block_orientation_recovered', False)) and (not has_crop_left_col):
+            profile_cols = 2 if boundaries.get('middle_divider') is not None else 1
+            profile_rows = max(0, len(fitted_horiz_lines) - 1)
+            print(f'[PROFILE_GRID_BUILD] block={block_name} rows={profile_rows} cols={profile_cols} action=full_grid_from_recovered_rows_v29 source=line_snap_only')
+            for col_idx in range(profile_cols):
+                if profile_cols == 1:
+                    left_line = boundaries.get('left_outer')
+                    right_line = boundaries.get('right_outer')
+                else:
+                    left_line = boundaries.get('left_outer') if col_idx == 0 else boundaries.get('middle_divider')
+                    right_line = boundaries.get('middle_divider') if col_idx == 0 else boundaries.get('right_outer')
+                if left_line is None or right_line is None:
+                    print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} col={col_idx} reason=missing_vertical_rail')
+                    continue
+                for row_idx in range(profile_rows):
+                    if row_idx + 1 >= len(fitted_horiz_lines):
+                        print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} row={row_idx} col={col_idx} reason=missing_horizontal_line')
+                        continue
+                    g_t = fitted_horiz_lines[row_idx]
+                    g_b = fitted_horiz_lines[row_idx + 1]
+                    m_t, c_t = (float(g_t['m_row']), float(g_t['c_row']))
+                    m_b, c_b = (float(g_b['m_row']), float(g_b['c_row']))
+                    tl = V34__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, left_line)
+                    if tl is None and left_line is not None and (len(left_line) >= 2):
+                        y_ref = m_t * x_mid + c_t
+                        x_val = V34__get_boundary_x_at_y(left_line, y_ref)
+                        tl = (x_val, m_t * x_val + c_t)
+                    tr = V34__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, right_line)
+                    if tr is None and right_line is not None and (len(right_line) >= 2):
+                        y_ref = m_t * x_mid + c_t
+                        x_val = V34__get_boundary_x_at_y(right_line, y_ref)
+                        tr = (x_val, m_t * x_val + c_t)
+                    br = V34__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, right_line)
+                    if br is None and right_line is not None and (len(right_line) >= 2):
+                        y_ref = m_b * x_mid + c_b
+                        x_val = V34__get_boundary_x_at_y(right_line, y_ref)
+                        br = (x_val, m_b * x_val + c_b)
+                    bl = V34__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, left_line)
+                    if bl is None and left_line is not None and (len(left_line) >= 2):
+                        y_ref = m_b * x_mid + c_b
+                        x_val = V34__get_boundary_x_at_y(left_line, y_ref)
+                        bl = (x_val, m_b * x_val + c_b)
+                    if tl is None or tr is None or br is None or (bl is None):
+                        print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} row={row_idx} col={col_idx} reason=intersection_failed')
+                        continue
+                    poly_proposal_local = [tl, tr, br, bl]
+                    poly_prop_np = np.array(poly_proposal_local, dtype=np.float32)
+                    area_prop = float(cv2.contourArea(poly_prop_np))
+                    is_convex = bool(cv2.isContourConvex(poly_prop_np.astype(np.int32)))
+                    height_l = math.sqrt((bl[0] - tl[0]) ** 2 + (bl[1] - tl[1]) ** 2)
+                    height_r = math.sqrt((br[0] - tr[0]) ** 2 + (br[1] - tr[1]) ** 2)
+                    width_t = math.sqrt((tr[0] - tl[0]) ** 2 + (tr[1] - tl[1]) ** 2)
+                    width_b = math.sqrt((br[0] - bl[0]) ** 2 + (br[1] - bl[1]) ** 2)
+                    dims_ok = area_prop > 20.0 and min(height_l, height_r) > 4.0 and (min(width_t, width_b) > 6.0)
+                    overlap_ok = True
+                    if not (is_convex and dims_ok):
+                        print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} row={row_idx} col={col_idx} reason=invalid_grid convex={str(is_convex).lower()} dims={str(dims_ok).lower()} overlap=ignored area={area_prop:.1f}')
+                        continue
+                    poly_final_orig = V34__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                    poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                    drawn_count += 1
+                    drawn_block_polys.append(poly_final_orig)
+                    source = 'profile_snap_grid'
+                    all_polygons.append(poly_final_orig)
+                    all_sources.append(source)
+                    all_panel_dicts.append({'source': source, 'reason': 'bad_orientation_profile_grid', 'row': row_idx, 'col': col_idx, 'outer_polygon': np.array(poly_final_orig, dtype=np.float32)})
+                    print(f"[PROFILE_GRID_PANEL] block={block_name} row={row_idx} col={col_idx} source={source} top={g_t['selected_cand']} bottom={g_b['selected_cand']} area={area_prop:.1f} valid=true")
+            continue
+        if not has_crop_left_col and len(fitted_horiz_lines) >= 2 and (boundaries.get('left_outer') is not None) and (boundaries.get('right_outer') is not None):
+            grid_cols = 2 if boundaries.get('middle_divider') is not None else 1
+            grid_rows = max(0, len(fitted_horiz_lines) - 1)
+            print(f'[UNIVERSAL_SNAP_GRID_BUILD] block={block_name} rows={grid_rows} cols={grid_cols} source=line_snap_rails_rows')
+            for col_idx in range(grid_cols):
+                if grid_cols == 1:
+                    left_line = boundaries.get('left_outer')
+                    right_line = boundaries.get('right_outer')
+                else:
+                    left_line = boundaries.get('left_outer') if col_idx == 0 else boundaries.get('middle_divider')
+                    right_line = boundaries.get('middle_divider') if col_idx == 0 else boundaries.get('right_outer')
+                if left_line is None or right_line is None:
+                    print(f'[UNIVERSAL_SNAP_GRID_SKIP] block={block_name} col={col_idx} reason=missing_rail')
+                    continue
+                for row_idx in range(grid_rows):
+                    g_t = fitted_horiz_lines[row_idx]
+                    g_b = fitted_horiz_lines[row_idx + 1]
+                    m_t, c_t = (float(g_t['m_row']), float(g_t['c_row']))
+                    m_b, c_b = (float(g_b['m_row']), float(g_b['c_row']))
+
+                    def _intersect_or_project(mv, cv, rail):
+                        p_int = V34__intersect_line_y_eq_mx_c_with_polyline(mv, cv, rail)
+                        if p_int is not None:
+                            return p_int
+                        y_ref = mv * x_mid + cv
+                        x_val = V34__get_boundary_x_at_y(rail, y_ref)
+                        return (x_val, mv * x_val + cv)
+                    tl = _intersect_or_project(m_t, c_t, left_line)
+                    tr = _intersect_or_project(m_t, c_t, right_line)
+                    br = _intersect_or_project(m_b, c_b, right_line)
+                    bl = _intersect_or_project(m_b, c_b, left_line)
+                    poly_proposal_local = [tl, tr, br, bl]
+                    poly_prop_np = np.array(poly_proposal_local, dtype=np.float32)
+                    area_prop = float(cv2.contourArea(poly_prop_np))
+                    is_convex = bool(cv2.isContourConvex(poly_prop_np.astype(np.int32)))
+                    h_l = math.hypot(bl[0] - tl[0], bl[1] - tl[1])
+                    h_r = math.hypot(br[0] - tr[0], br[1] - tr[1])
+                    w_t = math.hypot(tr[0] - tl[0], tr[1] - tl[1])
+                    w_b = math.hypot(br[0] - bl[0], br[1] - bl[1])
+                    dims_ok = area_prop > 20.0 and min(h_l, h_r) > 4.0 and (min(w_t, w_b) > 6.0)
+                    if not (is_convex and dims_ok):
+                        print(f'[UNIVERSAL_SNAP_GRID_SKIP] block={block_name} row={row_idx} col={col_idx} reason=invalid_grid convex={str(is_convex).lower()} dims={str(dims_ok).lower()} area={area_prop:.1f}')
+                        continue
+                    poly_final_orig = V34__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                    poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                    drawn_count += 1
+                    drawn_block_polys.append(poly_final_orig)
+                    source = 'universal_snap_grid'
+                    all_polygons.append(poly_final_orig)
+                    all_sources.append(source)
+                    all_panel_dicts.append({'source': source, 'reason': 'line_snap_grid_no_yolo_polygon', 'row': row_idx, 'col': col_idx, 'outer_polygon': np.array(poly_final_orig, dtype=np.float32)})
+                    print(f"[UNIVERSAL_SNAP_GRID_PANEL] block={block_name} row={row_idx} col={col_idx} source={source} top={g_t.get('selected_cand')} bottom={g_b.get('selected_cand')} area={area_prop:.1f}")
+            continue
+        for col_idx, col in enumerate(b_local['columns']):
+            for row_idx in range(len(col)):
+                p = col[row_idx]
+                p_orig = p['orig_ref']
+                if has_crop_left_col:
+                    g_t = left_fitted_horiz_lines_by_col[col_idx][row_idx]
+                    g_b = left_fitted_horiz_lines_by_col[col_idx][row_idx + 1]
+                    if col_idx == 0:
+                        left_line = boundaries.get('left_outer')
+                        right_line = boundaries.get('middle_divider')
+                    else:
+                        left_line = boundaries.get('middle_divider')
+                        right_line = boundaries.get('right_outer')
+                    t_valid = g_t['selected_cand'] in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    b_valid = g_b['selected_cand'] in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    m_t = g_t.get('support_line_m') if g_t.get('support_line_m') is not None else g_t['m_row']
+                    c_t = g_t.get('support_line_c') if g_t.get('support_line_c') is not None else g_t['c_row']
+                    m_b = g_b.get('support_line_m') if g_b.get('support_line_m') is not None else g_b['m_row']
+                    c_b = g_b.get('support_line_c') if g_b.get('support_line_c') is not None else g_b['c_row']
+                    tl = tr = br = bl = None
+                    fail_reasons = []
+                    if t_valid and b_valid:
+                        tl = V34__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, left_line)
+                        if tl is None and left_line is not None and (len(left_line) >= 2):
+                            y_ref_t = m_t * x_mid + c_t
+                            x_val = V34__get_boundary_x_at_y(left_line, y_ref_t)
+                            y_val = m_t * x_val + c_t
+                            tl = (x_val, y_val)
+                        tr = V34__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, right_line)
+                        if tr is None and right_line is not None and (len(right_line) >= 2):
+                            y_ref_t = m_t * x_mid + c_t
+                            x_val = V34__get_boundary_x_at_y(right_line, y_ref_t)
+                            y_val = m_t * x_val + c_t
+                            tr = (x_val, y_val)
+                        br = V34__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, right_line)
+                        if br is None and right_line is not None and (len(right_line) >= 2):
+                            y_ref_b = m_b * x_mid + c_b
+                            x_val = V34__get_boundary_x_at_y(right_line, y_ref_b)
+                            y_val = m_b * x_val + c_b
+                            br = (x_val, y_val)
+                        bl = V34__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, left_line)
+                        if bl is None and left_line is not None and (len(left_line) >= 2):
+                            y_ref_b = m_b * x_mid + c_b
+                            x_val = V34__get_boundary_x_at_y(left_line, y_ref_b)
+                            y_val = m_b * x_val + c_b
+                            bl = (x_val, y_val)
+                    else:
+                        fail_reasons.append('no_crop_left_support')
+                    is_valid_proposal = False
+                    poly_proposal_local = None
+                    poly_final_orig = None
+                    area_ratio = 1.0
+                    center_shift = 0.0
+                    if tl is not None and tr is not None and (br is not None) and (bl is not None):
+                        poly_proposal_local = [tl, tr, br, bl]
+                        poly_proposal_orig = V34__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                        poly_prop_np = np.array(poly_proposal_orig, dtype=np.float32)
+                        is_convex = cv2.isContourConvex(poly_prop_np.astype(np.int32))
+                        if not is_convex:
+                            fail_reasons.append('not_convex')
+                        yolo_poly_orig = p_orig.get('refined_polygon') or p_orig.get('polygon') or p_orig.get('bbox')
+                        if len(yolo_poly_orig) == 4:
+                            area_yolo = cv2.contourArea(np.array(yolo_poly_orig, dtype=np.float32))
+                        else:
+                            x1, y1, x2, y2 = yolo_poly_orig
+                            area_yolo = (x2 - x1) * (y2 - y1)
+                        area_prop = cv2.contourArea(poly_prop_np)
+                        area_ratio = area_prop / (area_yolo + 1e-06)
+                        area_ok = 0.7 <= area_ratio <= 1.35
+                        if not area_ok:
+                            fail_reasons.append(f'area_ratio_{area_ratio:.2f}_out_of_range')
+                        cx_prop = np.mean([pt[0] for pt in poly_proposal_orig])
+                        cy_prop = np.mean([pt[1] for pt in poly_proposal_orig])
+                        if len(yolo_poly_orig) == 4:
+                            cx_orig = np.mean([pt[0] for pt in yolo_poly_orig])
+                            cy_orig = np.mean([pt[1] for pt in yolo_poly_orig])
+                            TL_orig, TR_orig, BR_orig, BL_orig = V34__sort_panel_corners(yolo_poly_orig)
+                            panel_height = math.sqrt((BL_orig[0] - TL_orig[0]) ** 2 + (BL_orig[1] - TL_orig[1]) ** 2)
+                        else:
+                            x1, y1, x2, y2 = yolo_poly_orig
+                            cx_orig = (x1 + x2) / 2.0
+                            cy_orig = (y1 + y2) / 2.0
+                            panel_height = y2 - y1
+                        center_shift = math.sqrt((cx_prop - cx_orig) ** 2 + (cy_prop - cy_orig) ** 2)
+                        shift_ok = center_shift <= max(14.0, 0.45 * panel_height)
+                        if not shift_ok:
+                            fail_reasons.append(f'shift_{center_shift:.2f}_too_large')
+                        overlap_ok = True
+                        for other_poly in drawn_block_polys:
+                            inter_area = V34__get_polygon_intersection_area(poly_proposal_orig, other_poly)
+                            area_other = cv2.contourArea(np.array(other_poly, dtype=np.float32))
+                            if inter_area > 0.35 * min(area_prop, area_other):
+                                overlap_ok = False
+                                break
+                        if not overlap_ok:
+                            fail_reasons.append('overlap_detected')
+                        if is_convex and area_ok and shift_ok and overlap_ok:
+                            is_valid_proposal = True
+                            poly_final_orig = poly_proposal_orig
+                    elif not fail_reasons:
+                        fail_reasons.append('intersection_failed')
+                    if is_valid_proposal:
+                        poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                        drawn_count += 1
+                        drawn_block_polys.append(poly_final_orig)
+                        source = 'snap_grid'
+                        all_polygons.append(poly_final_orig)
+                        all_sources.append(source)
+                        all_panel_dicts.append(p)
+                        print(f"[PANEL_BUILD] block={block_name} row={row_idx} col={col_idx} source=snap_grid top={g_t['selected_cand']} bottom={g_b['selected_cand']} area_ratio={area_ratio:.3f} shift={center_shift:.2f} valid=true reason=top_{g_t['selected_cand']}_bottom_{g_b['selected_cand']}")
+                    else:
+                        poly_final_local = p.get('refined_polygon') or p.get('polygon')
+                        poly_final_orig = V34__transform_points_local_to_orig(poly_final_local, transform_info)
+                        poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                        drawn_count += 1
+                        drawn_block_polys.append(poly_final_orig)
+                        source = 'snap_grid_rejected_missing_or_invalid_edge'
+                        all_polygons.append(poly_final_orig)
+                        all_sources.append(source)
+                        all_panel_dicts.append(p)
+                        reason_str = '+'.join(fail_reasons)
+                        print(f"[PANEL_BUILD] block={block_name} row={row_idx} col={col_idx} source=snap_grid top={g_t['selected_cand']} bottom={g_b['selected_cand']} area_ratio={area_ratio:.3f} shift={center_shift:.2f} valid=false reason={reason_str}")
+                        print(f'[PANEL_FALLBACK] block={block_name} row={row_idx} col={col_idx} reason={reason_str}')
+                else:
+                    if bad_block_orientation:
+                        print(f'[GEOMETRY_PANEL_SUPPRESSED] block={block_name} row={row_idx} col={col_idx} reason=bad_block_orientation_no_snap_polygon action=no_yolo_geometry')
+                        continue
+                    g_t = fitted_horiz_lines[row_idx]
+                    g_b = fitted_horiz_lines[row_idx + 1]
+                    if is_large_grid or sb.get('is_grid', True):
+                        left_pts = boundaries.get('left_outer')
+                        right_pts = boundaries.get('right_outer')
+                        mid_pts = boundaries.get('middle_divider')
+                        if n_cols == 1:
+                            c_left = left_pts
+                            c_right = right_pts
+                            left_name = 'rail'
+                            right_name = 'rail'
+                        elif col_idx == 0:
+                            c_left = left_pts
+                            c_right = mid_pts
+                            left_name = 'rail'
+                            right_name = 'rail'
+                        else:
+                            c_left = mid_pts
+                            c_right = right_pts
+                            left_name = 'rail'
+                            right_name = 'rail'
+                    else:
+                        c_left = boundaries.get(f'left_col_{col_idx}')
+                        c_right = boundaries.get(f'right_col_{col_idx}')
+                        left_name = 'rail' if c_left is not None else 'yolo'
+                        right_name = 'rail' if c_right is not None else 'yolo'
+                    TL_yolo, TR_yolo, BR_yolo, BL_yolo = V34__sort_panel_corners(p['refined_polygon'])
+                    use_yolo_left = False
+                    if not is_large_grid and (not sb.get('is_grid', True)):
+                        if c_left is not None:
+                            rail_h = abs(c_left[-1][1] - c_left[0][1])
+                            if rail_h < 120:
+                                use_yolo_left = True
+                        else:
+                            use_yolo_left = True
+                    if use_yolo_left:
+                        left_line = [TL_yolo, BL_yolo]
+                        left_name = 'yolo'
+                    else:
+                        left_line = c_left
+                    use_yolo_right = False
+                    if not is_large_grid and (not sb.get('is_grid', True)):
+                        if c_right is not None:
+                            rail_h = abs(c_right[-1][1] - c_right[0][1])
+                            if rail_h < 120:
+                                use_yolo_right = True
+                        else:
+                            use_yolo_right = True
+                    if use_yolo_right:
+                        right_line = [TR_yolo, BR_yolo]
+                        right_name = 'yolo'
+                    else:
+                        right_line = c_right
+                    tl = V34__intersect_snap_horizontal_with_rail(g_t['m_row'], 0.0, g_t['c_row'], left_line)
+                    if tl is None and left_line is not None and (len(left_line) >= 2):
+                        tl = (V34__get_boundary_x_at_y(left_line, g_t['y_snap']), g_t['y_snap'])
+                    tr = V34__intersect_snap_horizontal_with_rail(g_t['m_row'], 0.0, g_t['c_row'], right_line)
+                    if tr is None and right_line is not None and (len(right_line) >= 2):
+                        tr = (V34__get_boundary_x_at_y(right_line, g_t['y_snap']), g_t['y_snap'])
+                    br = V34__intersect_snap_horizontal_with_rail(g_b['m_row'], 0.0, g_b['c_row'], right_line)
+                    if br is None and right_line is not None and (len(right_line) >= 2):
+                        br = (V34__get_boundary_x_at_y(right_line, g_b['y_snap']), g_b['y_snap'])
+                    bl = V34__intersect_snap_horizontal_with_rail(g_b['m_row'], 0.0, g_b['c_row'], left_line)
+                    if bl is None and left_line is not None and (len(left_line) >= 2):
+                        bl = (V34__get_boundary_x_at_y(left_line, g_b['y_snap']), g_b['y_snap'])
+                    if tl is None or tr is None or br is None or (bl is None):
+                        poly_final_local = p.get('refined_polygon') or p.get('polygon')
+                        poly_final_orig = V34__transform_points_local_to_orig(poly_final_local, transform_info)
+                        poly_yolo_np = np.array(poly_final_local, dtype=np.float32)
+                        area_ratio = 1.0
+                        center_shift = 0.0
+                        source = 'fallback_yolo'
+                        reason = 'intersection_failed'
+                        print(f'[GEOMETRY_SOURCE] {block_name} {row_idx} {col_idx} source={source} reason={reason} shift={center_shift:.2f} area_ratio={area_ratio:.2f} overlap=0.00')
+                    else:
+                        poly_proposal_local = [tl, tr, br, bl]
+                        poly_final_orig = V34__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                        poly_yolo = p['refined_polygon']
+                        poly_yolo_np = np.array(poly_yolo, dtype=np.float32)
+                        poly_prop_np = np.array(poly_proposal_local, dtype=np.float32)
+                        area_prop = cv2.contourArea(poly_prop_np)
+                        area_yolo = cv2.contourArea(poly_yolo_np)
+                        area_ratio = area_prop / (area_yolo + 1e-06)
+                        cx_prop = np.mean(poly_prop_np[:, 0])
+                        cy_prop = np.mean(poly_prop_np[:, 1])
+                        cx_yolo = np.mean(poly_yolo_np[:, 0])
+                        cy_yolo = np.mean(poly_yolo_np[:, 1])
+                        center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                        source = 'snap_grid'
+                        t_src = g_t['selected_cand']
+                        b_src = g_b['selected_cand']
+                        reason = f'top_{t_src}_bottom_{b_src}'
+                        poly_prop_np_orig = np.array(poly_final_orig, dtype=np.float32)
+                        is_convex_v19 = cv2.isContourConvex(poly_prop_np.astype(np.int32))
+                        area_ok_v19 = 0.65 <= area_ratio <= 1.45
+                        shift_ok_v19 = center_shift <= max(12.0, 0.4 * math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2))
+                        if not (is_convex_v19 and area_ok_v19 and shift_ok_v19):
+                            poly_final_local = p.get('refined_polygon') or p.get('polygon')
+                            poly_final_orig = V34__transform_points_local_to_orig(poly_final_local, transform_info)
+                            source = 'validated_fallback'
+                            reason = f'snap_rejected_convex={str(is_convex_v19).lower()}_area={area_ratio:.2f}_shift={center_shift:.2f}'
+                        print(f'[GEOMETRY_SOURCE] {block_name} {row_idx} {col_idx} source={source} reason={reason} shift={center_shift:.2f} area_ratio={area_ratio:.2f} overlap=0.00')
+                poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                drawn_count += 1
+                all_polygons.append(poly_final_orig)
+                all_sources.append(source)
+                all_panel_dicts.append(p)
+    panel_calc_entries = []
+    snap_reject_sources = {'fallback_yolo', 'validated_fallback', 'snap_grid_rejected_missing_or_invalid_edge', 'bbox_fallback'}
+    for idx, (poly_final_orig, src_name, panel) in enumerate(zip(all_polygons, all_sources, all_panel_dicts)):
+        final_polygon = np.array(poly_final_orig, dtype=np.float32)
+        inner_polygon, inset_source, inset_valid = V34__inset_quad_polygon(final_polygon, V34__INNER_PANEL_MARGIN_PX)
+        outer_area = float(cv2.contourArea(final_polygon))
+        calc_area = float(cv2.contourArea(inner_polygon))
+        area_ok = not (calc_area > outer_area or calc_area <= 0 or outer_area <= 0)
+        preliminary_valid = bool(V34__USE_INNER_PANEL_FOR_CALC and inset_valid and area_ok)
+        filter_reason = ''
+        src_str = str(src_name)
+        if not area_ok:
+            preliminary_valid = False
+            filter_reason = 'invalid_inner_area'
+        elif not inset_valid:
+            preliminary_valid = False
+            filter_reason = 'inner_inset_invalid'
+        if not preliminary_valid:
+            print(f'[V63_PANEL_FILTER_INNER_GEOMETRY] idx={idx} source={src_str} action=reject reason={filter_reason} outer={outer_area:.1f} calc={calc_area:.1f}')
+        panel_calc_entries.append({'idx': idx, 'panel': panel, 'src_name': src_str, 'outer_polygon': final_polygon, 'inner_polygon': inner_polygon if preliminary_valid else final_polygon, 'outer_area': outer_area, 'calc_area': calc_area if preliminary_valid else outer_area, 'inset_source': inset_source, 'calc_source': 'inner_from_final_polygon' if preliminary_valid else 'rejected_or_outer_fallback', 'preliminary_valid': preliminary_valid, 'valid': preliminary_valid, 'filter_reason': filter_reason, 'area_ratio_to_ref': 0.0, 'inner_area_reference_px': 0.0, 'inner_area_min_required_px': 0.0})
+
+    def _v63_entry_bbox(e):
+        pts = np.array(e['outer_polygon'], dtype=np.float32)
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        x1 = float(np.min(xs))
+        y1 = float(np.min(ys))
+        x2 = float(np.max(xs))
+        y2 = float(np.max(ys))
+        return (x1, y1, x2, y2)
+
+    def _v63_connected_components(entries):
+        n = len(entries)
+        if n == 0:
+            return []
+        boxes = [_v63_entry_bbox(e) for e in entries]
+        widths = [max(1.0, b[2] - b[0]) for b in boxes]
+        heights = [max(1.0, b[3] - b[1]) for b in boxes]
+        med_w = float(np.median(widths)) if widths else 1.0
+        med_h = float(np.median(heights)) if heights else 1.0
+        parent = list(range(n))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def union(a, b):
+            ra, rb = (find(a), find(b))
+            if ra != rb:
+                parent[rb] = ra
+        for i in range(n):
+            x1a, y1a, x2a, y2a = boxes[i]
+            wa = widths[i]
+            ha = heights[i]
+            for j in range(i + 1, n):
+                x1b, y1b, x2b, y2b = boxes[j]
+                wb = widths[j]
+                hb = heights[j]
+                x_overlap = min(x2a, x2b) - max(x1a, x1b)
+                y_overlap = min(y2a, y2b) - max(y1a, y1b)
+                x_gap = max(0.0, max(x1a, x1b) - min(x2a, x2b))
+                y_gap = max(0.0, max(y1a, y1b) - min(y2a, y2b))
+                same_column = x_overlap >= 0.35 * min(wa, wb) and y_gap <= 1.35 * med_h
+                adjacent_columns_same_row = y_overlap >= 0.25 * min(ha, hb) and x_gap <= 0.45 * med_w
+                same_row = y_overlap >= 0.35 * min(ha, hb) and x_gap <= 1.35 * med_w
+                if same_column or adjacent_columns_same_row or same_row:
+                    union(i, j)
+        groups = {}
+        for i, e in enumerate(entries):
+            groups.setdefault(find(i), []).append(e)
+        return list(groups.values())
+    valid_for_ref = [e for e in panel_calc_entries if e['preliminary_valid'] and e['calc_area'] > 0]
+    if valid_for_ref:
+        groups = _v63_connected_components(valid_for_ref)
+        print(f'[V63_PANEL_AREA_FILTER_COMPONENTS] image={V34__IMAGE_STEM} n_valid_pre={len(valid_for_ref)} n_components={len(groups)} top_ratio=0.50 threshold=0.800')
+        for gid, group in enumerate(groups):
+            if len(group) < 6:
+                group_ref = float(np.mean([e['calc_area'] for e in group])) if group else 0.0
+                for e in group:
+                    e['inner_area_reference_px'] = group_ref
+                    e['inner_area_min_required_px'] = 0.0
+                    e['area_ratio_to_ref'] = float(e['calc_area'] / group_ref) if group_ref > 0 else 0.0
+                    print(f"[V63_PANEL_AREA_FILTER] component={gid} idx={e['idx']} action=keep_small_component n={len(group)} area={e['calc_area']:.1f} ref={group_ref:.1f}")
+                continue
+            valid_sorted = sorted(group, key=lambda e: e['calc_area'], reverse=True)
+            n_reference = max(1, int(math.ceil(0.5 * len(valid_sorted))))
+            reference_group = valid_sorted[:n_reference]
+            reference_area = float(np.mean([e['calc_area'] for e in reference_group]))
+            min_required_area = 0.8 * reference_area
+            print(f'[V63_PANEL_AREA_FILTER_REFERENCE] image={V34__IMAGE_STEM} component={gid} n_valid_pre={len(group)} n_reference={n_reference} top_ratio=0.50 reference_area={reference_area:.1f} min_required_80pct={min_required_area:.1f}')
+            for e in group:
+                e['inner_area_reference_px'] = reference_area
+                e['inner_area_min_required_px'] = min_required_area
+                e['area_ratio_to_ref'] = float(e['calc_area'] / reference_area) if reference_area > 0 else 0.0
+                if e['calc_area'] < min_required_area:
+                    e['valid'] = False
+                    e['filter_reason'] = 'inner_area_below_80pct_of_component_top50_mean'
+                    print(f"[V63_PANEL_AREA_FILTER] component={gid} idx={e['idx']} action=reject area={e['calc_area']:.1f} ref={reference_area:.1f} ratio={e['area_ratio_to_ref']:.3f} threshold=0.800")
+                else:
+                    print(f"[V63_PANEL_AREA_FILTER] component={gid} idx={e['idx']} action=keep area={e['calc_area']:.1f} ref={reference_area:.1f} ratio={e['area_ratio_to_ref']:.3f} threshold=0.800")
+    else:
+        print(f'[V63_PANEL_AREA_FILTER_REFERENCE] image={V34__IMAGE_STEM} n_valid_pre=0 action=skip_area_filter')
+    outer_total = 0.0
+    calc_total = 0.0
+    valid_count = 0
+    rejected_count = 0
+    rows_csv = []
+    debug_img = None
+    if V34__DRAW_INNER_PANEL_DEBUG:
+        debug_img = img.copy()
+    for e in panel_calc_entries:
+        idx = e['idx']
+        panel = e['panel']
+        valid_final = bool(e['valid'])
+        if valid_final:
+            valid_count += 1
+            outer_total += e['outer_area']
+            calc_total += e['calc_area']
+            panel['outer_polygon'] = e['outer_polygon']
+            panel['calc_polygon'] = e['inner_polygon']
+            panel['inner_polygon'] = e['inner_polygon']
+            panel['calc_source'] = 'inner_from_final_polygon'
+            panel['valid'] = True
+            panel['filter_reason'] = ''
+            if V34__DRAW_INNER_PANEL_DEBUG and debug_img is not None:
+                outer_int = np.array(e['outer_polygon'], dtype=np.int32)
+                inner_int = np.array(e['inner_polygon'], dtype=np.int32)
+                cv2.polylines(debug_img, [outer_int], True, (0, 255, 255), V34__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+                cv2.polylines(debug_img, [inner_int], True, (255, 255, 0), V34__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        else:
+            rejected_count += 1
+            panel['valid'] = False
+            panel['filter_reason'] = e['filter_reason']
+            panel['outer_polygon'] = e['outer_polygon']
+            panel['calc_polygon'] = e['inner_polygon']
+            panel['inner_polygon'] = e['inner_polygon']
+            panel['calc_source'] = 'rejected'
+        ratio = e['calc_area'] / e['outer_area'] if e['outer_area'] > 0 else 0.0
+        print(f"[PANEL_CALC_POLYGON] idx={idx} outer_area={e['outer_area']:.1f} calc_area={e['calc_area']:.1f} ratio={ratio:.4f} margin={V34__INNER_PANEL_MARGIN_PX} source={e['inset_source']} valid={str(valid_final).lower()} filter_reason={e['filter_reason']}")
+        rows_csv.append({'image': V34__IMAGE_STEM, 'idx': idx, 'source': e['src_name'], 'outer_area': f"{e['outer_area']:.1f}", 'calc_area': f"{e['calc_area']:.1f}", 'ratio': f'{ratio:.4f}', 'margin_px': V34__INNER_PANEL_MARGIN_PX, 'calc_source': panel.get('calc_source', 'unknown'), 'valid': str(valid_final).lower(), 'filter_reason': e['filter_reason'], 'area_ratio_to_ref': f"{e['area_ratio_to_ref']:.4f}", 'inner_area_reference_px': f"{e['inner_area_reference_px']:.1f}", 'inner_area_min_required_px': f"{e['inner_area_min_required_px']:.1f}"})
+    ratio_total = calc_total / outer_total if outer_total > 0 else 0.0
+    print(f'[PANEL_CALC_POLYGON_SUMMARY] image={V34__IMAGE_STEM} n_total={len(panel_calc_entries)} n_valid={valid_count} n_rejected={rejected_count} outer_total={outer_total:.1f} calc_total={calc_total:.1f} ratio={ratio_total:.4f} margin={V34__INNER_PANEL_MARGIN_PX}')
+    out_dir = Path(V34__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if V34__DRAW_INNER_PANEL_DEBUG and debug_img is not None:
+        cv2.imwrite(str(out_dir / f'debug_{V34__IMAGE_STEM}_calc_inner_polygon.JPG'), debug_img)
+    csv_path = out_dir / f'panel_calc_polygon_{V34__IMAGE_STEM}.csv'
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['image', 'idx', 'source', 'outer_area', 'calc_area', 'ratio', 'margin_px', 'calc_source', 'valid', 'filter_reason', 'area_ratio_to_ref', 'inner_area_reference_px', 'inner_area_min_required_px'])
+        writer.writeheader()
+        writer.writerows(rows_csv)
+    return valid_count
+
+def V34__refine_single_edge_local(rotated_gray, p1, p2, is_horizontal, win, cov_threshold, limit, res_threshold=2.5, angle_threshold=4.0):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length == 0:
+        return (p1, p2, [])
+    if is_horizontal:
+        tx = dx / length
+        ty = dy / length
+        nx = -ty
+        ny = tx
+    else:
+        tx = dx / length
+        ty = dy / length
+        nx = ty
+        ny = -tx
+    num_samples = max(20, min(80, int(length / 2)))
+    sample_xs = np.linspace(p1[0], p2[0], num_samples)
+    sample_ys = np.linspace(p1[1], p2[1], num_samples)
+    support_pts = []
+    for i in range(num_samples):
+        sx = sample_xs[i]
+        sy = sample_ys[i]
+        profile = []
+        for d in range(-win, win + 1):
+            px = sx + d * nx
+            py = sy + d * ny
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(rotated_gray[y_idx, x_idx])
+        if len(profile) < 3:
+            continue
+        min_idx = np.argmin(profile)
+        if 0 < min_idx < len(profile) - 1:
+            if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                left_peak = np.max(profile[:min_idx])
+                right_peak = np.max(profile[min_idx + 1:])
+                valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                    px_val = sx + (min_idx - win) * nx
+                    py_val = sy + (min_idx - win) * ny
+                    support_pts.append((px_val, py_val))
+    if len(support_pts) < 4:
+        return (p1, p2, [])
+    xs = np.array([pt[0] for pt in support_pts])
+    ys = np.array([pt[1] for pt in support_pts])
+    if is_horizontal:
+        m_ref = dy / (dx + 1e-06)
+        c_ref = p1[1] - m_ref * p1[0]
+        res = ys - (m_ref * xs + c_ref)
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        xs_clean = xs[keep]
+        ys_clean = ys[keep]
+        if len(xs_clean) < 4:
+            return (p1, p2, [])
+        try:
+            m_fit, c_fit = np.polyfit(xs_clean, ys_clean, 1)
+            res_fit = ys_clean - (m_fit * xs_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            xs_final = xs_clean[keep_fit]
+            ys_final = ys_clean[keep_fit]
+            if len(xs_final) >= 4:
+                m_fit, c_fit = np.polyfit(xs_final, ys_final, 1)
+                std_res = np.std(ys_final - (m_fit * xs_final + c_fit))
+                clean_pts = list(zip(xs_final, ys_final))
+            else:
+                return (p1, p2, [])
+        except Exception:
+            return (p1, p2, [])
+        bins = np.linspace(min(p1[0], p2[0]), max(p1[0], p2[0]), 9)
+        bin_indices = np.digitize(xs_final, bins) - 1
+        coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+        angle_fit = np.degrees(math.atan(m_fit))
+        angle_ref = np.degrees(math.atan(m_ref))
+        angle_diff = abs(angle_fit - angle_ref)
+        while angle_diff > 90:
+            angle_diff = abs(angle_diff - 180)
+    else:
+        m_ref = dx / (dy + 1e-06)
+        c_ref = p1[0] - m_ref * p1[1]
+        res = xs - (m_ref * ys + c_ref)
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        xs_clean = xs[keep]
+        ys_clean = ys[keep]
+        if len(ys_clean) < 4:
+            return (p1, p2, [])
+        try:
+            m_fit, c_fit = np.polyfit(ys_clean, xs_clean, 1)
+            res_fit = xs_clean - (m_fit * ys_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            xs_final = xs_clean[keep_fit]
+            ys_final = ys_clean[keep_fit]
+            if len(ys_final) >= 4:
+                m_fit, c_fit = np.polyfit(ys_final, xs_final, 1)
+                std_res = np.std(xs_final - (m_fit * ys_final + c_fit))
+                clean_pts = list(zip(xs_final, ys_final))
+            else:
+                return (p1, p2, [])
+        except Exception:
+            return (p1, p2, [])
+        bins = np.linspace(min(p1[1], p2[1]), max(p1[1], p2[1]), 9)
+        bin_indices = np.digitize(ys_final, bins) - 1
+        coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+        angle_fit = np.degrees(math.atan(1.0 / (m_fit + 1e-06)))
+        angle_ref = np.degrees(math.atan(1.0 / (m_ref + 1e-06)))
+        angle_diff = abs(angle_fit - angle_ref)
+        while angle_diff > 90:
+            angle_diff = abs(angle_diff - 180)
+    if coverage < cov_threshold or std_res > res_threshold or angle_diff > angle_threshold:
+        return (p1, p2, [])
+    if is_horizontal:
+        y1_new = m_fit * p1[0] + c_fit
+        y2_new = m_fit * p2[0] + c_fit
+        dy1 = np.clip(y1_new - p1[1], -limit, limit)
+        dy2 = np.clip(y2_new - p2[1], -limit, limit)
+        return ((p1[0], p1[1] + dy1), (p2[0], p2[1] + dy2), clean_pts)
+    else:
+        x1_new = m_fit * p1[1] + c_fit
+        x2_new = m_fit * p2[1] + c_fit
+        dx1 = np.clip(x1_new - p1[0], -limit, limit)
+        dx2 = np.clip(x2_new - p2[0], -limit, limit)
+        return ((p1[0] + dx1, p1[1]), (p2[0] + dx2, p2[1]), clean_pts)
+
+def V34__intersect_horizontal_line_with_two_points(m_h, c_h, A, B):
+    dx = B[0] - A[0]
+    dy = B[1] - A[1]
+    denom = m_h * dx - dy
+    if abs(denom) < 1e-06:
+        return A
+    x = (-A[0] * dy - (c_h - A[1]) * dx) / denom
+    y = m_h * x + c_h
+    return (x, y)
+
+def V34__refine_panel_edges_locally_with_yolo_prior(rotated_gray, poly, is_crop_left):
+    TL, TR, BR, BL = V34__sort_panel_corners(poly)
+    limit = 2.5 if is_crop_left else 3.0
+    cov_threshold = 0.25 if is_crop_left else 0.3
+    res_threshold = 2.5 if is_crop_left else 2.8
+    angle_threshold = 4.0 if is_crop_left else 5.0
+    p1_t, p2_t, clean_t = V34__refine_single_edge_local(rotated_gray, TL, TR, is_horizontal=True, win=4, cov_threshold=cov_threshold, limit=limit, res_threshold=res_threshold, angle_threshold=angle_threshold)
+    p1_b, p2_b, clean_b = V34__refine_single_edge_local(rotated_gray, BL, BR, is_horizontal=True, win=4, cov_threshold=cov_threshold, limit=limit, res_threshold=res_threshold, angle_threshold=angle_threshold)
+    support_pts_dict = {}
+    if clean_t:
+        support_pts_dict['top'] = clean_t
+    if clean_b:
+        support_pts_dict['bottom'] = clean_b
+    if clean_t:
+        m_top = (p2_t[1] - p1_t[1]) / (p2_t[0] - p1_t[0] + 1e-09)
+        c_top = p1_t[1] - m_top * p1_t[0]
+    else:
+        m_top = (TR[1] - TL[1]) / (TR[0] - TL[0] + 1e-09)
+        c_top = TL[1] - m_top * TL[0]
+    if clean_b:
+        m_bot = (p2_b[1] - p1_b[1]) / (p2_b[0] - p1_b[0] + 1e-09)
+        c_bot = p1_b[1] - m_bot * p1_b[0]
+    else:
+        m_bot = (BR[1] - BL[1]) / (BR[0] - BL[0] + 1e-09)
+        c_bot = BL[1] - m_bot * BL[0]
+    TL_new = V34__intersect_horizontal_line_with_two_points(m_top, c_top, TL, BL)
+    TR_new = V34__intersect_horizontal_line_with_two_points(m_top, c_top, TR, BR)
+    BL_new = V34__intersect_horizontal_line_with_two_points(m_bot, c_bot, TL, BL)
+    BR_new = V34__intersect_horizontal_line_with_two_points(m_bot, c_bot, TR, BR)
+    return ([TL_new, TR_new, BR_new, BL_new], support_pts_dict)
+
+def V34__refine_local_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig):
+    panels_result = []
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            anchors = V34__get_panel_hybrid_anchors(p['orig_ref'])
+            poly_init = p['refined_polygon']
+            poly_refined = V34__refine_oriented_polygon(rotated_gray, poly_init)
+            poly_prop = np.array(poly_refined, dtype=np.float32)
+            cx_prop = np.mean(poly_prop[:, 0])
+            cy_prop = np.mean(poly_prop[:, 1])
+            poly_init_np = np.array(poly_init, dtype=np.float32)
+            cx_orig = np.mean(poly_init_np[:, 0])
+            cy_orig = np.mean(poly_init_np[:, 1])
+            c_shift = math.sqrt((cx_prop - cx_orig) ** 2 + (cy_prop - cy_orig) ** 2)
+            tr_prop = poly_refined[1]
+            tl_prop = poly_refined[0]
+            angle_prop = np.degrees(math.atan2(tr_prop[1] - tl_prop[1], tr_prop[0] - tl_prop[0]))
+            while angle_prop > 90:
+                angle_prop -= 180
+            while angle_prop < -90:
+                angle_prop += 180
+            angle_orig = np.degrees(math.atan2(poly_init[1][1] - poly_init[0][1], poly_init[1][0] - poly_init[0][0]))
+            while angle_orig > 90:
+                angle_orig -= 180
+            while angle_orig < -90:
+                angle_orig += 180
+            angle_diff = abs(angle_prop - angle_orig)
+            while angle_diff > 90:
+                angle_diff = abs(angle_diff - 180)
+            inter_area = V34__get_polygon_intersection_area(poly_prop, poly_init_np)
+            area_prop = cv2.contourArea(poly_prop)
+            area_yolo = cv2.contourArea(poly_init_np)
+            union_area = area_prop + area_yolo - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            is_bad = c_shift > 8.0 or angle_diff > 5.0 or iou < 0.7
+            if is_bad:
+                poly_final = poly_init
+                quality = 'fallback'
+                source = 'yolo_anchor'
+            else:
+                poly_final = poly_refined
+                quality = 'pass'
+                source = 'refined_local'
+            panels_result.append({'col': col_idx, 'row': row_idx, 'polygon': poly_final, 'quality': quality, 'source': source, 'orig_p': p['orig_ref'], 'anchors': anchors})
+            TL, TR, BR, BL = V34__sort_panel_corners(poly_final)
+            for p1, p2 in [(TL, TR), (BL, BR), (TL, BL), (TR, BR)]:
+                sample_xs = np.linspace(p1[0], p2[0], 12)
+                sample_ys = np.linspace(p1[1], p2[1], 12)
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                length = math.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    nx = -dy / length
+                    ny = dx / length
+                    for i in range(12):
+                        sx = sample_xs[i]
+                        sy = sample_ys[i]
+                        profile = []
+                        for d in range(-3, 4):
+                            cx = int(round(sx + d * nx))
+                            cy = int(round(sy + d * ny))
+                            if 0 <= cx < rotated_gray.shape[1] and 0 <= cy < rotated_gray.shape[0]:
+                                profile.append(rotated_gray[cy, cx])
+                            else:
+                                profile.append(255)
+                        best_d = np.argmin(profile) - 3
+                        if profile[best_d + 3] < 140:
+                            pt_support_local = (int(round(sx + best_d * nx)), int(round(sy + best_d * ny)))
+                            pt_support_orig = transform_local_to_orig(pt_support_local[0], pt_support_local[1])
+                            cv2.circle(img_support, (int(round(pt_support_orig[0])), int(round(pt_support_orig[1]))), 1, (255, 0, 255), -1)
+    n_panels = len(panels_result)
+    fallback_indices = set()
+    for i in range(n_panels):
+        for j in range(i + 1, n_panels):
+            poly1 = np.array(panels_result[i]['polygon'], dtype=np.float32)
+            poly2 = np.array(panels_result[j]['polygon'], dtype=np.float32)
+            inter_area = V34__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            if iou > 0.05:
+                fallback_indices.add(i)
+                fallback_indices.add(j)
+    for idx in fallback_indices:
+        p_info = panels_result[idx]
+        col_idx = p_info['col']
+        row_idx = p_info['row']
+        p_info['polygon'] = b_local['columns'][col_idx][row_idx]['refined_polygon']
+        p_info['quality'] = 'fallback'
+        p_info['source'] = 'yolo_anchor'
+    return panels_result
+
+def V34__get_local_yolo_polygon_prior(p, transform_orig_to_local):
+    anchors = V34__get_panel_hybrid_anchors(p)
+    local_poly = [transform_orig_to_local(pt[0], pt[1]) for pt in anchors['poly_4pts']]
+    return local_poly
+
+def V34__refine_vertical_edge_local(rotated_gray, Q1, Q2, limit=4.0, res_threshold=2.5, angle_threshold=5.0):
+    dx = Q2[0] - Q1[0]
+    dy = Q2[1] - Q1[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length == 0:
+        return []
+    tx = dx / length
+    ty = dy / length
+    nx = ty
+    ny = -tx
+    num_samples = max(20, min(80, int(length / 2)))
+    sample_xs = np.linspace(Q1[0], Q2[0], num_samples)
+    sample_ys = np.linspace(Q1[1], Q2[1], num_samples)
+    support_pts = []
+    win = 4
+    for i in range(num_samples):
+        sx = sample_xs[i]
+        sy = sample_ys[i]
+        profile = []
+        for d in range(-win, win + 1):
+            px = sx + d * nx
+            py = sy + d * ny
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(rotated_gray[y_idx, x_idx])
+        if len(profile) < 3:
+            continue
+        min_idx = np.argmin(profile)
+        if 0 < min_idx < len(profile) - 1:
+            if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                left_peak = np.max(profile[:min_idx])
+                right_peak = np.max(profile[min_idx + 1:])
+                valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                    px_val = sx + (min_idx - win) * nx
+                    py_val = sy + (min_idx - win) * ny
+                    support_pts.append((px_val, py_val))
+    return support_pts
+
+def V34__intersect_lines_uv(m_h, c_h, m_v, c_v):
+    denom = 1.0 - m_v * m_h
+    if abs(denom) < 1e-06:
+        return (c_v, c_h)
+    u = (m_v * c_h + c_v) / denom
+    v = m_h * u + c_h
+    return (u, v)
+
+def V34__check_block_overlaps(proposals):
+    n = len(proposals)
+    for i in range(n):
+        for j in range(i + 1, n):
+            poly1 = np.array(proposals[i], dtype=np.float32)
+            poly2 = np.array(proposals[j], dtype=np.float32)
+            inter_area = V34__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            if iou > 0.03:
+                return (True, i, j, iou)
+    return (False, -1, -1, 0.0)
+
+def V34__build_small_block_micro_grid_from_yolo_and_local_edges(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local):
+    N_c = len(b_local['columns'])
+    N_r = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 0
+    yolo_angles = []
+    for col in b_local['columns']:
+        for p in col:
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+            yolo_angles.append(np.degrees(math.atan2(TR[1] - TL[1], TR[0] - TL[0])))
+            yolo_angles.append(np.degrees(math.atan2(BR[1] - BL[1], BR[0] - BL[0])))
+    use_envelope_angle = False
+    if len(yolo_angles) > 1:
+        max_diff = max(yolo_angles) - min(yolo_angles)
+        if max_diff > 8.0:
+            use_envelope_angle = True
+    if use_envelope_angle:
+        all_yolo_pts = []
+        for col in b_local['columns']:
+            for p in col:
+                poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                all_yolo_pts.extend(poly_init)
+        rect = cv2.minAreaRect(np.array(all_yolo_pts, dtype=np.float32))
+        box = cv2.boxPoints(rect)
+        TL_env, TR_env, BR_env, BL_env = V34__sort_panel_corners(box)
+        theta_local_deg = np.degrees(math.atan2(TR_env[1] - TL_env[1], TR_env[0] - TL_env[0]))
+    else:
+        med_angle = np.median(yolo_angles) if yolo_angles else 0.0
+        clean_angles = [a for a in yolo_angles if abs(a - med_angle) <= 8.0]
+        theta_local_deg = np.mean(clean_angles) if clean_angles else med_angle
+    theta_local_rad = np.radians(theta_local_deg)
+    all_pts = []
+    for col in b_local['columns']:
+        for p in col:
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            all_pts.extend(poly_init)
+    xs = [pt[0] for pt in all_pts]
+    ys = [pt[1] for pt in all_pts]
+    x_c = np.mean(xs) if xs else 0.0
+    y_c = np.mean(ys) if ys else 0.0
+    cos_a = math.cos(-theta_local_rad)
+    sin_a = math.sin(-theta_local_rad)
+
+    def project_to_local(pt):
+        xr = pt[0] - x_c
+        yr = pt[1] - y_c
+        u = xr * cos_a - yr * sin_a
+        v = xr * sin_a + yr * cos_a
+        return (u, v)
+
+    def project_to_rotated(u, v):
+        xr = u * cos_a + v * sin_a
+        yr = -u * sin_a + v * cos_a
+        return (xr + x_c, yr + y_c)
+    panel_centers_uv = []
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+            cx = (TL[0] + TR[0] + BR[0] + BL[0]) / 4.0
+            cy = (TL[1] + TR[1] + BR[1] + BL[1]) / 4.0
+            cu, cv = project_to_local((cx, cy))
+            panel_centers_uv.append({'col_idx': col_idx, 'row_idx': row_idx, 'u': cu, 'v': cv, 'panel': p})
+    panel_centers_uv.sort(key=lambda item: item['v'])
+    rows = []
+    for item in panel_centers_uv:
+        if not rows:
+            rows.append([item])
+        else:
+            mean_v = np.mean([x['v'] for x in rows[-1]])
+            if item['v'] - mean_v > 20.0:
+                rows.append([item])
+            else:
+                rows[-1].append(item)
+    for r in rows:
+        r.sort(key=lambda item: item['u'])
+    rows.sort(key=lambda r: np.mean([item['v'] for item in r]))
+    N_r = len(rows)
+    N_c = max((len(r) for r in rows)) if rows else 0
+    grid_map = {}
+    for r_idx, r in enumerate(rows):
+        for c_idx, item in enumerate(r):
+            grid_map[c_idx, r_idx] = item
+    xs_roi = [pt[0] for pt in all_pts]
+    ys_roi = [pt[1] for pt in all_pts]
+    rx1 = max(0, int(np.floor(min(xs_roi) - 4)))
+    ry1 = max(0, int(np.floor(min(ys_roi) - 4)))
+    rx2 = min(rotated_gray.shape[1] - 1, int(np.ceil(max(xs_roi) + 4)))
+    ry2 = min(rotated_gray.shape[0] - 1, int(np.ceil(max(ys_roi) + 4)))
+    roi_img = rotated_gray[ry1:ry2 + 1, rx1:rx2 + 1]
+    thresh_val = float(np.percentile(roi_img, 58))
+    local_mask = (roi_img >= thresh_val).astype(np.uint8) * 255
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    local_mask_closed = cv2.morphologyEx(local_mask, cv2.MORPH_CLOSE, kernel_close)
+    local_mask_opened = cv2.morphologyEx(local_mask_closed, cv2.MORPH_OPEN, kernel_open)
+    mask_opened = np.zeros_like(rotated_gray)
+    mask_opened[ry1:ry2 + 1, rx1:rx2 + 1] = local_mask_opened
+    yolo_mask = np.zeros_like(rotated_gray)
+    for col in b_local['columns']:
+        for p in col:
+            p_rot = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            cv2.fillPoly(yolo_mask, [np.array(p_rot, dtype=np.int32)], 255)
+    contours, _ = cv2.findContours(mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid_contours = []
+    total_mask_area = 0.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area >= 150.0:
+            c_box = cv2.boundingRect(c)
+            cw, ch = (c_box[2], c_box[3])
+            aspect = cw / float(ch) if ch > 0 else 0.0
+            if ch >= 12 and aspect <= 4.5:
+                c_mask = np.zeros_like(rotated_gray)
+                cv2.drawContours(c_mask, [c], -1, 255, -1)
+                overlap = cv2.bitwise_and(yolo_mask, c_mask)
+                if np.any(overlap):
+                    valid_contours.append(c)
+                    total_mask_area += area
+    contour_ok = False
+    U_left_fg = U_right_fg = V_top_fg = V_bottom_fg = None
+    if len(valid_contours) > 0 and total_mask_area >= 200.0:
+        contour_ok = True
+        all_contour_pts = np.concatenate(valid_contours, axis=0)
+        pts_uv = [project_to_local((pt[0][0], pt[0][1])) for pt in all_contour_pts]
+        us_fg = [pt[0] for pt in pts_uv]
+        vs_fg = [pt[1] for pt in pts_uv]
+        U_left_fg = min(us_fg)
+        U_right_fg = max(us_fg)
+        V_top_fg = min(vs_fg)
+        V_bottom_fg = max(vs_fg)
+    rect_str = f'({U_left_fg:.1f},{V_top_fg:.1f},{U_right_fg:.1f},{V_bottom_fg:.1f})' if contour_ok else 'None'
+    print(f'[SMALL_MASK] {block_name} area={total_mask_area:.1f} contour_ok={contour_ok} rect={rect_str}')
+    img_mask_vis = cv2.cvtColor(rotated_gray, cv2.COLOR_GRAY2BGR)
+    overlay = np.zeros_like(img_mask_vis)
+    overlay[mask_opened > 0] = (0, 255, 0)
+    img_mask_vis = cv2.addWeighted(img_mask_vis, 0.7, overlay, 0.3, 0)
+    for c_idx in range(N_c):
+        for r_idx in range(N_r):
+            if (c_idx, r_idx) in grid_map:
+                p_item = grid_map[c_idx, r_idx]
+                poly_init = V34__get_local_yolo_polygon_prior(p_item['panel']['orig_ref'], transform_orig_to_local)
+                cv2.polylines(img_mask_vis, [np.array(poly_init, dtype=np.int32)], True, (255, 0, 0), V34__VISUAL_PANEL_THICKNESS)
+    if len(valid_contours) > 0:
+        cv2.drawContours(img_mask_vis, valid_contours, -1, (0, 255, 255), 1)
+        corners_local = [(U_left_fg, V_top_fg), (U_right_fg, V_top_fg), (U_right_fg, V_bottom_fg), (U_left_fg, V_bottom_fg)]
+        corners_rot = [project_to_rotated(u, v) for u, v in corners_local]
+        cv2.polylines(img_mask_vis, [np.array(corners_rot, dtype=np.int32)], True, (0, 255, 255), V34__VISUAL_PANEL_THICKNESS)
+    out_dir = Path(V34__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    yolo_lefts = []
+    yolo_rights = []
+    yolo_tops = []
+    yolo_bottoms = []
+    for c_idx in range(N_c):
+        for r_idx in range(N_r):
+            if (c_idx, r_idx) in grid_map:
+                item = grid_map[c_idx, r_idx]
+                poly_init = V34__get_local_yolo_polygon_prior(item['panel']['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+                yolo_lefts.extend([project_to_local(TL)[0], project_to_local(BL)[0]])
+                yolo_rights.extend([project_to_local(TR)[0], project_to_local(BR)[0]])
+                yolo_tops.extend([project_to_local(TL)[1], project_to_local(TR)[1]])
+                yolo_bottoms.extend([project_to_local(BL)[1], project_to_local(BR)[1]])
+    U_left_yolo = min(yolo_lefts) if yolo_lefts else 0.0
+    U_right_yolo = max(yolo_rights) if yolo_rights else 0.0
+    V_top_yolo = min(yolo_tops) if yolo_tops else 0.0
+    V_bottom_yolo = max(yolo_bottoms) if yolo_bottoms else 0.0
+    if contour_ok:
+        U_left_yolo = max(U_left_yolo, U_left_fg)
+        U_right_yolo = min(U_right_yolo, U_right_fg)
+        V_top_yolo = max(V_top_yolo, V_top_fg)
+        V_bottom_yolo = min(V_bottom_yolo, V_bottom_fg)
+        U_left_prior = U_left_fg
+        U_right_prior = U_right_fg
+        V_top_prior = V_top_fg
+        V_bottom_prior = V_bottom_fg
+        prior_source = 'foreground'
+    else:
+        U_left_prior = U_left_yolo
+        U_right_prior = U_right_yolo
+        V_top_prior = V_top_yolo
+        V_bottom_prior = V_bottom_yolo
+        prior_source = 'yolo_fallback'
+
+    def find_horizontal_valley_pts(u_start, u_end, v_prior, win=3):
+        num_samples = max(20, min(80, int((u_end - u_start) / 2)))
+        u_samples = np.linspace(u_start, u_end, num_samples)
+        pts = []
+        for u_val in u_samples:
+            profile = []
+            for d in range(-win, win + 1):
+                v_val = v_prior + d
+                img_x, img_y = project_to_rotated(u_val, v_val)
+                x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(img_x))))
+                y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(img_y))))
+                profile.append(rotated_gray[y_idx, x_idx])
+            if len(profile) < 3:
+                continue
+            min_idx = np.argmin(profile)
+            if 0 < min_idx < len(profile) - 1:
+                if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                    left_peak = np.max(profile[:min_idx])
+                    right_peak = np.max(profile[min_idx + 1:])
+                    valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                    if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                        px_val = u_val
+                        py_val = v_prior + (min_idx - win)
+                        pts.append((px_val, py_val))
+        return pts
+
+    def find_vertical_valley_pts(v_start, v_end, u_prior, win=3):
+        num_samples = max(20, min(80, int((v_end - v_start) / 2)))
+        v_samples = np.linspace(v_start, v_end, num_samples)
+        pts = []
+        for v_val in v_samples:
+            profile = []
+            for d in range(-win, win + 1):
+                u_val = u_prior + d
+                img_x, img_y = project_to_rotated(u_val, v_val)
+                x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(img_x))))
+                y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(img_y))))
+                profile.append(rotated_gray[y_idx, x_idx])
+            if len(profile) < 3:
+                continue
+            min_idx = np.argmin(profile)
+            if 0 < min_idx < len(profile) - 1:
+                if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                    left_peak = np.max(profile[:min_idx])
+                    right_peak = np.max(profile[min_idx + 1:])
+                    valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                    if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                        px_val = u_prior + (min_idx - win)
+                        py_val = v_val
+                        pts.append((px_val, py_val))
+        return pts
+
+    def clean_and_fit_horizontal(pts, u_start, u_end, v_prior, limit=3.0, shift_limit=3.0):
+        if len(pts) < 4:
+            return None
+        us = np.array([pt[0] for pt in pts])
+        vs = np.array([pt[1] for pt in pts])
+        res = vs - v_prior
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        us_clean = us[keep]
+        vs_clean = vs[keep]
+        if len(us_clean) < 4:
+            return None
+        try:
+            m_fit, c_fit = np.polyfit(us_clean, vs_clean, 1)
+            res_fit = vs_clean - (m_fit * us_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            us_final = us_clean[keep_fit]
+            vs_final = vs_clean[keep_fit]
+            if len(us_final) < 4:
+                return None
+            m_fit, c_fit = np.polyfit(us_final, vs_final, 1)
+            std_res = np.std(vs_final - (m_fit * us_final + c_fit))
+            bins = np.linspace(u_start, u_end, 9)
+            bin_indices = np.digitize(us_final, bins) - 1
+            coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+            angle_diff = abs(np.degrees(math.atan(m_fit)))
+            u_mid = (u_start + u_end) / 2.0
+            shift = m_fit * u_mid + c_fit - v_prior
+            if coverage >= 0.3 and std_res <= 2.8 and (angle_diff <= 5.0) and (abs(shift) <= shift_limit):
+                return {'m': float(m_fit), 'c': float(c_fit), 'pts': list(zip(us_final, vs_final)), 'shift': shift, 'coverage': coverage, 'residual': std_res, 'source': 'support'}
+        except Exception:
+            pass
+        return None
+
+    def clean_and_fit_vertical(pts, v_start, v_end, u_prior, limit=3.0, shift_limit=3.0):
+        if len(pts) < 4:
+            return None
+        us = np.array([pt[0] for pt in pts])
+        vs = np.array([pt[1] for pt in pts])
+        res = us - u_prior
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        us_clean = us[keep]
+        vs_clean = vs[keep]
+        if len(vs_clean) < 4:
+            return None
+        try:
+            m_fit, c_fit = np.polyfit(vs_clean, us_clean, 1)
+            res_fit = us_clean - (m_fit * vs_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            us_final = us_clean[keep_fit]
+            vs_final = vs_clean[keep_fit]
+            if len(vs_final) < 4:
+                return None
+            m_fit, c_fit = np.polyfit(vs_final, us_final, 1)
+            std_res = np.std(us_final - (m_fit * vs_final + c_fit))
+            bins = np.linspace(v_start, v_end, 9)
+            bin_indices = np.digitize(vs_final, bins) - 1
+            coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+            angle_diff = abs(np.degrees(math.atan(m_fit)))
+            v_mid = (v_start + v_end) / 2.0
+            shift = m_fit * v_mid + c_fit - u_prior
+            if coverage >= 0.4 and std_res <= 3.0 and (angle_diff <= 6.0) and (abs(shift) <= shift_limit):
+                return {'m': float(m_fit), 'c': float(c_fit), 'pts': list(zip(us_final, vs_final)), 'shift': shift, 'coverage': coverage, 'residual': std_res, 'source': 'support'}
+        except Exception:
+            pass
+        return None
+    left_pts = find_vertical_valley_pts(V_top_prior, V_bottom_prior, U_left_prior, win=3)
+    left_fit = clean_and_fit_vertical(left_pts, V_top_prior, V_bottom_prior, U_left_prior, limit=3.0, shift_limit=3.0)
+    right_pts = find_vertical_valley_pts(V_top_prior, V_bottom_prior, U_right_prior, win=3)
+    right_fit = clean_and_fit_vertical(right_pts, V_top_prior, V_bottom_prior, U_right_prior, limit=3.0, shift_limit=3.0)
+    v_mid = (V_top_prior + V_bottom_prior) / 2.0
+    u_start = left_fit['m'] * v_mid + left_fit['c'] if left_fit else U_left_prior
+    u_end = right_fit['m'] * v_mid + right_fit['c'] if right_fit else U_right_prior
+    u_start_contract = u_start + 2.0
+    u_end_contract = u_end - 2.0
+    top_pts = find_horizontal_valley_pts(u_start_contract, u_end_contract, V_top_prior, win=3)
+    top_fit = clean_and_fit_horizontal(top_pts, u_start_contract, u_end_contract, V_top_prior, limit=3.0, shift_limit=3.0)
+    bottom_pts = find_horizontal_valley_pts(u_start_contract, u_end_contract, V_bottom_prior, win=3)
+    bottom_fit = clean_and_fit_horizontal(bottom_pts, u_start_contract, u_end_contract, V_bottom_prior, limit=3.0, shift_limit=3.0)
+    U_boundaries = {}
+    U_boundaries[0] = left_fit if left_fit else {'m': 0.0, 'c': U_left_prior, 'source': prior_source}
+    U_boundaries[N_c] = right_fit if right_fit else {'m': 0.0, 'c': U_right_prior, 'source': prior_source}
+    V_boundaries = {}
+    V_boundaries[0] = top_fit if top_fit else {'m': 0.0, 'c': V_top_prior, 'source': prior_source}
+    V_boundaries[N_r] = bottom_fit if bottom_fit else {'m': 0.0, 'c': V_bottom_prior, 'source': prior_source}
+    for fit_res in [left_fit, right_fit, top_fit, bottom_fit]:
+        if fit_res and 'pts' in fit_res:
+            for pt_uv in fit_res['pts']:
+                pt_rot = project_to_rotated(pt_uv[0], pt_uv[1])
+                pt_orig = transform_local_to_orig(pt_rot[0], pt_rot[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+    for c in range(1, N_c):
+        ratio = c / N_c
+        m_l, c_l = (U_boundaries[0]['m'], U_boundaries[0]['c'])
+        m_r, c_r = (U_boundaries[N_c]['m'], U_boundaries[N_c]['c'])
+        m_mid = m_l * (1 - ratio) + m_r * ratio
+        c_mid = c_l * (1 - ratio) + c_r * ratio
+        u_mid_prior = m_mid * v_mid + c_mid
+        mid_col_pts = find_vertical_valley_pts(V_top_prior, V_bottom_prior, u_mid_prior, win=3)
+        mid_col_fit = clean_and_fit_vertical(mid_col_pts, V_top_prior, V_bottom_prior, u_mid_prior, limit=3.0, shift_limit=3.0)
+        if mid_col_fit:
+            U_boundaries[c] = mid_col_fit
+            for pt_uv in mid_col_fit['pts']:
+                pt_rot = project_to_rotated(pt_uv[0], pt_uv[1])
+                pt_orig = transform_local_to_orig(pt_rot[0], pt_rot[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        else:
+            U_boundaries[c] = {'m': m_mid, 'c': c_mid, 'source': 'envelope_midpoint'}
+    for r in range(1, N_r):
+        ratio = r / N_r
+        m_t, c_t = (V_boundaries[0]['m'], V_boundaries[0]['c'])
+        m_b, c_b = (V_boundaries[N_r]['m'], V_boundaries[N_r]['c'])
+        m_mid = m_t * (1 - ratio) + m_b * ratio
+        c_mid = c_t * (1 - ratio) + c_b * ratio
+        u_mid_eval = (u_start + u_end) / 2.0
+        v_mid_prior = m_mid * u_mid_eval + c_mid
+        mid_row_pts = find_horizontal_valley_pts(u_start_contract, u_end_contract, v_mid_prior, win=3)
+        mid_row_fit = clean_and_fit_horizontal(mid_row_pts, u_start_contract, u_end_contract, v_mid_prior, limit=3.0, shift_limit=3.0)
+        if mid_row_fit:
+            V_boundaries[r] = mid_row_fit
+            for pt_uv in mid_row_fit['pts']:
+                pt_rot = project_to_rotated(pt_uv[0], pt_uv[1])
+                pt_orig = transform_local_to_orig(pt_rot[0], pt_rot[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        else:
+            V_boundaries[r] = {'m': m_mid, 'c': c_mid, 'source': 'envelope_midpoint'}
+
+    def check_middle_column_boundaries():
+        v_test = [V_top_prior, (V_top_prior + V_bottom_prior) / 2.0, V_bottom_prior]
+        for c in range(1, N_c):
+            m_curr, c_curr = (U_boundaries[c]['m'], U_boundaries[c]['c'])
+            m_prev, c_prev = (U_boundaries[c - 1]['m'], U_boundaries[c - 1]['c'])
+            m_next, c_next = (U_boundaries[c + 1]['m'], U_boundaries[c + 1]['c'])
+            is_ok = True
+            for vt in v_test:
+                u_curr = m_curr * vt + c_curr
+                u_prev = m_prev * vt + c_prev
+                u_next = m_next * vt + c_next
+                if u_curr - u_prev < 15.0 or u_next - u_curr < 15.0:
+                    is_ok = False
+                    break
+            if not is_ok:
+                ratio = c / N_c
+                m_l, c_l = (U_boundaries[0]['m'], U_boundaries[0]['c'])
+                m_r, c_r = (U_boundaries[N_c]['m'], U_boundaries[N_c]['c'])
+                U_boundaries[c] = {'m': m_l * (1 - ratio) + m_r * ratio, 'c': c_l * (1 - ratio) + c_r * ratio, 'source': 'envelope_midpoint'}
+
+    def check_middle_row_boundaries():
+        u_test = [u_start, (u_start + u_end) / 2.0, u_end]
+        for r in range(1, N_r):
+            m_curr, c_curr = (V_boundaries[r]['m'], V_boundaries[r]['c'])
+            m_prev, c_prev = (V_boundaries[r - 1]['m'], V_boundaries[r - 1]['c'])
+            m_next, c_next = (V_boundaries[r + 1]['m'], V_boundaries[r + 1]['c'])
+            is_ok = True
+            for ut in u_test:
+                v_curr = m_curr * ut + c_curr
+                v_prev = m_prev * ut + c_prev
+                v_next = m_next * ut + c_next
+                if v_curr - v_prev < 15.0 or v_next - v_curr < 15.0:
+                    is_ok = False
+                    break
+            if not is_ok:
+                ratio = r / N_r
+                m_t, c_t = (V_boundaries[0]['m'], V_boundaries[0]['c'])
+                m_b, c_b = (V_boundaries[N_r]['m'], V_boundaries[N_r]['c'])
+                V_boundaries[r] = {'m': m_t * (1 - ratio) + m_b * ratio, 'c': c_t * (1 - ratio) + c_b * ratio, 'source': 'envelope_midpoint'}
+    check_middle_column_boundaries()
+    check_middle_row_boundaries()
+
+    def build_proposals_dict(h_bounds, v_bounds):
+        props = {}
+        for r_idx in range(N_r):
+            for c_idx in range(N_c):
+                tl = V34__intersect_lines_uv(h_bounds[r_idx]['m'], h_bounds[r_idx]['c'], v_bounds[c_idx]['m'], v_bounds[c_idx]['c'])
+                tr = V34__intersect_lines_uv(h_bounds[r_idx]['m'], h_bounds[r_idx]['c'], v_bounds[c_idx + 1]['m'], v_bounds[c_idx + 1]['c'])
+                br = V34__intersect_lines_uv(h_bounds[r_idx + 1]['m'], h_bounds[r_idx + 1]['c'], v_bounds[c_idx + 1]['m'], v_bounds[c_idx + 1]['c'])
+                bl = V34__intersect_lines_uv(h_bounds[r_idx + 1]['m'], h_bounds[r_idx + 1]['c'], v_bounds[c_idx]['m'], v_bounds[c_idx]['c'])
+                props[c_idx, r_idx] = [project_to_rotated(tl[0], tl[1]), project_to_rotated(tr[0], tr[1]), project_to_rotated(br[0], br[1]), project_to_rotated(bl[0], bl[1])]
+        return props
+    proposals = build_proposals_dict(V_boundaries, U_boundaries)
+    panel_keys = list(proposals.keys())
+    panel_list = [proposals[k] for k in panel_keys]
+    has_overlap, _, _, _ = V34__check_block_overlaps(panel_list)
+    if has_overlap:
+        for c in range(1, N_c):
+            ratio = c / N_c
+            m_l, c_l = (U_boundaries[0]['m'], U_boundaries[0]['c'])
+            m_r, c_r = (U_boundaries[N_c]['m'], U_boundaries[N_c]['c'])
+            U_boundaries[c] = {'m': m_l * (1 - ratio) + m_r * ratio, 'c': c_l * (1 - ratio) + c_r * ratio, 'source': 'envelope_midpoint'}
+        for r in range(1, N_r):
+            ratio = r / N_r
+            m_t, c_t = (V_boundaries[0]['m'], V_boundaries[0]['c'])
+            m_b, c_b = (V_boundaries[N_r]['m'], V_boundaries[N_r]['c'])
+            V_boundaries[r] = {'m': m_t * (1 - ratio) + m_b * ratio, 'c': c_t * (1 - ratio) + c_b * ratio, 'source': 'envelope_midpoint'}
+        proposals = build_proposals_dict(V_boundaries, U_boundaries)
+        panel_list = [proposals[k] for k in panel_keys]
+        has_overlap, _, _, _ = V34__check_block_overlaps(panel_list)
+    if has_overlap:
+        U_boundaries[0] = {'m': 0.0, 'c': U_left_prior, 'source': prior_source}
+        U_boundaries[N_c] = {'m': 0.0, 'c': U_right_prior, 'source': prior_source}
+        V_boundaries[0] = {'m': 0.0, 'c': V_top_prior, 'source': prior_source}
+        V_boundaries[N_r] = {'m': 0.0, 'c': V_bottom_prior, 'source': prior_source}
+        for c in range(1, N_c):
+            ratio = c / N_c
+            U_boundaries[c] = {'m': 0.0, 'c': U_left_prior * (1 - ratio) + U_right_prior * ratio, 'source': 'envelope_midpoint'}
+        for r in range(1, N_r):
+            ratio = r / N_r
+            V_boundaries[r] = {'m': 0.0, 'c': V_top_prior * (1 - ratio) + V_bottom_prior * ratio, 'source': 'envelope_midpoint'}
+        proposals = build_proposals_dict(V_boundaries, U_boundaries)
+        panel_list = [proposals[k] for k in panel_keys]
+        has_overlap, _, _, _ = V34__check_block_overlaps(panel_list)
+    fallback_panels = set()
+    if has_overlap:
+        for i in range(len(panel_list)):
+            for j in range(i + 1, len(panel_list)):
+                poly1 = np.array(panel_list[i], dtype=np.float32)
+                poly2 = np.array(panel_list[j], dtype=np.float32)
+                inter_area = V34__get_polygon_intersection_area(poly1, poly2)
+                area1 = cv2.contourArea(poly1)
+                area2 = cv2.contourArea(poly2)
+                union_area = area1 + area2 - inter_area
+                iou = inter_area / union_area if union_area > 0 else 0.0
+                if iou > 0.03:
+                    fallback_panels.add(panel_keys[i])
+                    fallback_panels.add(panel_keys[j])
+
+    def format_boundary_c(b):
+        return f"{b['m'] * v_mid + b['c']:.1f}"
+
+    def format_horizontal_c(b):
+        return f"{b['m'] * ((u_start + u_end) / 2.0) + b['c']:.1f}"
+    left_str = format_boundary_c(U_boundaries[0])
+    right_str = format_boundary_c(U_boundaries[N_c])
+    mid_u_str = format_boundary_c(U_boundaries[1]) if N_c == 2 else 'None'
+    top_str = format_horizontal_c(V_boundaries[0])
+    bottom_str = format_horizontal_c(V_boundaries[N_r])
+    mid_v_str = format_horizontal_c(V_boundaries[1]) if N_r == 2 else 'None'
+    print(f'[SMALL_ENVELOPE] {block_name} source={prior_source} U=({left_str},{mid_u_str},{right_str}) V=({top_str},{mid_v_str},{bottom_str})')
+    prop_widths = []
+    prop_heights = []
+    for key, poly in proposals.items():
+        TL_p, TR_p, BR_p, BL_p = V34__sort_panel_corners(poly)
+        w = (math.sqrt((TR_p[0] - TL_p[0]) ** 2 + (TR_p[1] - TL_p[1]) ** 2) + math.sqrt((BR_p[0] - BL_p[0]) ** 2 + (BR_p[1] - BL_p[1]) ** 2)) / 2.0
+        h = (math.sqrt((BL_p[0] - TL_p[0]) ** 2 + (BL_p[1] - TL_p[1]) ** 2) + math.sqrt((BR_p[0] - TR_p[0]) ** 2 + (BR_p[1] - TR_p[1]) ** 2)) / 2.0
+        prop_widths.append(w)
+        prop_heights.append(h)
+    median_width = np.median(prop_widths) if prop_widths else 1.0
+    median_height = np.median(prop_heights) if prop_heights else 1.0
+    max_overlap_iou = 0.0
+    for i in range(len(panel_list)):
+        for j in range(i + 1, len(panel_list)):
+            poly1 = np.array(panel_list[i], dtype=np.float32)
+            poly2 = np.array(panel_list[j], dtype=np.float32)
+            inter_area = V34__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            if iou > max_overlap_iou:
+                max_overlap_iou = iou
+    panels_result = []
+    for c_idx in range(N_c):
+        for r_idx in range(N_r):
+            if (c_idx, r_idx) not in grid_map:
+                continue
+            item = grid_map[c_idx, r_idx]
+            p = item['panel']
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            anchors = V34__get_panel_hybrid_anchors(p['orig_ref'])
+            key = (c_idx, r_idx)
+            if key in fallback_panels:
+                rect = cv2.minAreaRect(np.array(poly_init, dtype=np.float32))
+                box = cv2.boxPoints(rect)
+                poly_final = [tuple(pt) for pt in V34__sort_panel_corners(box)]
+                source = 'fallback_yolo'
+                reason = 'overlap_fallback'
+                center_shift = 0.0
+                area_ratio = 1.0
+            else:
+                poly_proposal = proposals[key]
+                TL_yolo, TR_yolo, BR_yolo, BL_yolo = V34__sort_panel_corners(poly_init)
+                panel_height = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                TL_new, TR_new, BR_new, BL_new = V34__sort_panel_corners(poly_proposal)
+                is_convex = cv2.isContourConvex(np.array(poly_proposal, dtype=np.int32))
+                area_prop = cv2.contourArea(np.array(poly_proposal, dtype=np.float32))
+                area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+                area_ratio = area_prop / (area_yolo + 1e-06)
+                cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+                cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+                cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+                cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+                center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                angle_prop = np.degrees(math.atan2(TR_new[1] - TL_new[1], TR_new[0] - TL_new[0]))
+                angle_yolo = np.degrees(math.atan2(TR_yolo[1] - TL_yolo[1], TR_yolo[0] - TL_yolo[0]))
+                diff_angle = abs(angle_prop - angle_yolo)
+                while diff_angle > 90:
+                    diff_angle = abs(diff_angle - 180)
+                w_prop = math.sqrt((TR_new[0] - TL_new[0]) ** 2 + (TR_new[1] - TL_new[1]) ** 2)
+                h_prop = math.sqrt((BL_new[0] - TL_new[0]) ** 2 + (BL_new[1] - TL_new[1]) ** 2)
+                aspect_prop = w_prop / (h_prop + 1e-06)
+                w_yolo = math.sqrt((TR_yolo[0] - TL_yolo[0]) ** 2 + (TR_yolo[1] - TL_yolo[1]) ** 2)
+                h_yolo = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                aspect_yolo = w_yolo / (h_yolo + 1e-06)
+                aspect_ratio_dev = aspect_prop / (aspect_yolo + 1e-06)
+                aspect_ok = 0.65 <= aspect_ratio_dev <= 1.35
+                crossing_ok = True
+                for other_key, other_poly in proposals.items():
+                    if other_key == key:
+                        continue
+                    for pt in poly_proposal:
+                        if cv2.pointPolygonTest(np.array(other_poly, dtype=np.float32), (pt[0], pt[1]), False) > 0:
+                            crossing_ok = False
+                            break
+                    if not crossing_ok:
+                        break
+                size_ok = w_prop >= 0.6 * median_width and h_prop >= 0.6 * median_height
+                has_foreground = U_boundaries[c_idx]['source'] == 'foreground' or U_boundaries[c_idx + 1]['source'] == 'foreground' or V_boundaries[r_idx]['source'] == 'foreground' or (V_boundaries[r_idx + 1]['source'] == 'foreground')
+                has_snap = U_boundaries[c_idx]['source'] == 'support' or U_boundaries[c_idx + 1]['source'] == 'support' or V_boundaries[r_idx]['source'] == 'support' or (V_boundaries[r_idx + 1]['source'] == 'support')
+                has_evidence = has_foreground or has_snap
+                source = 'foreground_grid' if has_evidence else 'midpoint_grid'
+                is_foreground_env = has_foreground or prior_source == 'foreground'
+                max_shift = 0.3 * panel_height if is_foreground_env else 0.25 * panel_height
+                is_valid = is_convex and 0.8 <= area_ratio <= 1.2 and (center_shift <= max_shift) and (diff_angle <= 4.0) and aspect_ok and crossing_ok and size_ok and has_evidence
+                if is_valid:
+                    poly_final = poly_proposal
+                    reason = 'valid_refine'
+                    if is_foreground_env and center_shift > 0.25 * panel_height:
+                        print(f'[INFO] {block_name} {r_idx} {c_idx} allowed center shift {center_shift:.2f} px (> 0.25 * height) via foreground_grid source.')
+                else:
+                    rect = cv2.minAreaRect(np.array(poly_init, dtype=np.float32))
+                    box = cv2.boxPoints(rect)
+                    poly_final = [tuple(pt) for pt in V34__sort_panel_corners(box)]
+                    source = 'fallback_yolo'
+                    reason = ''
+                    if not is_convex:
+                        reason += 'not_convex '
+                    if not 0.8 <= area_ratio <= 1.2:
+                        reason += f'area_ratio_{area_ratio:.2f} '
+                    if center_shift > max_shift:
+                        reason += f'shift_{center_shift:.1f} '
+                    if diff_angle > 4.0:
+                        reason += f'angle_{diff_angle:.1f} '
+                    if not aspect_ok:
+                        reason += f'aspect_dev_{aspect_ratio_dev:.2f} '
+                    if not crossing_ok:
+                        reason += 'crossing '
+                    if not size_ok:
+                        reason += f'size_w={w_prop:.1f}/h={h_prop:.1f}_vs_med={median_width:.1f}/{median_height:.1f} '
+                    if not has_evidence:
+                        reason += 'no_evidence '
+                    reason = reason.strip()
+            panels_result.append({'col': c_idx, 'row': r_idx, 'polygon': poly_final, 'quality': 'fallback' if source == 'fallback_yolo' else 'pass', 'source': source, 'reason': reason, 'shift': center_shift, 'area_ratio': area_ratio, 'overlap': max_overlap_iou, 'orig_p': p['orig_ref'], 'anchors': anchors})
+            print(f'[SMALL_PANEL] {block_name} {r_idx} {c_idx} source={source} area_ratio={area_ratio:.2f} center_shift={center_shift:.2f} reason={reason}')
+    return panels_result
+
+def V34__find_vertical_support_points(rotated_gray, m_yolo, c_yolo, y_min, y_max, name, block_name, transform_local_to_orig, is_lower_small_block=False):
+    win = 10
+    support_pts = []
+    sample_ys = np.linspace(y_min, y_max, 50)
+    for y_val in sample_ys:
+        x_est = m_yolo * y_val + c_yolo
+        profile = []
+        for d in range(-win, win + 1):
+            px = x_est + d
+            py = y_val
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(float(rotated_gray[y_idx, x_idx]))
+        if len(profile) < 5:
+            continue
+        valleys = []
+        for i in range(2, len(profile) - 2):
+            if profile[i] < profile[i - 1] and profile[i] < profile[i + 1]:
+                left_peak = max(profile[:i])
+                right_peak = max(profile[i + 1:])
+                contrast = min(left_peak, right_peak) - profile[i]
+                if profile[i] < 135 or contrast >= 8:
+                    if name == 'left' and max(profile[i + 1:]) < 130:
+                        continue
+                    if name == 'right' and max(profile[:i]) < 130:
+                        continue
+                    if name == 'middle' and (max(profile[:i]) < 130 or max(profile[i + 1:]) < 130):
+                        continue
+                    valleys.append((abs(i - win), i, 'valley'))
+        edges = []
+        gradients = [profile[i + 1] - profile[i] for i in range(len(profile) - 1)]
+        if name == 'left':
+            for i in range(len(gradients)):
+                if gradients[i] >= 15:
+                    panel_side = profile[i + 1:i + 4] if i + 4 <= len(profile) else profile[i + 1:]
+                    if len(panel_side) >= 2 and sum((1 for v in panel_side if v >= 130)) >= 2:
+                        edges.append((abs(i - win), i, 'edge'))
+        elif name == 'right':
+            for i in range(len(gradients)):
+                if gradients[i] <= -15:
+                    panel_side = profile[max(0, i - 2):i + 1]
+                    if len(panel_side) >= 2 and sum((1 for v in panel_side if v >= 130)) >= 2:
+                        edges.append((abs(i - win), i, 'edge'))
+        candidates = valleys + edges
+        if candidates:
+            if is_lower_small_block and name in ('left', 'right'):
+                candidates.sort(key=lambda x: (x[2] != 'edge', x[0]))
+            else:
+                candidates.sort(key=lambda x: x[0])
+            best_idx = candidates[0][1]
+            px_val = x_est + (best_idx - win)
+            orig_x, orig_y = transform_local_to_orig(px_val, y_val)
+            if orig_x >= 0:
+                support_pts.append((px_val, y_val))
+    return support_pts
+
+def V34__refine_small_block_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local):
+    global V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG
+    row_count = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 0
+    is_small_block = V34__is_generic_small_block(row_count, len(b_local['panels']), len(b_local['columns']))
+    if not is_small_block:
+        return V34__build_small_block_micro_grid_from_yolo_and_local_edges(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local)
+    is_lower_small_block = is_small_block and len(b_local['columns']) <= 2 and (row_count <= 2) and (len(b_local['panels']) <= 4)
+    has_real_lower_grid = False
+    if is_lower_small_block:
+        print(f'[LOWER_ROLLBACK] block={block_name} mode=shared_quad_grid_old')
+        n_cols = len(b_local['columns'])
+        n_rows = row_count
+        is_single_row_small_block = V34__is_single_row_two_col_block(n_rows, n_cols, len(b_local['panels']))
+        grid_panels = {}
+        for col_idx, col in enumerate(b_local['columns']):
+            for row_idx, p in enumerate(col):
+                grid_panels[row_idx, col_idx] = p
+        quads_dict = {}
+        quads_source = {}
+        quads_area = {}
+        quads_angle = {}
+        yolo_x_all = []
+        yolo_y_all = []
+        for p in b_local['panels']:
+            poly_local = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            for pt in poly_local:
+                yolo_x_all.append(pt[0])
+                yolo_y_all.append(pt[1])
+        U_left_yolo = float(min(yolo_x_all)) if yolo_x_all else 0.0
+        U_right_yolo = float(max(yolo_x_all)) if yolo_x_all else 0.0
+        V_top_yolo = float(min(yolo_y_all)) if yolo_y_all else 0.0
+        V_bottom_yolo = float(max(yolo_y_all)) if yolo_y_all else 0.0
+        for (row, col), p in grid_panels.items():
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            x_coords = [pt[0] for pt in poly_init]
+            y_coords = [pt[1] for pt in poly_init]
+            x1, y1, x2, y2 = (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
+            roi_x1 = max(0, int(round(x1 - 4)))
+            roi_y1 = max(0, int(round(y1 - 4)))
+            roi_x2 = min(rotated_gray.shape[1], int(round(x2 + 4)))
+            roi_y2 = min(rotated_gray.shape[0], int(round(y2 + 4)))
+            yolo_mask = np.zeros(rotated_gray.shape, dtype=np.uint8)
+            poly_np = np.array(poly_init, dtype=np.int32)
+            cv2.fillPoly(yolo_mask, [poly_np], 255)
+            dilated_yolo_mask = cv2.dilate(yolo_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
+            roi_mask = dilated_yolo_mask[roi_y1:roi_y2, roi_x1:roi_x2]
+            roi_gray = rotated_gray[roi_y1:roi_y2, roi_x1:roi_x2]
+            roi_pixels_inside = roi_gray[roi_mask > 0]
+            if len(roi_pixels_inside) > 0:
+                thresh = float(np.percentile(roi_pixels_inside, 50))
+            else:
+                thresh = 135.0
+            fg = np.zeros_like(roi_gray, dtype=np.uint8)
+            fg[roi_gray >= thresh] = 255
+            fg = cv2.bitwise_and(fg, roi_mask)
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+            fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, kernel_close)
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, kernel_open)
+            contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            best_cnt = None
+            max_area = 0.0
+            for cnt in contours:
+                cnt_local = cnt.copy()
+                cnt_local[:, :, 0] += roi_x1
+                cnt_local[:, :, 1] += roi_y1
+                cnt_mask = np.zeros(rotated_gray.shape, dtype=np.uint8)
+                cv2.drawContours(cnt_mask, [cnt_local], -1, 255, -1)
+                if np.sum(cv2.bitwise_and(cnt_mask, yolo_mask)) == 0:
+                    continue
+                area_val = cv2.contourArea(cnt)
+                if area_val < 100:
+                    continue
+                if area_val > max_area:
+                    max_area = area_val
+                    best_cnt = cnt_local
+            quad_fitted = False
+            quad = []
+            rect_angle = 0.0
+            if best_cnt is not None:
+                rect = cv2.minAreaRect(best_cnt)
+                box = cv2.boxPoints(rect)
+                candidate_quad = [tuple(pt) for pt in V34__sort_panel_corners(box)]
+                rect_angle = rect[2]
+                is_convex = cv2.isContourConvex(np.array(candidate_quad, dtype=np.float32).astype(np.int32))
+                area_prop = cv2.contourArea(np.array(candidate_quad, dtype=np.float32))
+                area_ratio = area_prop / (cv2.contourArea(poly_np.astype(np.float32)) + 1e-06)
+                if is_convex and 0.6 <= area_ratio <= 1.4:
+                    quad = candidate_quad
+                    quad_fitted = True
+            if quad_fitted:
+                quads_dict[row, col] = quad
+                quads_source[row, col] = 'lower_panel_foreground_quad'
+                quads_area[row, col] = max_area
+                quads_angle[row, col] = rect_angle
+                if V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG is not None:
+                    cnt_orig = [transform_local_to_orig(pt[0][0], pt[0][1]) for pt in best_cnt]
+                    cv2.polylines(V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, [np.array(cnt_orig, dtype=np.int32)], True, (0, 255, 0), V34__VISUAL_PANEL_THICKNESS)
+                    quad_orig = [transform_local_to_orig(pt[0], pt[1]) for pt in quad]
+                    cv2.polylines(V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, [np.array(quad_orig, dtype=np.int32)], True, (0, 255, 255), V34__VISUAL_PANEL_THICKNESS)
+            else:
+                quad = [tuple(pt) for pt in V34__sort_panel_corners(poly_init)]
+                quads_dict[row, col] = quad
+                quads_source[row, col] = 'lower_panel_yolo_fallback'
+                quads_area[row, col] = cv2.contourArea(poly_np.astype(np.float32))
+                quads_angle[row, col] = 0.0
+            src_str = 'foreground' if quads_source[row, col] == 'lower_panel_foreground_quad' else 'yolo_fallback'
+            print(f'[LOWER_PANEL_QUAD] block={block_name} row={row} col={col} source={src_str} area={quads_area[row, col]:.1f} angle={quads_angle[row, col]:.1f}')
+
+        def fit_vertical_line(p1, p2):
+            if abs(p2[1] - p1[1]) > 1e-05:
+                m = (p2[0] - p1[0]) / (p2[1] - p1[1])
+                c = p1[0] - m * p1[1]
+            else:
+                m = 0.0
+                c = p1[0]
+            return (m, c)
+
+        def fit_horizontal_line(p1, p2):
+            if abs(p2[0] - p1[0]) > 1e-05:
+                m = (p2[1] - p1[1]) / (p2[0] - p1[0])
+                c = p1[1] - m * p1[0]
+            else:
+                m = 0.0
+                c = p1[1]
+            return (m, c)
+
+        def clip_scalar(val, min_val, max_val):
+            return max(min_val, min(max_val, val))
+        left_edges = {}
+        right_edges = {}
+        top_edges = {}
+        bottom_edges = {}
+        for row, col in grid_panels.keys():
+            quad = quads_dict[row, col]
+            TL, TR, BR, BL = quad
+            left_edges[row, col] = fit_vertical_line(TL, BL)
+            right_edges[row, col] = fit_vertical_line(TR, BR)
+            top_edges[row, col] = fit_horizontal_line(TL, TR)
+            bottom_edges[row, col] = fit_horizontal_line(BL, BR)
+        yolo_left_edges = {}
+        yolo_right_edges = {}
+        yolo_top_edges = {}
+        yolo_bottom_edges = {}
+        for row, col in grid_panels.keys():
+            poly_init = V34__get_local_yolo_polygon_prior(grid_panels[row, col]['orig_ref'], transform_orig_to_local)
+            TL_y, TR_y, BR_y, BL_y = V34__sort_panel_corners(poly_init)
+            yolo_left_edges[row, col] = fit_vertical_line(TL_y, BL_y)
+            yolo_right_edges[row, col] = fit_vertical_line(TR_y, BR_y)
+            yolo_top_edges[row, col] = fit_horizontal_line(TL_y, TR_y)
+            yolo_bottom_edges[row, col] = fit_horizontal_line(BL_y, BR_y)
+        rail_vertical = []
+        rail_vertical_source = []
+        y_mid = (V_top_yolo + V_bottom_yolo) / 2.0
+        x_mid = (U_left_yolo + U_right_yolo) / 2.0
+        if is_single_row_small_block:
+            print(f'[SINGLE_ROW_ROUTE] block={block_name} active=true')
+            yolo_L0 = yolo_left_edges[0, 0][0] * y_mid + yolo_left_edges[0, 0][1]
+            yolo_R0 = yolo_right_edges[0, 0][0] * y_mid + yolo_right_edges[0, 0][1]
+            yolo_L1 = yolo_left_edges[0, 1][0] * y_mid + yolo_left_edges[0, 1][1]
+            yolo_R1 = yolo_right_edges[0, 1][0] * y_mid + yolo_right_edges[0, 1][1]
+            print(f'[BLOCK7_YOLO_EDGES] L0={yolo_L0:.3f} R0={yolo_R0:.3f} L1={yolo_L1:.3f} R1={yolo_R1:.3f}')
+            fg_L0 = left_edges[0, 0][0] * y_mid + left_edges[0, 0][1] if quads_source[0, 0] == 'lower_panel_foreground_quad' else None
+            fg_R0 = right_edges[0, 0][0] * y_mid + right_edges[0, 0][1] if quads_source[0, 0] == 'lower_panel_foreground_quad' else None
+            fg_L1 = left_edges[0, 1][0] * y_mid + left_edges[0, 1][1] if quads_source[0, 1] == 'lower_panel_foreground_quad' else None
+            fg_R1 = right_edges[0, 1][0] * y_mid + right_edges[0, 1][1] if quads_source[0, 1] == 'lower_panel_foreground_quad' else None
+            fg_L0_str = f'{fg_L0:.3f}' if fg_L0 is not None else 'None'
+            fg_R0_str = f'{fg_R0:.3f}' if fg_R0 is not None else 'None'
+            fg_L1_str = f'{fg_L1:.3f}' if fg_L1 is not None else 'None'
+            fg_R1_str = f'{fg_R1:.3f}' if fg_R1 is not None else 'None'
+            print(f'[BLOCK7_FG_EDGES] L0={fg_L0_str} R0={fg_R0_str} L1={fg_L1_str} R1={fg_R1_str}')
+            base0 = yolo_L0
+            if fg_L0 is not None:
+                val0 = base0 + clip_scalar(fg_L0 - base0, -3.0, 3.0)
+                source_left = 'foreground_left'
+            else:
+                val0 = base0
+                source_left = 'yolo_left'
+            delta0 = val0 - base0
+            fg_val0_str = f'{fg_L0:.3f}' if fg_L0 is not None else 'None'
+            print(f'[BLOCK7_RAIL_RECALC] index=0 base={base0:.3f} fg={fg_val0_str} delta={delta0:.3f} value={val0:.3f}')
+            m_left = left_edges[0, 0][0] if fg_L0 is not None else yolo_left_edges[0, 0][0]
+            c_left_new = val0 - m_left * y_mid
+            yolo_mid = 0.5 * (yolo_R0 + yolo_L1)
+            diff = abs(right_edges[0, 0][0] * y_mid + right_edges[0, 0][1] - (left_edges[0, 1][0] * y_mid + left_edges[0, 1][1]))
+            if fg_R0 is not None and fg_L1 is not None:
+                fg_mid = 0.5 * (fg_R0 + fg_L1)
+                val1 = yolo_mid + clip_scalar(fg_mid - yolo_mid, -4.0, 4.0)
+                source_mid = 'foreground_average'
+                fg_mid_str = f'{fg_mid:.3f}'
+                m_mid_rail = (right_edges[0, 0][0] + left_edges[0, 1][0]) / 2.0
+            elif fg_R0 is not None or fg_L1 is not None:
+                fg_edge = fg_R0 if fg_R0 is not None else fg_L1
+                val1 = yolo_mid + clip_scalar(fg_edge - yolo_mid, -3.0, 3.0)
+                source_mid = 'foreground_average'
+                fg_mid_str = f'{fg_edge:.3f}'
+                m_mid_rail = right_edges[0, 0][0] if fg_R0 is not None else left_edges[0, 1][0]
+            else:
+                val1 = yolo_mid
+                source_mid = 'yolo_midpoint'
+                fg_mid_str = 'None'
+                m_mid_rail = (yolo_right_edges[0, 0][0] + yolo_left_edges[0, 1][0]) / 2.0
+            delta1 = val1 - yolo_mid
+            print(f'[BLOCK7_RAIL_RECALC] index=1 base={yolo_mid:.3f} fg_mid={fg_mid_str} delta={delta1:.3f} value={val1:.3f}')
+            c_mid_new = val1 - m_mid_rail * y_mid
+            base2 = yolo_R1
+            if fg_R1 is not None:
+                val2 = base2 + clip_scalar(fg_R1 - base2, -4.0, 4.0)
+                source_right = 'foreground_right'
+            else:
+                val2 = base2
+                source_right = 'yolo_right'
+            delta2 = val2 - base2
+            fg_val2_str = f'{fg_R1:.3f}' if fg_R1 is not None else 'None'
+            print(f'[BLOCK7_RAIL_RECALC] index=2 base={base2:.3f} fg={fg_val2_str} delta={delta2:.3f} value={val2:.3f}')
+            m_right = right_edges[0, 1][0] if fg_R1 is not None else yolo_right_edges[0, 1][0]
+            c_right_new = val2 - m_right * y_mid
+            if not val0 < val1 < val2:
+                val1 = 0.5 * (val0 + val2)
+                c_mid_new = val1 - m_mid_rail * y_mid
+                delta1 = val1 - yolo_mid
+                print(f'[BLOCK7_RAIL_RECALC_ORDER_RESET] index=1 value_reset={val1:.3f} delta={delta1:.3f}')
+            rail_vertical.append((m_left, c_left_new))
+            rail_vertical_source.append(source_left)
+            rail_vertical.append((m_mid_rail, c_mid_new))
+            rail_vertical_source.append(source_mid)
+            rail_vertical.append((m_right, c_right_new))
+            rail_vertical_source.append(source_right)
+            clamp_left = 'outer_2px' if abs(delta0) >= 2.0 else 'none'
+            clamp_right = 'outer_4px' if abs(delta2) >= 4.0 else 'none'
+            print(f'[BLOCK7_LEFT_RAIL] source={source_left} clamp={clamp_left} value={val0:.3f}')
+            print(f'[BLOCK7_MIDDLE_RAIL] source={source_mid} diff={diff:.3f} value={val1:.3f}')
+            print(f'[BLOCK7_RIGHT_RAIL] source={source_right} clamp={clamp_right} value={val2:.3f}')
+        else:
+            for c_rail in range(n_cols + 1):
+                ms = []
+                cs = []
+                is_fallback = False
+                if c_rail == 0:
+                    for row in range(n_rows):
+                        m, c = left_edges[row, 0]
+                        ms.append(m)
+                        cs.append(c)
+                        if quads_source[row, 0] == 'lower_panel_yolo_fallback':
+                            is_fallback = True
+                    source = 'fallback' if is_fallback else 'single_edge' if n_rows == 1 else 'shared_average'
+                elif c_rail == n_cols:
+                    for row in range(n_rows):
+                        m, c = right_edges[row, n_cols - 1]
+                        ms.append(m)
+                        cs.append(c)
+                        if quads_source[row, n_cols - 1] == 'lower_panel_yolo_fallback':
+                            is_fallback = True
+                    source = 'fallback' if is_fallback else 'single_edge' if n_rows == 1 else 'shared_average'
+                else:
+                    for row in range(n_rows):
+                        m_r, c_r = right_edges[row, c_rail - 1]
+                        m_l, c_l = left_edges[row, c_rail]
+                        ms.extend([m_r, m_l])
+                        cs.extend([c_r, c_l])
+                        if quads_source[row, c_rail - 1] == 'lower_panel_yolo_fallback' or quads_source[row, c_rail] == 'lower_panel_yolo_fallback':
+                            is_fallback = True
+                    source = 'fallback' if is_fallback else 'shared_average'
+                m_val = float(np.mean(ms)) if ms else 0.0
+                c_val = float(np.mean(cs)) if cs else 0.0
+                rail_vertical.append((m_val, c_val))
+                rail_vertical_source.append(source)
+                val_at_center = m_val * y_mid + c_val
+                print(f'[LOWER_SHARED_EDGE] block={block_name} type=vertical index={c_rail} source={source} value={val_at_center:.3f}')
+        bound_horizontal = []
+        bound_horizontal_source = []
+        for r_bound in range(n_rows + 1):
+            ms = []
+            cs = []
+            is_fallback = False
+            if r_bound == 0:
+                for col in range(n_cols):
+                    m, c = top_edges[0, col]
+                    ms.append(m)
+                    cs.append(c)
+                    if quads_source[0, col] == 'lower_panel_yolo_fallback':
+                        is_fallback = True
+                source = 'fallback' if is_fallback else 'single_edge' if n_cols == 1 else 'shared_average'
+            elif r_bound == n_rows:
+                for col in range(n_cols):
+                    m, c = bottom_edges[n_rows - 1, col]
+                    ms.append(m)
+                    cs.append(c)
+                    if quads_source[n_rows - 1, col] == 'lower_panel_yolo_fallback':
+                        is_fallback = True
+                source = 'fallback' if is_fallback else 'single_edge' if n_cols == 1 else 'shared_average'
+            else:
+                for col in range(n_cols):
+                    m_b, c_b = bottom_edges[r_bound - 1, col]
+                    m_t, c_t = top_edges[r_bound, col]
+                    ms.extend([m_b, m_t])
+                    cs.extend([c_b, c_t])
+                    if quads_source[r_bound - 1, col] == 'lower_panel_yolo_fallback' or quads_source[r_bound, col] == 'lower_panel_yolo_fallback':
+                        is_fallback = True
+                source = 'fallback' if is_fallback else 'shared_average'
+            m_val = float(np.mean(ms)) if ms else 0.0
+            c_val = float(np.mean(cs)) if cs else 0.0
+            bound_horizontal.append((m_val, c_val))
+            bound_horizontal_source.append(source)
+            val_at_center = m_val * x_mid + c_val
+            print(f'[LOWER_SHARED_EDGE] block={block_name} type=horizontal index={r_bound} source={source} value={val_at_center:.3f}')
+        if is_single_row_small_block:
+            m0, c0 = rail_vertical[0]
+            m1, c1 = rail_vertical[1]
+            m2, c2 = rail_vertical[2]
+            angle0 = np.degrees(math.atan(m0))
+            angle1 = np.degrees(math.atan(m1))
+            angle2 = np.degrees(math.atan(m2))
+            m_med = float(np.median([m0, m1, m2]))
+            angle_med = np.degrees(math.atan(m_med))
+            if abs(angle0 - angle_med) > 2.5:
+                m_new = m_med
+                ctr_old = m0 * y_mid + c0
+                c_new = ctr_old - m_med * y_mid
+                rail_vertical[0] = (m_new, c_new)
+                print(f'[BLOCK7_RAIL_REG] index=0 old_angle={angle0:.3f} new_angle={angle_med:.3f} center_shift=0.000')
+            if abs(angle2 - angle_med) > 2.5:
+                m_new = m_med
+                ctr_old = m2 * y_mid + c2
+                c_new = ctr_old - m_med * y_mid
+                rail_vertical[2] = (m_new, c_new)
+                print(f'[BLOCK7_RAIL_REG] index=2 old_angle={angle2:.3f} new_angle={angle_med:.3f} center_shift=0.000')
+            ctr_old1 = m1 * y_mid + c1
+            m_tent = m_med if abs(angle1 - angle_med) > 2.5 else m1
+            c_tent = ctr_old1 - m_tent * y_mid
+            left_m, left_c = rail_vertical[0]
+            right_m, right_c = rail_vertical[2]
+            y_top = bound_horizontal[0][0] * x_mid + bound_horizontal[0][1]
+            y_bot = bound_horizontal[n_rows][0] * x_mid + bound_horizontal[n_rows][1]
+            x_left_top = left_m * y_top + left_c
+            x_right_top = right_m * y_top + right_c
+            x_tent_top = m_tent * y_top + c_tent
+            x_tent_top_clamped = clip_scalar(x_tent_top, x_left_top, x_right_top)
+            x_left_bot = left_m * y_bot + left_c
+            x_right_bot = right_m * y_bot + right_c
+            x_tent_bot = m_tent * y_bot + c_tent
+            x_tent_bot_clamped = clip_scalar(x_tent_bot, x_left_bot, x_right_bot)
+            m_refit = (x_tent_bot_clamped - x_tent_top_clamped) / (y_bot - y_top)
+            c_refit = x_tent_top_clamped - m_refit * y_top
+            ctr_new = m_refit * y_mid + c_refit
+            shift = ctr_new - ctr_old1
+            if abs(shift) > 2.0:
+                ctr_new = ctr_old1 + np.sign(shift) * 2.0
+                c_refit = ctr_new - m_refit * y_mid
+            rail_vertical[1] = (m_refit, c_refit)
+            if abs(angle1 - angle_med) > 2.5 or abs(m_refit - m1) > 1e-05 or abs(ctr_new - ctr_old1) > 1e-05:
+                new_angle = np.degrees(math.atan(m_refit))
+                ctr_shift_val = abs(ctr_new - ctr_old1)
+                print(f'[BLOCK7_RAIL_REG] index=1 old_angle={angle1:.3f} new_angle={new_angle:.3f} center_shift={ctr_shift_val:.3f}')
+            v0_after = rail_vertical[0][0] * y_mid + rail_vertical[0][1]
+            v1_after = rail_vertical[1][0] * y_mid + rail_vertical[1][1]
+            v2_after = rail_vertical[2][0] * y_mid + rail_vertical[2][1]
+            print(f'[BLOCK7_RAIL_AFTER] v0={v0_after:.3f} v1={v1_after:.3f} v2={v2_after:.3f}')
+        else:
+            slopes_v = [m for m, c in rail_vertical]
+            angles_v = [np.degrees(math.atan(m)) for m in slopes_v]
+            max_diff_v = max(angles_v) - min(angles_v) if angles_v else 0.0
+            if max_diff_v > 3.0:
+                trustworthy_v = []
+                for i in range(n_cols + 1):
+                    contrib = []
+                    if i > 0:
+                        contrib.extend([(row, i - 1) for row in range(n_rows)])
+                    if i < n_cols:
+                        contrib.extend([(row, i) for row in range(n_rows)])
+                    all_fg = all((quads_source[cell] == 'lower_panel_foreground_quad' for cell in contrib))
+                    if all_fg:
+                        trustworthy_v.append(rail_vertical[i][0])
+                m_med = float(np.median(trustworthy_v)) if trustworthy_v else float(np.median(slopes_v))
+                for i in range(n_cols + 1):
+                    m_old, c_old = rail_vertical[i]
+                    x_center = m_old * y_mid + c_old
+                    c_new = x_center - m_med * y_mid
+                    rail_vertical[i] = (m_med, c_new)
+        slopes_h = [m for m, c in bound_horizontal]
+        angles_h = [np.degrees(math.atan(m)) for m in slopes_h]
+        max_diff_h = max(angles_h) - min(angles_h) if angles_h else 0.0
+        if max_diff_h > 3.0:
+            trustworthy_h = []
+            for i in range(n_rows + 1):
+                contrib = []
+                if i > 0:
+                    contrib.extend([(i - 1, col) for col in range(n_cols)])
+                if i < n_rows:
+                    contrib.extend([(i, col) for col in range(n_cols)])
+                all_fg = all((quads_source[cell] == 'lower_panel_foreground_quad' for cell in contrib))
+                if all_fg:
+                    trustworthy_h.append(bound_horizontal[i][0])
+            m_med = float(np.median(trustworthy_h)) if trustworthy_h else float(np.median(slopes_h))
+            for i in range(n_rows + 1):
+                m_old, c_old = bound_horizontal[i]
+                y_center = m_old * x_mid + c_old
+                c_new = y_center - m_med * x_mid
+                bound_horizontal[i] = (m_med, c_new)
+        if not is_single_row_small_block:
+            for c_rail in range(n_cols + 1):
+                m, c = rail_vertical[c_rail]
+                val = m * y_mid + c
+                if c_rail == 0:
+                    yolo_val = np.mean([yolo_left_edges[r, 0][0] * y_mid + yolo_left_edges[r, 0][1] for r in range(n_rows)])
+                    val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                    clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+                elif c_rail == n_cols:
+                    yolo_val = np.mean([yolo_right_edges[r, n_cols - 1][0] * y_mid + yolo_right_edges[r, n_cols - 1][1] for r in range(n_rows)])
+                    val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                    clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+                else:
+                    col_L = c_rail - 1
+                    col_R = c_rail
+                    yolo_L_val = np.mean([yolo_right_edges[r, col_L][0] * y_mid + yolo_right_edges[r, col_L][1] for r in range(n_rows)])
+                    yolo_R_val = np.mean([yolo_left_edges[r, col_R][0] * y_mid + yolo_left_edges[r, col_R][1] for r in range(n_rows)])
+                    yolo_mid_val = (yolo_L_val + yolo_R_val) / 2.0
+                    val_clamped = clip_scalar(val, yolo_mid_val - 3.0, yolo_mid_val + 3.0)
+                    clamp_log = 'middle_3px' if abs(val_clamped - val) > 1e-05 else 'none'
+                c_new = val_clamped - m * y_mid
+                rail_vertical[c_rail] = (m, c_new)
+                print(f'[LOWER_SHARED_EDGE_RESTORE] block={block_name} type=vertical index={c_rail} value={val_clamped:.3f} clamp={clamp_log}')
+        for r_bound in range(n_rows + 1):
+            m, c = bound_horizontal[r_bound]
+            val = m * x_mid + c
+            if r_bound == 0:
+                yolo_val = np.mean([yolo_top_edges[0, col][0] * x_mid + yolo_top_edges[0, col][1] for col in range(n_cols)])
+                val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+            elif r_bound == n_rows:
+                yolo_val = np.mean([yolo_bottom_edges[n_rows - 1, col][0] * x_mid + yolo_bottom_edges[n_rows - 1, col][1] for col in range(n_cols)])
+                val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+            else:
+                row_T = r_bound - 1
+                row_B = r_bound
+                yolo_T_val = np.mean([yolo_bottom_edges[row_T, col][0] * x_mid + yolo_bottom_edges[row_T, col][1] for col in range(n_cols)])
+                yolo_B_val = np.mean([yolo_top_edges[row_B, col][0] * x_mid + yolo_top_edges[row_B, col][1] for col in range(n_cols)])
+                yolo_mid_val = (yolo_T_val + yolo_B_val) / 2.0
+                val_clamped = clip_scalar(val, yolo_mid_val - 3.0, yolo_mid_val + 3.0)
+                clamp_log = 'middle_3px' if abs(val_clamped - val) > 1e-05 else 'none'
+            c_new = val_clamped - m * x_mid
+            bound_horizontal[r_bound] = (m, c_new)
+            print(f'[LOWER_SHARED_EDGE_RESTORE] block={block_name} type=horizontal index={r_bound} value={val_clamped:.3f} clamp={clamp_log}')
+
+        def intersect_lines(v_line, h_line):
+            m_v, c_v = v_line
+            m_h, c_h = h_line
+            denom = 1.0 - m_v * m_h
+            if abs(denom) > 1e-05:
+                x = (m_v * c_h + c_v) / denom
+                y = m_h * x + c_h
+            else:
+                x = c_v
+                y = m_h * x + c_h
+            return (x, y)
+        proposals = {}
+        for row in range(n_rows):
+            for col in range(n_cols):
+                left_rail = rail_vertical[col]
+                right_rail = rail_vertical[col + 1]
+                top_bound = bound_horizontal[row]
+                bot_bound = bound_horizontal[row + 1]
+                TL = intersect_lines(left_rail, top_bound)
+                TR = intersect_lines(right_rail, top_bound)
+                BR = intersect_lines(right_rail, bot_bound)
+                BL = intersect_lines(left_rail, bot_bound)
+                proposals[row, col] = [TL, TR, BR, BL]
+        final_polys = {}
+        final_sources = {}
+        final_reasons = {}
+
+        def get_iou(p1, p2):
+            poly1 = np.array(p1, dtype=np.float32)
+            poly2 = np.array(p2, dtype=np.float32)
+            inter_area = V34__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            return inter_area / union_area if union_area > 0.0 else 0.0
+        for (row, col), p in grid_panels.items():
+            poly_prop = proposals[row, col]
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            is_valid_proposal = True
+            reason_prop = 'valid_refine'
+            is_convex = cv2.isContourConvex(np.array(poly_prop, dtype=np.float32).astype(np.int32))
+            if not is_convex:
+                is_valid_proposal = False
+                reason_prop = 'not_convex'
+            if is_valid_proposal:
+                area_prop = cv2.contourArea(np.array(poly_prop, dtype=np.float32))
+                area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+                area_ratio = area_prop / (area_yolo + 1e-06)
+                if not 0.7 <= area_ratio <= 1.35:
+                    is_valid_proposal = False
+                    reason_prop = f'area_ratio_{area_ratio:.2f}'
+            if is_valid_proposal:
+                TL_new, TR_new, BR_new, BL_new = V34__sort_panel_corners(poly_prop)
+                cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+                cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+                TL_yolo, TR_yolo, BR_yolo, BL_yolo = V34__sort_panel_corners(poly_init)
+                cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+                cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+                center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                panel_height = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                if center_shift > max(8.0, 0.35 * panel_height):
+                    is_valid_proposal = False
+                    reason_prop = f'center_shift_{center_shift:.2f}'
+            if is_valid_proposal:
+                for (other_row, other_col), other_poly in proposals.items():
+                    if (row, col) != (other_row, other_col):
+                        iou = get_iou(poly_prop, other_poly)
+                        if iou > 0.03:
+                            is_valid_proposal = False
+                            reason_prop = f'overlap_iou_{iou:.3f}'
+                            break
+            if is_valid_proposal:
+                final_polys[row, col] = poly_prop
+                final_sources[row, col] = 'shared_quad_grid'
+                final_reasons[row, col] = 'valid_refine'
+            else:
+                quad = quads_dict[row, col]
+                is_valid_quad = False
+                reason_quad = 'foreground_quad_failed'
+                if quads_source[row, col] == 'lower_panel_foreground_quad':
+                    is_convex_q = cv2.isContourConvex(np.array(quad, dtype=np.float32).astype(np.int32))
+                    area_prop_q = cv2.contourArea(np.array(quad, dtype=np.float32))
+                    area_ratio_q = area_prop_q / (area_yolo + 1e-06)
+                    TL_q, TR_q, BR_q, BL_q = V34__sort_panel_corners(quad)
+                    cx_q = (TL_q[0] + TR_q[0] + BR_q[0] + BL_q[0]) / 4.0
+                    cy_q = (TL_q[1] + TR_q[1] + BR_q[1] + BL_q[1]) / 4.0
+                    center_shift_q = math.sqrt((cx_q - cx_yolo) ** 2 + (cy_q - cy_yolo) ** 2)
+                    if is_convex_q and 0.7 <= area_ratio_q <= 1.35 and (center_shift_q <= max(8.0, 0.35 * panel_height)):
+                        is_valid_quad = True
+                        reason_quad = 'valid_quad_fallback'
+                if is_valid_quad:
+                    final_polys[row, col] = quad
+                    final_sources[row, col] = 'foreground_fallback'
+                    final_reasons[row, col] = f'proposal_failed:{reason_prop}'
+                else:
+                    final_polys[row, col] = poly_init
+                    final_sources[row, col] = 'lower_panel_yolo_fallback'
+                    final_reasons[row, col] = f'proposal_failed:{reason_prop};quad_failed:{reason_quad}'
+        for row, col in grid_panels.keys():
+            print(f'[LOWER_PANEL_FINAL] block={block_name} row={row} col={col} source={final_sources[row, col]} reason={final_reasons[row, col]}')
+            print(f'[SMALL_PANEL_BUILD] block={block_name} row={row} col={col} source={final_sources[row, col]} reason={final_reasons[row, col]}')
+        for c_rail in range(n_cols + 1):
+            m, c = rail_vertical[c_rail]
+            P_top = intersect_lines((m, c), bound_horizontal[0])
+            P_bot = intersect_lines((m, c), bound_horizontal[n_rows])
+            P_top_orig = transform_local_to_orig(P_top[0], P_top[1])
+            P_bot_orig = transform_local_to_orig(P_bot[0], P_bot[1])
+            pts_np = np.array([P_top_orig, P_bot_orig], dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img_snap, [pts_np], False, (180, 0, 0), V34__VISUAL_PANEL_THICKNESS)
+            cv2.polylines(img_support, [pts_np], False, (180, 0, 0), V34__VISUAL_PANEL_THICKNESS)
+            if is_single_row_small_block:
+                val_c = m * y_mid + c
+                print(f'[BLOCK7_DRAW_RAIL] index={c_rail} value={val_c:.3f} source={rail_vertical_source[c_rail]}')
+        for r_bound in range(n_rows + 1):
+            m, c = bound_horizontal[r_bound]
+            P_left = intersect_lines(rail_vertical[0], (m, c))
+            P_right = intersect_lines(rail_vertical[n_cols], (m, c))
+            P_left_orig = transform_local_to_orig(P_left[0], P_left[1])
+            P_right_orig = transform_local_to_orig(P_right[0], P_right[1])
+            cv2.line(img_snap, (int(round(P_left_orig[0])), int(round(P_left_orig[1]))), (int(round(P_right_orig[0])), int(round(P_right_orig[1]))), (255, 0, 255), 1)
+            cv2.line(img_support, (int(round(P_left_orig[0])), int(round(P_left_orig[1]))), (int(round(P_right_orig[0])), int(round(P_right_orig[1]))), (255, 0, 255), 1)
+        panels_result = []
+        for (row, col), p in grid_panels.items():
+            poly_final = final_polys[row, col]
+            source = final_sources[row, col]
+            reason = final_reasons[row, col]
+            max_overlap_iou = 0.0
+            for (other_row, other_col), other_poly in final_polys.items():
+                if (row, col) != (other_row, other_col):
+                    iou = get_iou(poly_final, other_poly)
+                    if iou > max_overlap_iou:
+                        max_overlap_iou = iou
+            TL_new, TR_new, BR_new, BL_new = V34__sort_panel_corners(poly_final)
+            cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+            cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+            poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            TL_yolo, TR_yolo, BR_yolo, BL_yolo = V34__sort_panel_corners(poly_init)
+            cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+            cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+            center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+            area_prop = cv2.contourArea(np.array(poly_final, dtype=np.float32))
+            area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+            area_ratio = area_prop / (area_yolo + 1e-06)
+            anchors = V34__get_panel_hybrid_anchors(p['orig_ref'])
+            panels_result.append({'col': col, 'row': row, 'polygon': poly_final, 'quality': 'fallback' if source == 'lower_panel_yolo_fallback' else 'pass', 'source': source, 'reason': reason, 'shift': center_shift, 'area_ratio': area_ratio, 'overlap': max_overlap_iou, 'orig_p': p['orig_ref'], 'anchors': anchors})
+        return panels_result
+    has_real_lower_grid = False
+    n_cols = len(b_local['columns'])
+    n_rows = row_count
+    grid_panels = {}
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            grid_panels[row_idx, col_idx] = p
+    y_min_local = min((p['bbox'][1] for p in b_local['panels']))
+    y_max_local = max((p['bbox'][3] for p in b_local['panels']))
+    boundaries = {}
+    rail_sources = {}
+    if n_cols == 2:
+        rail_names = ['left', 'middle', 'right']
+    else:
+        rail_names = ['left', 'right']
+    rail_yolo_pts = {name: [] for name in rail_names}
+    for col_idx in range(n_cols):
+        for row_idx in range(n_rows):
+            if (row_idx, col_idx) in grid_panels:
+                p = grid_panels[row_idx, col_idx]
+                poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+                if n_cols == 2:
+                    if col_idx == 0:
+                        rail_yolo_pts['left'].extend([TL, BL])
+                        rail_yolo_pts['middle'].extend([TR, BR])
+                    else:
+                        rail_yolo_pts['middle'].extend([TL, BL])
+                        rail_yolo_pts['right'].extend([TR, BR])
+                else:
+                    rail_yolo_pts['left'].extend([TL, BL])
+                    rail_yolo_pts['right'].extend([TR, BR])
+    direct_fits = {}
+    rail_support_pts_scanned = {}
+    for name in rail_names:
+        pts = rail_yolo_pts[name]
+        ys = [pt[1] for pt in pts]
+        xs = [pt[0] for pt in pts]
+        m_yolo, c_yolo = np.polyfit(ys, xs, 1)
+        rail_support_pts = V34__find_vertical_support_points(rotated_gray, m_yolo, c_yolo, y_min_local, y_max_local, name, block_name, transform_local_to_orig, is_lower_small_block)
+        rail_support_pts_scanned[name] = rail_support_pts
+        if len(rail_support_pts) >= 5:
+            xs_s = np.array([pt[0] for pt in rail_support_pts])
+            ys_s = np.array([pt[1] for pt in rail_support_pts])
+            res = xs_s - (m_yolo * ys_s + c_yolo)
+            med_res = np.median(res)
+            devs = np.abs(res - med_res)
+            mad = np.median(devs)
+            keep = devs <= max(2.0, 2.5 * mad)
+            xs_clean = xs_s[keep]
+            ys_clean = ys_s[keep]
+            if len(xs_clean) >= 5:
+                m_fit, c_fit = np.polyfit(ys_clean, xs_clean, 1)
+                std_res = np.std(xs_clean - (m_fit * ys_clean + c_fit))
+                angle_diff = abs(np.degrees(math.atan(m_fit) - math.atan(m_yolo)))
+                if std_res <= 2.5 and angle_diff <= 6.0:
+                    direct_fits[name] = {'m': m_fit, 'c': c_fit, 'xs_clean': xs_clean, 'ys_clean': ys_clean, 'std_res': std_res, 'coverage': len(xs_clean) / 50.0}
+                    V34__GLOBAL_SMALL_RAIL_SLOPES.append(m_fit)
+    for name in rail_names:
+        pts = rail_yolo_pts[name]
+        ys = [pt[1] for pt in pts]
+        xs = [pt[0] for pt in pts]
+        m_yolo, c_yolo = np.polyfit(ys, xs, 1)
+        n_pts = 0
+        coverage = 0.0
+        residual_std = 0.0
+        if name in direct_fits:
+            m_final = direct_fits[name]['m']
+            c_final = direct_fits[name]['c']
+            n_pts = len(direct_fits[name]['xs_clean'])
+            coverage = direct_fits[name]['coverage']
+            residual_std = direct_fits[name]['std_res']
+            if block_name == 'block_1' and name == 'left':
+                source = 'left_crop_foreground_edge'
+            elif is_lower_small_block:
+                source = 'vertical_support_line' if name == 'middle' else 'foreground_edge_line'
+            else:
+                source = 'direct_support'
+        else:
+            borrowed_m = None
+            source_borrow = 'borrowed_slope_with_local_anchor'
+            if name == 'left':
+                search_order = ['right', 'middle']
+            elif name == 'right':
+                search_order = ['left', 'middle']
+            else:
+                search_order = ['left', 'right']
+            for other_name in search_order:
+                if other_name in direct_fits:
+                    borrowed_m = direct_fits[other_name]['m']
+                    break
+            if borrowed_m is None and V34__GLOBAL_SMALL_RAIL_SLOPES:
+                borrowed_m = np.median(V34__GLOBAL_SMALL_RAIL_SLOPES)
+            if borrowed_m is None:
+                bx_min_curr = min((p['bbox'][0] for p in b_local['panels']))
+                bx_max_curr = max((p['bbox'][2] for p in b_local['panels']))
+                by_min_curr = min((p['bbox'][1] for p in b_local['panels']))
+                by_max_curr = max((p['bbox'][3] for p in b_local['panels']))
+                curr_center_x = (bx_min_curr + bx_max_curr) / 2.0
+                curr_center_y = (by_min_curr + by_max_curr) / 2.0
+                nearest_large = None
+                min_dist = float('inf')
+                for info in V34__GLOBAL_LARGE_BLOCK_INFOS:
+                    dist = math.sqrt((info['center_x'] - curr_center_x) ** 2 + (info['center_y'] - curr_center_y) ** 2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_large = info
+                if nearest_large is not None:
+                    m_orig = np.median(nearest_large['slopes'])
+                    Q_1 = transform_orig_to_local(0.0, 0.0)
+                    Q_2 = transform_orig_to_local(m_orig * 100.0, 100.0)
+                    dx_loc = Q_2[0] - Q_1[0]
+                    dy_loc = Q_2[1] - Q_1[1]
+                    if abs(dy_loc) > 1e-05:
+                        borrowed_m = dx_loc / dy_loc
+                        if is_lower_small_block:
+                            source_borrow = 'neighbor_inherit_with_local_anchor'
+                    else:
+                        borrowed_m = 0.0
+            if borrowed_m is not None:
+                m_final = borrowed_m
+                c_candidate = np.median(xs) - borrowed_m * np.median(ys)
+                local_supports = rail_support_pts_scanned.get(name, [])
+                if len(local_supports) >= 2:
+                    res = [pt[0] - (borrowed_m * pt[1] + c_candidate) for pt in local_supports]
+                    c_candidate += np.median(res)
+                c_final = c_candidate
+                source = source_borrow
+            else:
+                m_final = m_yolo
+                c_final = c_yolo
+                source = 'pure_yolo'
+        if block_name == 'block_1' and name == 'left':
+            y1 = y_min_local
+            x1 = m_final * y1 + c_final
+            x_orig_1 = transform_local_to_orig(x1, y1)[0]
+            y2 = y_max_local
+            x2 = m_final * y2 + c_final
+            x_orig_2 = transform_local_to_orig(x2, y2)[0]
+            min_x_orig = min(x_orig_1, x_orig_2)
+            if min_x_orig < 0.0:
+                Minv_0_0 = transform_local_to_orig(1.0, 0.0)[0] - transform_local_to_orig(0.0, 0.0)[0]
+                delta_c = -min_x_orig / Minv_0_0
+                c_final += delta_c
+            source = 'left_crop_image_boundary'
+        rail_pts = [(m_final * y + c_final, y) for y in np.linspace(y_min_local, y_max_local, 11)]
+        boundaries[name + '_boundary'] = rail_pts
+        rail_sources[name] = source
+        if is_lower_small_block:
+            if name in ('left', 'right'):
+                rail_draw_ok = source in ('foreground_edge_line',) and n_pts >= 5 and (residual_std <= 1.5) and (name in direct_fits and abs(np.degrees(math.atan(direct_fits[name]['m'])) - np.degrees(math.atan(m_yolo))) <= 3.0)
+                rail_draw_reason = 'ok' if rail_draw_ok else f'n={n_pts}<5 or res={residual_std:.2f}>1.5 or angle>3'
+            else:
+                rail_draw_ok = source in ('vertical_support_line', 'foreground_edge_line', 'borrowed_slope_with_local_anchor')
+                rail_draw_reason = 'ok' if rail_draw_ok else f'source={source}'
+            is_valid_rail = rail_draw_ok
+        else:
+            is_valid_rail = source in ('direct_support', 'foreground_edge', 'left_crop_foreground_edge', 'vertical_support_line', 'borrowed_slope_with_local_anchor', 'neighbor_inherit_with_local_anchor')
+            rail_draw_reason = 'ok' if is_valid_rail else f'source={source}'
+        if is_lower_small_block:
+            print(f"[SMALL_RAIL_DRAW] block={block_name} rail={name} source={source} draw={('true' if is_valid_rail else 'false')} reason={rail_draw_reason}")
+        else:
+            print(f"[SMALL_RAIL] block={block_name} rail={name} source={source} n={n_pts} coverage={coverage:.3f} residual={residual_std:.3f} draw={('true' if is_valid_rail else 'false')}")
+        if block_name == 'block_1' and name == 'left':
+            x_top = rail_pts[0][0]
+            x_bottom = rail_pts[-1][0]
+            print(f'[LEFT_EDGE_RAIL] block={block_name} source={source} x_top={x_top:.3f} x_bottom={x_bottom:.3f}')
+        if is_valid_rail:
+            rail_pts_orig = [transform_local_to_orig(pt[0], pt[1]) for pt in rail_pts]
+            pts_np = np.array(rail_pts_orig, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img_snap, [pts_np], False, (180, 0, 0), V34__VISUAL_PANEL_THICKNESS)
+    lines_dict = {}
+    support_pts_scanned = {}
+    support_stats = {}
+    priors_dict = {}
+    for r in range(n_rows + 1):
+        for col_idx in range(n_cols):
+            if r == 0:
+                p = grid_panels[0, col_idx]
+                poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+                P1, P2 = (TL, TR)
+            elif r == n_rows:
+                p = grid_panels[n_rows - 1, col_idx]
+                poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+                P1, P2 = (BL, BR)
+            else:
+                p_prev = grid_panels[r - 1, col_idx]
+                p_curr = grid_panels[r, col_idx]
+                poly_prev = V34__get_local_yolo_polygon_prior(p_prev['orig_ref'], transform_orig_to_local)
+                poly_curr = V34__get_local_yolo_polygon_prior(p_curr['orig_ref'], transform_orig_to_local)
+                TL_prev, TR_prev, BR_prev, BL_prev = V34__sort_panel_corners(poly_prev)
+                TL_curr, TR_curr, BR_curr, BL_curr = V34__sort_panel_corners(poly_curr)
+                P1 = ((BL_prev[0] + TL_curr[0]) / 2.0, (BL_prev[1] + TL_curr[1]) / 2.0)
+                P2 = ((BR_prev[0] + TR_curr[0]) / 2.0, (BR_prev[1] + TR_curr[1]) / 2.0)
+            m_prior, c_prior = np.polyfit([P1[0], P2[0]], [P1[1], P2[1]], 1)
+            P_mid = ((P1[0] + P2[0]) / 2.0, (P1[1] + P2[1]) / 2.0)
+            priors_dict[r, col_idx] = {'m': m_prior, 'c': c_prior, 'P_mid': P_mid}
+    prior_pitches = []
+    for col_idx in range(n_cols):
+        for r in range(n_rows):
+            y_r = priors_dict[r, col_idx]['P_mid'][1]
+            y_r1 = priors_dict[r + 1, col_idx]['P_mid'][1]
+            prior_pitches.append(abs(y_r1 - y_r))
+    median_pitch = np.median(prior_pitches) if prior_pitches else 40.0
+
+    def enforce_line_constraints(r, col_idx, m_val, c_val, src_name):
+        P_mid = priors_dict[r, col_idx]['P_mid']
+        m_prior = priors_dict[r, col_idx]['m']
+        c_prior = priors_dict[r, col_idx]['c']
+        y_center = m_val * P_mid[0] + c_val
+        shift = y_center - P_mid[1]
+        if is_lower_small_block:
+            max_shift = min(3.0, 0.18 * median_pitch)
+        else:
+            max_shift = min(4.0, 0.18 * median_pitch)
+        was_clamped = False
+        if abs(shift) > max_shift:
+            clamped_shift = max(-max_shift, min(max_shift, shift))
+            y_center = P_mid[1] + clamped_shift
+            was_clamped = True
+        pitch_ok = True
+        if r > 0 and (r - 1, col_idx) in lines_dict:
+            y_prev = lines_dict[r - 1, col_idx]['support_line_m'] * P_mid[0] + lines_dict[r - 1, col_idx]['support_line_c']
+            pitch_val = y_center - y_prev
+            min_p = 0.75 * median_pitch
+            max_p = 1.25 * median_pitch
+            if not min_p <= pitch_val <= max_p:
+                pitch_ok = False
+                clamped_pitch = max(min_p, min(max_p, pitch_val))
+                y_center = y_prev + clamped_pitch
+                was_clamped = True
+        offsets = []
+        if r > 0 and (r - 1, col_idx) in lines_dict:
+            info_prev = lines_dict[r - 1, col_idx]
+            if info_prev['source'] in ('small_support_points_line', 'small_borrow_neighbor_line', 'small_neighbor_inherit', 'small_pitch_clamped_support'):
+                y_center_prev = info_prev['support_line_m'] * priors_dict[r - 1, col_idx]['P_mid'][0] + info_prev['support_line_c']
+                dy_prev = y_center_prev - priors_dict[r - 1, col_idx]['P_mid'][1]
+                offsets.append(dy_prev)
+        if offsets:
+            dy_neighbor_median = np.median(offsets)
+            dy_curr = y_center - P_mid[1]
+            if abs(dy_curr - dy_neighbor_median) > 2.0:
+                dy_clamped = max(dy_neighbor_median - 2.0, min(dy_neighbor_median + 2.0, dy_curr))
+                y_center = P_mid[1] + dy_clamped
+                was_clamped = True
+        c_final = y_center - m_val * P_mid[0]
+        final_src = 'small_pitch_clamped_support' if was_clamped else src_name
+        return (m_val, c_final, final_src, pitch_ok)
+
+    def detect_horizontal_boundary_points(mode, r, col_idx):
+        m_prior = priors_dict[r, col_idx]['m']
+        c_prior = priors_dict[r, col_idx]['c']
+        P_mid = priors_dict[r, col_idx]['P_mid']
+        P1 = (P_mid[0] - 20, m_prior * (P_mid[0] - 20) + c_prior)
+        left_rail = boundaries['left_boundary'] if col_idx == 0 else boundaries['middle_boundary']
+        right_rail = boundaries['middle_boundary'] if col_idx == 0 and n_cols == 2 else boundaries['right_boundary']
+        xL_pt = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+        xL = xL_pt[0] if xL_pt is not None else V34__get_boundary_x_at_y(left_rail, P1[1])
+        xR_pt = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+        xR = xR_pt[0] if xR_pt is not None else V34__get_boundary_x_at_y(right_rail, P1[1])
+        sample_xs = np.arange(int(round(xL)) + 2, int(round(xR)) - 2)
+        if len(sample_xs) < 10:
+            sample_xs = np.linspace(xL + 2, xR - 2, 20)
+        pts_scanned = []
+        raw = 0
+        kept = 0
+        rejected_ground = 0
+        for sx in sample_xs:
+            if sx < xL + 4 or sx > xR - 4:
+                rejected_ground += 1
+                continue
+            y_prior = m_prior * sx + c_prior
+            best_cand_y = None
+            best_dy = None
+            best_score = 999999.0
+            raw += 1
+            for dy in range(-7, 8):
+                y = y_prior + dy
+                y_idx = int(round(y))
+                x_idx = int(round(sx))
+                if not (5 <= y_idx < rotated_gray.shape[0] - 5 and 0 <= x_idx < rotated_gray.shape[1]):
+                    continue
+                center_val = float(rotated_gray[y_idx, x_idx])
+                band_above = [float(rotated_gray[int(round(y - k)), x_idx]) for k in (2, 3, 4, 5)]
+                band_below = [float(rotated_gray[int(round(y + k)), x_idx]) for k in (2, 3, 4, 5)]
+                above_warm_count = sum((1 for v in band_above if v >= 135))
+                below_warm_count = sum((1 for v in band_below if v >= 135))
+                median_above = float(np.median(band_above))
+                median_below = float(np.median(band_below))
+                local_dark = center_val <= min(median_above, median_below) - 8
+                dark_abs = center_val <= 145
+                accepted = False
+                score = 999999.0
+                if mode == 'inner_valley':
+                    if above_warm_count >= 2 and below_warm_count >= 2 and (local_dark or dark_abs) and (abs(dy) <= 5):
+                        accepted = True
+                        score = center_val - 0.25 * (median_above + median_below) + 2.0 * abs(dy)
+                elif mode == 'top_outer_edge':
+                    if below_warm_count >= 3 and (center_val <= median_below - 6 or dark_abs) and (abs(dy) <= 4) and (dy >= -4):
+                        accepted = True
+                        if above_warm_count >= 2:
+                            score = center_val - 0.25 * (median_above + median_below) + 2.0 * abs(dy)
+                        else:
+                            score = center_val - 0.5 * median_below + 2.0 * abs(dy)
+                elif mode == 'bottom_outer_edge':
+                    if above_warm_count >= 3 and (center_val <= median_above - 6 or dark_abs) and (abs(dy) <= 4) and (dy <= 4):
+                        accepted = True
+                        if below_warm_count >= 2:
+                            score = center_val - 0.25 * (median_above + median_below) + 2.0 * abs(dy)
+                        else:
+                            score = center_val - 0.5 * median_above + 2.0 * abs(dy)
+                if accepted:
+                    if score < best_score:
+                        best_score = score
+                        best_cand_y = y
+                        best_dy = dy
+            if best_cand_y is not None:
+                kept += 1
+                pts_scanned.append((sx, best_cand_y))
+                if V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG is not None:
+                    cx_orig, cy_orig = transform_local_to_orig(sx, best_cand_y)
+                    cv2.circle(V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, (int(round(cx_orig)), int(round(cy_orig))), 2, (255, 255, 0), -1)
+        print(f"[LOWER_DARK_GROOVE] block={block_name} r={r} col={col_idx} raw={raw} kept={kept} mode={mode} accepted={('true' if kept >= 5 else 'false')}")
+        stats = {'sample_n': len(sample_xs), 'raw_pts': raw, 'kept_pts': kept, 'rejected_ground': rejected_ground, 'rejected_shift': raw - kept, 'rejected_warmth': 0, 'rejected_dark': 0, 'rejected_samples': []}
+        return (pts_scanned, stats)
+    if False:
+        for r in (0, 1):
+            for col_idx in range(n_cols):
+                m_prior = priors_dict[r, col_idx]['m']
+                c_prior = priors_dict[r, col_idx]['c']
+                P_mid = priors_dict[r, col_idx]['P_mid']
+                left_rail = boundaries['left_boundary'] if col_idx == 0 else boundaries['middle_boundary']
+                right_rail = boundaries['middle_boundary'] if col_idx == 0 and n_cols == 2 else boundaries['right_boundary']
+                P1 = (P_mid[0] - 20, m_prior * (P_mid[0] - 20) + c_prior)
+                xL_pt = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+                xL = xL_pt[0] if xL_pt is not None else V34__get_boundary_x_at_y(left_rail, P1[1])
+                xR_pt = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+                xR = xR_pt[0] if xR_pt is not None else V34__get_boundary_x_at_y(right_rail, P1[1])
+                mode = 'top_outer_edge' if r == 0 else 'bottom_outer_edge'
+                pts_scanned, stats = detect_horizontal_boundary_points(mode, r, col_idx)
+                support_pts_scanned[r, col_idx] = pts_scanned
+                support_stats[r, col_idx] = stats
+                accepted_fit = False
+                reason_fit = 'too_few_raw_pts'
+                m_fit2, c_fit2 = (m_prior, c_prior)
+                xs_clean = np.array([])
+                ys_clean = np.array([])
+                coverage = 0.0
+                residual_std = 0.0
+                angle_diff = 0.0
+                center_shift = 0.0
+                n_clean = 0
+                kept = stats['kept_pts']
+                if kept >= 5:
+                    xs_h = np.array([pt[0] for pt in pts_scanned])
+                    ys_h = np.array([pt[1] for pt in pts_scanned])
+                    try:
+                        m_fit1, c_fit1 = np.polyfit(xs_h, ys_h, 1)
+                        res = ys_h - (m_fit1 * xs_h + c_fit1)
+                        med_res = np.median(res)
+                        devs = np.abs(res - med_res)
+                        mad = np.median(devs)
+                        threshold = max(1.5, 2.5 * mad)
+                        keep = devs <= threshold
+                        xs_clean = xs_h[keep]
+                        ys_clean = ys_h[keep]
+                        n_clean = len(xs_clean)
+                        if n_clean >= 5:
+                            m_fit2, c_fit2 = np.polyfit(xs_clean, ys_clean, 1)
+                            res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                            residual_std = float(np.std(res_fit2))
+                            bins = np.linspace(xL, xR, 9)
+                            bin_indices = np.digitize(xs_clean, bins) - 1
+                            unique_bins = np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])
+                            coverage = float(len(unique_bins) / 8.0)
+                            angle_fit = np.degrees(math.atan(m_fit2))
+                            angle_prior = np.degrees(math.atan(m_prior))
+                            angle_diff = abs(angle_fit - angle_prior)
+                            while angle_diff > 90:
+                                angle_diff = abs(angle_diff - 180)
+                            center_shift = float(m_fit2 * P_mid[0] + c_fit2 - P_mid[1])
+                            if coverage < 0.25:
+                                reason_fit = f'coverage_{coverage:.3f}<0.25'
+                            elif residual_std > 2.0:
+                                reason_fit = f'residual_std_{residual_std:.3f}>2.0'
+                            elif angle_diff > 5.0:
+                                reason_fit = f'angle_diff_{angle_diff:.3f}>5.0'
+                            elif abs(center_shift) > 6.0:
+                                reason_fit = f'center_shift_{center_shift:.3f}>6.0'
+                            else:
+                                accepted_fit = True
+                                reason_fit = 'valid_fit'
+                        else:
+                            reason_fit = f'n_clean_{n_clean}<5'
+                    except Exception as e:
+                        reason_fit = f'fit_error_{str(e)}'
+                print(f"[LOWER_DARK_FIT] block={block_name} r={r} col={col_idx} source={('small_lower_dark_groove_line' if accepted_fit else 'single_row_outer_edge_borrow')} n_clean={n_clean} coverage={coverage:.3f} residual={residual_std:.3f} angle={angle_diff:.3f} shift={center_shift:.3f} accepted={('true' if accepted_fit else 'false')} reason={reason_fit}")
+                if accepted_fit:
+                    lines_dict[r, col_idx] = {'support_line_m': float(m_fit2), 'support_line_c': float(c_fit2), 'source': 'small_lower_dark_groove_line', 'clean_pts': [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)], 'coverage': coverage, 'residual': residual_std, 'angle_diff': angle_diff, 'n_pts': n_clean, 'center_shift': center_shift, 'pitch_ok': True}
+        for r in (0, 1):
+            for col_idx in range(n_cols):
+                if (r, col_idx) not in lines_dict:
+                    r_other = 1 - r
+                    m_fallback = priors_dict[r, col_idx]['m']
+                    if (r_other, col_idx) in lines_dict and lines_dict[r_other, col_idx]['source'] == 'small_lower_dark_groove_line':
+                        m_fallback = lines_dict[r_other, col_idx]['support_line_m']
+                    c_fallback = priors_dict[r, col_idx]['P_mid'][1] - m_fallback * priors_dict[r, col_idx]['P_mid'][0]
+                    lines_dict[r, col_idx] = {'support_line_m': float(m_fallback), 'support_line_c': float(c_fallback), 'source': 'single_row_outer_edge_borrow', 'clean_pts': support_pts_scanned[r, col_idx], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': len(support_pts_scanned[r, col_idx]), 'center_shift': 0.0, 'pitch_ok': True}
+    else:
+        win = 4
+        for r in range(n_rows + 1):
+            for col_idx in range(n_cols):
+                m_prior = priors_dict[r, col_idx]['m']
+                c_prior = priors_dict[r, col_idx]['c']
+                P_mid = priors_dict[r, col_idx]['P_mid']
+                P1 = (P_mid[0] - 20, m_prior * (P_mid[0] - 20) + c_prior)
+                left_rail = boundaries['left_boundary'] if col_idx == 0 else boundaries['middle_boundary']
+                right_rail = boundaries['middle_boundary'] if col_idx == 0 and n_cols == 2 else boundaries['right_boundary']
+                xL_pt = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+                xL = xL_pt[0] if xL_pt is not None else V34__get_boundary_x_at_y(left_rail, P1[1])
+                xR_pt = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+                xR = xR_pt[0] if xR_pt is not None else V34__get_boundary_x_at_y(right_rail, P1[1])
+                sample_xs = np.arange(int(round(xL)) + 2, int(round(xR)) - 2)
+                if len(sample_xs) < 10:
+                    sample_xs = np.linspace(xL + 2, xR - 2, 20)
+                length_p = math.sqrt(1.0 + m_prior ** 2)
+                nx = -m_prior / length_p
+                ny = 1.0 / length_p
+                pts_scanned = []
+                raw = 0
+                kept = 0
+                rejected_ground = 0
+                rejected_shift = 0
+                rejected_warmth = 0
+                rejected_dark = 0
+                rejected_samples = []
+                if is_lower_small_block:
+                    if r == 0:
+                        mode = 'top_outer_edge'
+                    elif r == n_rows:
+                        mode = 'bottom_outer_edge'
+                    else:
+                        mode = 'inner_valley'
+                    print(f'[LOWER_BOUNDARY_MODE] block={block_name} r={r} col={col_idx} mode={mode}')
+                    pts_scanned, stats = detect_horizontal_boundary_points(mode, r, col_idx)
+                    raw = stats['raw_pts']
+                    kept = stats['kept_pts']
+                    rejected_ground = stats['rejected_ground']
+                    rejected_shift = stats['rejected_shift']
+                    rejected_warmth = stats['rejected_warmth']
+                    rejected_dark = stats['rejected_dark']
+                    rejected_samples = stats['rejected_samples']
+                    support_pts_scanned[r, col_idx] = pts_scanned
+                    support_stats[r, col_idx] = stats
+                    print(f'[SMALL_SUPPORT_FILTER] block={block_name} r={r} col={col_idx} raw={raw} kept={kept} rejected_ground={rejected_ground} rejected_shift={rejected_shift}')
+                else:
+                    mode = 'standard'
+                    for sx in sample_xs:
+                        sy_est = m_prior * sx + c_prior
+                        profile = []
+                        for d in range(-win, win + 1):
+                            px = sx + d * nx
+                            py = sy_est + d * ny
+                            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+                            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+                            profile.append(rotated_gray[y_idx, x_idx])
+                        if len(profile) < 3:
+                            continue
+                        candidates = []
+                        for idx in range(1, len(profile) - 1):
+                            if profile[idx] < profile[idx - 1] and profile[idx] < profile[idx + 1]:
+                                left_peak = np.max(profile[:idx])
+                                right_peak = np.max(profile[idx + 1:])
+                                contrast = min(left_peak, right_peak) - profile[idx]
+                                if (profile[idx] < 135 or contrast >= 8) and profile[idx] < 155:
+                                    dist = abs(idx - win)
+                                    candidates.append((dist, idx, 'valley'))
+                        if r == 0:
+                            _prof_i16 = np.array(profile, dtype=np.int16)
+                            gradients = [int(_prof_i16[i + 1]) - int(_prof_i16[i]) for i in range(len(_prof_i16) - 1)]
+                            max_grad_idx = np.argmax(gradients)
+                            if gradients[max_grad_idx] >= 12:
+                                candidates.append((abs(max_grad_idx - win), max_grad_idx, 'edge'))
+                        elif r == n_rows:
+                            _prof_i16 = np.array(profile, dtype=np.int16)
+                            gradients = [int(_prof_i16[i + 1]) - int(_prof_i16[i]) for i in range(len(_prof_i16) - 1)]
+                            min_grad_idx = np.argmin(gradients)
+                            if gradients[min_grad_idx] <= -12:
+                                candidates.append((abs(min_grad_idx - win), min_grad_idx, 'edge'))
+                        if candidates:
+                            raw += 1
+                            candidates.sort(key=lambda item: item[0])
+                            best_dist, best_idx, c_type = candidates[0]
+                            if (r == 0 or r == n_rows) and best_dist > 4:
+                                rejected_shift += 1
+                                continue
+                            px_val = sx + (best_idx - win) * nx
+                            py_val = sy_est + (best_idx - win) * ny
+                            pts_scanned.append((px_val, py_val))
+                            kept += 1
+                    support_pts_scanned[r, col_idx] = pts_scanned
+                if is_lower_small_block:
+                    support_stats[r, col_idx] = {'sample_n': len(sample_xs), 'raw_pts': raw, 'kept_pts': kept, 'rejected_ground': rejected_ground, 'rejected_shift': rejected_shift, 'rejected_warmth': rejected_warmth, 'rejected_dark': rejected_dark, 'rejected_samples': rejected_samples}
+                    print(f'[SMALL_SUPPORT_FILTER] block={block_name} r={r} col={col_idx} raw={raw} kept={kept} rejected_ground={rejected_ground} rejected_shift={rejected_shift}')
+                if is_lower_small_block:
+                    n_raw = len(pts_scanned)
+                    accepted = False
+                    reason = 'too_few_raw_pts'
+                    m_fit2 = m_prior
+                    c_fit2 = c_prior
+                    xs_clean = np.array([])
+                    ys_clean = np.array([])
+                    coverage = 0.0
+                    residual_std = 0.0
+                    angle_diff = 0.0
+                    center_shift = 0.0
+                    n_clean = 0
+                    if n_raw >= 5:
+                        xs_h = np.array([pt[0] for pt in pts_scanned])
+                        ys_h = np.array([pt[1] for pt in pts_scanned])
+                        try:
+                            m_fit1, c_fit1 = np.polyfit(xs_h, ys_h, 1)
+                            res = ys_h - (m_fit1 * xs_h + c_fit1)
+                            med_res = np.median(res)
+                            devs = np.abs(res - med_res)
+                            mad = np.median(devs)
+                            threshold = max(1.5, 2.5 * mad)
+                            keep = devs <= threshold
+                            xs_clean = xs_h[keep]
+                            ys_clean = ys_h[keep]
+                            n_clean = len(xs_clean)
+                            if n_clean >= 5:
+                                m_fit2, c_fit2 = np.polyfit(xs_clean, ys_clean, 1)
+                                res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                                residual_std = float(np.std(res_fit2))
+                                bins = np.linspace(xL, xR, 9)
+                                bin_indices = np.digitize(xs_clean, bins) - 1
+                                unique_bins = np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])
+                                coverage = float(len(unique_bins) / 8.0)
+                                angle_fit = np.degrees(math.atan(m_fit2))
+                                angle_prior = np.degrees(math.atan(m_prior))
+                                angle_diff = abs(angle_fit - angle_prior)
+                                while angle_diff > 90:
+                                    angle_diff = abs(angle_diff - 180)
+                                center_shift = float(m_fit2 * P_mid[0] + c_fit2 - P_mid[1])
+                                if coverage < 0.25:
+                                    reason = f'coverage_{coverage:.3f}<0.25'
+                                elif residual_std > 2.0:
+                                    reason = f'residual_std_{residual_std:.3f}>2.0'
+                                elif angle_diff > 5.0:
+                                    reason = f'angle_diff_{angle_diff:.3f}>5.0'
+                                elif abs(center_shift) > 6.0:
+                                    reason = f'center_shift_{center_shift:.3f}>6.0'
+                                else:
+                                    accepted = True
+                                    reason = 'valid_fit'
+                            else:
+                                reason = f'n_clean_{n_clean}<5'
+                        except Exception as e:
+                            reason = f'fit_error_{str(e)}'
+                    print(f"[LOWER_DARK_FIT] block={block_name} r={r} col={col_idx} source={('small_lower_dark_groove_line' if accepted else 'failed')} n_clean={n_clean} coverage={coverage:.3f} residual={residual_std:.3f} angle={angle_diff:.3f} shift={center_shift:.3f} accepted={('true' if accepted else 'false')} reason={reason}")
+                    if accepted:
+                        lines_dict[r, col_idx] = {'support_line_m': float(m_fit2), 'support_line_c': float(c_fit2), 'source': 'small_lower_dark_groove_line', 'clean_pts': [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)], 'coverage': coverage, 'residual': residual_std, 'angle_diff': angle_diff, 'n_pts': n_clean, 'center_shift': center_shift, 'pitch_ok': True}
+                else:
+                    n_min_pts = max(5, int(round(0.35 * len(sample_xs))))
+                    fit_ok = len(pts_scanned) >= n_min_pts
+                    if fit_ok:
+                        xs_h = np.array([pt[0] for pt in pts_scanned])
+                        ys_h = np.array([pt[1] for pt in pts_scanned])
+                        m_fit, c_fit = np.polyfit(xs_h, ys_h, 1)
+                        res = ys_h - (m_fit * xs_h + c_fit)
+                        med_res = np.median(res)
+                        devs = np.abs(res - med_res)
+                        mad = np.median(devs)
+                        keep = devs <= max(1.5, 2.0 * mad)
+                        xs_clean = xs_h[keep]
+                        ys_clean = ys_h[keep]
+                        fit_ok_2 = len(xs_clean) >= n_min_pts
+                        if fit_ok_2:
+                            m_fit2, c_fit2 = np.polyfit(xs_clean, ys_clean, 1)
+                            res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                            residual_std = np.std(res_fit2)
+                            bins = np.linspace(xL, xR, 9)
+                            bin_indices = np.digitize(xs_clean, bins) - 1
+                            unique_bins = np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])
+                            coverage = len(unique_bins) / 8.0
+                            angle_fit = np.degrees(math.atan(m_fit2))
+                            angle_prior = np.degrees(math.atan(m_prior))
+                            angle_diff = abs(angle_fit - angle_prior)
+                            while angle_diff > 90:
+                                angle_diff = abs(angle_diff - 180)
+                            source_fit = 'small_support_points_line'
+                            _angle_clamp = 2.5
+                            if angle_diff > _angle_clamp:
+                                m_fit2 = m_prior
+                                c_fit2 = float(np.median(ys_clean - m_prior * xs_clean))
+                                res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                                residual_std = np.std(res_fit2)
+                                angle_diff = 0.0
+                                source_fit = 'small_pitch_clamped_support'
+                            accept = coverage >= 0.3 and residual_std <= 2.0 and (angle_diff <= 2.5)
+                            if accept:
+                                m_final, c_final, source, pitch_ok = enforce_line_constraints(r, col_idx, m_fit2, c_fit2, source_fit)
+                                center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                                lines_dict[r, col_idx] = {'support_line_m': float(m_final), 'support_line_c': float(c_final), 'source': source, 'clean_pts': [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)], 'coverage': coverage, 'residual': residual_std, 'angle_diff': angle_diff, 'n_pts': len(xs_clean), 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                                _clamp_str = 'yes' if source == 'small_pitch_clamped_support' else 'no'
+                                print(f'[SMALL_LINE_REG] block={block_name} r={r} col={col_idx} source={source} n={len(xs_clean)} cov={coverage:.3f} res={residual_std:.3f} angle={angle_diff:.3f} clamp={_clamp_str}')
+        if n_cols == 2:
+            for r in range(n_rows + 1):
+                if (r, 0) in lines_dict and (r, 1) not in lines_dict:
+                    m_borrow = lines_dict[r, 0]['support_line_m']
+                    P_mid = priors_dict[r, 1]['P_mid']
+                    c_borrow = P_mid[1] - m_borrow * P_mid[0]
+                    n_support = len(support_pts_scanned[r, 1])
+                    delta = 0.0
+                    if n_support >= 3:
+                        xs_s = np.array([pt[0] for pt in support_pts_scanned[r, 1]])
+                        ys_s = np.array([pt[1] for pt in support_pts_scanned[r, 1]])
+                        res = ys_s - (m_borrow * xs_s + c_borrow)
+                        delta = float(np.median(res))
+                        delta = max(-1.25, min(1.25, delta))
+                        c_borrow += delta
+                    m_final, c_final, source, pitch_ok = enforce_line_constraints(r, 1, m_borrow, c_borrow, 'small_borrow_neighbor_line')
+                    center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                    lines_dict[r, 1] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': source, 'clean_pts': support_pts_scanned[r, 1] if n_support >= 3 else [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                    print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col=1 source={source} n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+                elif (r, 1) in lines_dict and (r, 0) not in lines_dict:
+                    m_borrow = lines_dict[r, 1]['support_line_m']
+                    P_mid = priors_dict[r, 0]['P_mid']
+                    c_borrow = P_mid[1] - m_borrow * P_mid[0]
+                    n_support = len(support_pts_scanned[r, 0])
+                    delta = 0.0
+                    if n_support >= 3:
+                        xs_s = np.array([pt[0] for pt in support_pts_scanned[r, 0]])
+                        ys_s = np.array([pt[1] for pt in support_pts_scanned[r, 0]])
+                        res = ys_s - (m_borrow * xs_s + c_borrow)
+                        delta = float(np.median(res))
+                        delta = max(-1.25, min(1.25, delta))
+                        c_borrow += delta
+                    m_final, c_final, source, pitch_ok = enforce_line_constraints(r, 0, m_borrow, c_borrow, 'small_borrow_neighbor_line')
+                    center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                    lines_dict[r, 0] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': source, 'clean_pts': support_pts_scanned[r, 0] if n_support >= 3 else [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                    print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col=0 source={source} n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+        for r in range(n_rows + 1):
+            for col_idx in range(n_cols):
+                if (r, col_idx) not in lines_dict:
+                    inherited = False
+                    for dr in [-1, 1, -2, 2, -3, 3]:
+                        neighbor_r = r + dr
+                        if 0 <= neighbor_r <= n_rows:
+                            found_m = None
+                            found_from_r = neighbor_r
+                            for c_cand in range(n_cols):
+                                if (neighbor_r, c_cand) in lines_dict:
+                                    info = lines_dict[neighbor_r, c_cand]
+                                    if info['source'] in ('small_support_points_line', 'small_borrow_neighbor_line', 'small_pitch_clamped_support'):
+                                        found_m = info['support_line_m']
+                                        break
+                            if found_m is not None:
+                                P_mid = priors_dict[r, col_idx]['P_mid']
+                                c_inherit = P_mid[1] - found_m * P_mid[0]
+                                n_support = len(support_pts_scanned[r, col_idx])
+                                delta = 0.0
+                                if n_support >= 3:
+                                    xs_s = np.array([pt[0] for pt in support_pts_scanned[r, col_idx]])
+                                    ys_s = np.array([pt[1] for pt in support_pts_scanned[r, col_idx]])
+                                    res = ys_s - (found_m * xs_s + c_inherit)
+                                    delta = float(np.median(res))
+                                    delta = max(-1.25, min(1.25, delta))
+                                    c_inherit += delta
+                                m_final, c_final, source, pitch_ok = enforce_line_constraints(r, col_idx, found_m, c_inherit, 'small_neighbor_inherit')
+                                center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                                lines_dict[r, col_idx] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': source, 'clean_pts': support_pts_scanned[r, col_idx] if n_support >= 3 else [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                                print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source={source} n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+                                inherited = True
+                                break
+                    if not inherited:
+                        m_fallback = priors_dict[r, col_idx]['m']
+                        c_candidate = priors_dict[r, col_idx]['c']
+                        P_mid = priors_dict[r, col_idx]['P_mid']
+                        n_support = len(support_pts_scanned[r, col_idx])
+                        if n_support >= 3:
+                            xs_s = np.array([pt[0] for pt in support_pts_scanned[r, col_idx]])
+                            ys_s = np.array([pt[1] for pt in support_pts_scanned[r, col_idx]])
+                            c_candidate = float(np.median(ys_s - m_fallback * xs_s))
+                        m_final, c_final, source, pitch_ok = enforce_line_constraints(r, col_idx, m_fallback, c_candidate, 'small_pitch_clamped_support')
+                        center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                        lines_dict[r, col_idx] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': 'small_pitch_clamped_support', 'clean_pts': support_pts_scanned[r, col_idx], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                        print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source=small_pitch_clamped_support n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+        if is_lower_small_block:
+            for col_idx in range(n_cols):
+                r0_weak = True
+                if (0, col_idx) in lines_dict:
+                    g0 = lines_dict[0, col_idx]
+                    if g0['source'] in ('small_support_points_line', 'small_borrow_neighbor_line') and g0.get('n_pts', 0) >= 3:
+                        r0_weak = False
+                if r0_weak:
+                    if (1, col_idx) in lines_dict:
+                        g1 = lines_dict[1, col_idx]
+                        if g1['source'] in ('small_support_points_line', 'small_borrow_neighbor_line'):
+                            m_extrap = g1['support_line_m']
+                            P_mid_0 = priors_dict[0, col_idx]['P_mid']
+                            c_extrap = g1['support_line_c'] - median_pitch
+                            m_final, c_final, source, pitch_ok = enforce_line_constraints(0, col_idx, m_extrap, c_extrap, 'small_pitch_clamped_support')
+                            center_shift = abs(m_final * P_mid_0[0] + c_final - P_mid_0[1])
+                            lines_dict[0, col_idx] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': 'small_pitch_clamped_support', 'clean_pts': [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': 0, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                            print(f'[SMALL_SUPPORT_LINE] block={block_name} r=0 col={col_idx} source=small_pitch_clamped_support n=0 coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+        if is_lower_small_block and n_rows > 1:
+            real_slopes = [lines_dict[r, ci]['support_line_m'] for r in range(n_rows + 1) for ci in range(n_cols) if (r, ci) in lines_dict and lines_dict[r, ci]['source'] == 'small_support_points_line']
+            if len(real_slopes) >= 2:
+                med_slope_block = float(np.median(real_slopes))
+                for r in range(n_rows + 1):
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict:
+                            info = lines_dict[r, ci]
+                            if info['source'] == 'small_support_points_line':
+                                cur_angle = np.degrees(math.atan(info['support_line_m']))
+                                med_angle = np.degrees(math.atan(med_slope_block))
+                                if abs(cur_angle - med_angle) > 1.5:
+                                    P_mid = priors_dict[r, ci]['P_mid']
+                                    y_at_mid = info['support_line_m'] * P_mid[0] + info['support_line_c']
+                                    c_reg = y_at_mid - med_slope_block * P_mid[0]
+                                    lines_dict[r, ci]['support_line_m'] = med_slope_block
+                                    lines_dict[r, ci]['support_line_c'] = c_reg
+                                    lines_dict[r, ci]['source'] = 'small_regularized_support_line'
+        if is_lower_small_block and n_rows > 1:
+            _REAL = ('small_lower_dark_groove_line', 'small_lower_support_points_line', 'small_regularized_support_line')
+            _x_center_col = {}
+            for ci in range(n_cols):
+                _lr = boundaries['left_boundary'] if ci == 0 else boundaries['middle_boundary']
+                _rr = boundaries['middle_boundary'] if ci == 0 and n_cols == 2 else boundaries['right_boundary']
+                _ys = (y_min_local + y_max_local) / 2.0
+                _x_center_col[ci] = (V34__get_boundary_x_at_y(_lr, _ys) + V34__get_boundary_x_at_y(_rr, _ys)) / 2.0
+            if n_rows > 1:
+                _real_ms = []
+                for r in range(n_rows + 1):
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict and lines_dict[r, ci]['source'] in _REAL:
+                            _info = lines_dict[r, ci]
+                            if _info.get('n_pts', 0) >= 3:
+                                _real_ms.append(_info['support_line_m'])
+                if not _real_ms:
+                    m_block = priors_dict[0, 0]['m']
+                else:
+                    m_block = float(np.median(_real_ms))
+                _y_evidence = {}
+                for r in range(n_rows + 1):
+                    _y_evidence[r] = []
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict and lines_dict[r, ci]['source'] in _REAL:
+                            _info = lines_dict[r, ci]
+                            if _info.get('n_pts', 0) >= 3:
+                                _xc = _x_center_col[ci]
+                                _y_evidence[r].append(_info['support_line_m'] * _xc + _info['support_line_c'])
+                y_row = {}
+                for r in range(n_rows + 1):
+                    if _y_evidence[r]:
+                        y_row[r] = float(np.median(_y_evidence[r]))
+                _sorted_real_r = sorted(y_row.keys())
+                _pitches_real = [y_row[_sorted_real_r[i + 1]] - y_row[_sorted_real_r[i]] for i in range(len(_sorted_real_r) - 1) if y_row[_sorted_real_r[i + 1]] > y_row[_sorted_real_r[i]]]
+                _med_pitch = float(np.median(_pitches_real)) if _pitches_real else median_pitch
+                _n_real_rows = len(_pitches_real) + 1 if _pitches_real else 0
+                _real_evidence = sum((len(v) for v in _y_evidence.values()))
+                has_real_lower_grid = _n_real_rows >= 1 and _real_evidence >= 3
+                for r in range(n_rows + 1):
+                    if r not in y_row:
+                        for delta in range(1, n_rows + 2):
+                            if r - delta in y_row:
+                                y_row[r] = y_row[r - delta] + _med_pitch * delta
+                                break
+                            if r + delta in y_row:
+                                y_row[r] = y_row[r + delta] - _med_pitch * delta
+                                break
+                        else:
+                            y_row[r] = priors_dict[r, 0]['P_mid'][1]
+                for r in range(n_rows):
+                    _p = y_row[r + 1] - y_row[r]
+                    if not 0.75 * _med_pitch <= _p <= 1.25 * _med_pitch:
+                        y_row[r + 1] = y_row[r] + _med_pitch
+                grid_source = 'small_block_grid_line' if has_real_lower_grid else 'small_prior_grid_line'
+                for r in range(n_rows + 1):
+                    for ci in range(n_cols):
+                        _xc = _x_center_col[ci]
+                        c_grid = y_row[r] - m_block * _xc
+                        old_src = lines_dict[r, ci]['source'] if (r, ci) in lines_dict else 'missing'
+                        _npts = lines_dict[r, ci].get('n_pts', 0) if (r, ci) in lines_dict else 0
+                        if old_src != grid_source:
+                            print(f'[SMALL_RAW_SUPPRESSED] block={block_name} r={r} col={ci} old_source={old_src} reason=block_grid_line_only')
+                        stats = support_stats.get((r, ci), {'sample_n': 0, 'raw_pts': 0, 'kept_pts': 0, 'rejected_ground': 0, 'rejected_shift': 0, 'rejected_warmth': 0, 'rejected_dark': 0, 'rejected_samples': []})
+                        print(f"[LOWER_SUPPORT_STATS] block={block_name} r={r} col={ci} sample_n={stats['sample_n']} raw_pts={stats['raw_pts']} kept_pts={stats['kept_pts']} rejected_ground={stats['rejected_ground']} rejected_shift={stats['rejected_shift']} rejected_warmth={stats['rejected_warmth']} rejected_dark={stats['rejected_dark']} source={old_src}")
+                        _max_dist = 3 if r == 0 or r == n_rows else 5
+                        _warmth_thresh = 135
+                        print(f"[LOWER_SUPPORT_REASON] block={block_name} r={r} col={ci} kept={stats['kept_pts']} reject_shift={stats['rejected_shift']} reject_warmth={stats['rejected_warmth']} reject_ground={stats['rejected_ground']} max_dist={_max_dist} warmth_threshold={_warmth_thresh}")
+                        if stats['kept_pts'] == 0 and stats['raw_pts'] > 0:
+                            for sample in stats.get('rejected_samples', [])[:5]:
+                                print(f"[LOWER_REJECT_SAMPLE] block={block_name} r={r} col={ci} sx={sample['sx']:.3f} y={sample['y']:.3f} best_dist={sample['best_dist']} reason={sample['reason']} profile_min={sample['profile_min']} profile_left_warm={sample['profile_left_warm']} profile_right_warm={sample['profile_right_warm']}")
+                        lines_dict[r, ci] = {'support_line_m': float(m_block), 'support_line_c': float(c_grid), 'source': grid_source, 'n_pts': _npts, 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'clean_pts': [], 'center_shift': abs(y_row[r] - priors_dict[r, ci]['P_mid'][1]), 'pitch_ok': True}
+                _y_vals = [f'r{r}={y_row[r]:.1f}' for r in sorted(y_row)]
+                _has_grid_str = 'true' if has_real_lower_grid else 'false'
+                print(f"[LOWER_GRID] block={block_name} has_real_grid={_has_grid_str} n_real_rows={_n_real_rows} real_evidence={_real_evidence} y_boundaries=[{', '.join(_y_vals)}] median_pitch={_med_pitch:.2f} m_block={m_block:.6f}")
+            else:
+                _real_evidence = 0
+                for r in (0, 1):
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict and lines_dict[r, ci]['source'] in _REAL:
+                            _real_evidence += 1
+                has_real_lower_grid = _real_evidence >= 1
+                for r in (0, 1):
+                    for ci in range(n_cols):
+                        stats = support_stats.get((r, ci), {'sample_n': 0, 'raw_pts': 0, 'kept_pts': 0, 'rejected_ground': 0, 'rejected_shift': 0, 'rejected_warmth': 0, 'rejected_dark': 0, 'rejected_samples': []})
+                        old_src = lines_dict[r, ci]['source'] if (r, ci) in lines_dict else 'missing'
+                        _npts = lines_dict[r, ci].get('n_pts', 0) if (r, ci) in lines_dict else 0
+                        if (r, ci) in lines_dict and old_src in _REAL:
+                            m_val = lines_dict[r, ci]['support_line_m']
+                            c_val = lines_dict[r, ci]['support_line_c']
+                            grid_source = 'small_block_grid_line'
+                        else:
+                            m_val = priors_dict[r, ci]['m']
+                            c_val = priors_dict[r, ci]['c']
+                            grid_source = 'small_prior_grid_line'
+                        lines_dict[r, ci] = {'support_line_m': float(m_val), 'support_line_c': float(c_val), 'source': grid_source, 'n_pts': _npts, 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'clean_pts': [], 'center_shift': abs(m_val * priors_dict[r, ci]['P_mid'][0] + c_val - priors_dict[r, ci]['P_mid'][1]), 'pitch_ok': True}
+                        print(f"[LOWER_SUPPORT_STATS] block={block_name} r={r} col={ci} sample_n={stats['sample_n']} raw_pts={stats['raw_pts']} kept_pts={stats['kept_pts']} rejected_ground={stats['rejected_ground']} rejected_shift={stats['rejected_shift']} rejected_warmth={stats['rejected_warmth']} rejected_dark={stats['rejected_dark']} source={old_src}")
+                        _max_dist = 3 if r == 0 or r == n_rows else 5
+                        _warmth_thresh = 135
+                        print(f"[LOWER_SUPPORT_REASON] block={block_name} r={r} col={ci} kept={stats['kept_pts']} reject_shift={stats['rejected_shift']} reject_warmth={stats['rejected_warmth']} reject_ground={stats['rejected_ground']} max_dist={_max_dist} warmth_threshold={_warmth_thresh}")
+                        if stats['kept_pts'] == 0 and stats['raw_pts'] > 0:
+                            for sample in stats.get('rejected_samples', [])[:5]:
+                                print(f"[LOWER_REJECT_SAMPLE] block={block_name} r={r} col={ci} sx={sample['sx']:.3f} y={sample['y']:.3f} best_dist={sample['best_dist']} reason={sample['reason']} profile_min={sample['profile_min']} profile_left_warm={sample['profile_left_warm']} profile_right_warm={sample['profile_right_warm']}")
+                _y_vals = []
+                for r in (0, 1):
+                    y_center = lines_dict[r, 0]['support_line_m'] * priors_dict[r, 0]['P_mid'][0] + lines_dict[r, 0]['support_line_c']
+                    _y_vals.append(f'r{r}={y_center:.1f}')
+                _has_grid_str = 'true' if has_real_lower_grid else 'false'
+                _pitch_val = abs(lines_dict[1, 0]['support_line_c'] - lines_dict[0, 0]['support_line_c'])
+                print(f"[LOWER_GRID] block={block_name} has_real_grid={_has_grid_str} n_real_rows={(1 if has_real_lower_grid else 0)} real_evidence={_real_evidence} y_boundaries=[{', '.join(_y_vals)}] median_pitch={_pitch_val:.2f} m_block={lines_dict[0, 0]['support_line_m']:.6f}")
+    horiz_endpoints = {}
+    for r in range(n_rows + 1):
+        for col in range(n_cols):
+            info = lines_dict[r, col]
+            m = info['support_line_m']
+            c = info['support_line_c']
+            source = info['source']
+            left_rail = boundaries['left_boundary'] if col == 0 else boundaries['middle_boundary']
+            right_rail = boundaries['middle_boundary'] if col == 0 and n_cols == 2 else boundaries['right_boundary']
+            P_L = V34__intersect_line_y_eq_mx_c_with_polyline(m, c, left_rail)
+            if P_L is None:
+                y_ref = m * priors_dict[r, col]['P_mid'][0] + c
+                xL_val = V34__get_boundary_x_at_y(left_rail, y_ref)
+                P_L = (xL_val, y_ref)
+            P_R = V34__intersect_line_y_eq_mx_c_with_polyline(m, c, right_rail)
+            if P_R is None:
+                y_ref = m * priors_dict[r, col]['P_mid'][0] + c
+                xR_val = V34__get_boundary_x_at_y(right_rail, y_ref)
+                P_R = (xR_val, y_ref)
+            horiz_endpoints[r, col] = {'L': P_L, 'R': P_R}
+            if is_lower_small_block and V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG is not None:
+                m_prior = priors_dict[r, col]['m']
+                c_prior = priors_dict[r, col]['c']
+                P_mid_pr = priors_dict[r, col]['P_mid']
+                xL_pr = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+                xL_val_pr = xL_pr[0] if xL_pr is not None else V34__get_boundary_x_at_y(left_rail, P_mid_pr[1])
+                xR_pr = V34__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+                xR_val_pr = xR_pr[0] if xR_pr is not None else V34__get_boundary_x_at_y(right_rail, P_mid_pr[1])
+                P_L_pr_orig = transform_local_to_orig(xL_val_pr, m_prior * xL_val_pr + c_prior)
+                P_R_pr_orig = transform_local_to_orig(xR_val_pr, m_prior * xR_val_pr + c_prior)
+                cv2.line(V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, (int(round(P_L_pr_orig[0])), int(round(P_L_pr_orig[1]))), (int(round(P_R_pr_orig[0])), int(round(P_R_pr_orig[1]))), (180, 180, 180), 1, lineType=cv2.LINE_AA)
+                if source == 'small_block_grid_line':
+                    P_L_orig = transform_local_to_orig(P_L[0], P_L[1])
+                    P_R_orig = transform_local_to_orig(P_R[0], P_R[1])
+                    cv2.line(V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (255, 0, 255), 1, lineType=cv2.LINE_AA)
+            _draw_this_line = False
+            _draw_reason = 'source_not_drawable'
+            if is_lower_small_block:
+                _valid_magenta_sources = {'small_lower_dark_groove_line', 'small_lower_support_points_line', 'small_regularized_support_line'}
+                if source in _valid_magenta_sources:
+                    _draw_this_line = True
+                    _draw_reason = 'lower_support_line'
+                else:
+                    _draw_this_line = False
+                    _draw_reason = f'suppressed:{source}'
+                    if source == 'small_prior_grid_line':
+                        print(f'[LOWER_LINE_DRAW] block={block_name} r={r} col={col} source=small_prior_grid_line reason=suppressed_prior')
+                    else:
+                        print(f'[SMALL_RAW_SUPPRESSED] block={block_name} r={r} col={col} source={source} reason=use_clean_line_only')
+            else:
+                _no_draw_sources = {'pure_yolo', 'yolo', 'prior', 'fallback', 'small_yolo', 'small_prior'}
+                if source in ('small_support_points_line', 'small_regularized_support_line'):
+                    _draw_this_line = True
+                    _draw_reason = 'real_support'
+                elif source in ('small_borrow_neighbor_line', 'small_neighbor_inherit', 'small_pitch_clamped_support'):
+                    _n = info.get('n_pts', 0)
+                    if info.get('support_line_m') is not None and _n >= 3:
+                        _draw_this_line = True
+                        _draw_reason = f'borrowed_support_n={_n}'
+                    else:
+                        _draw_reason = f'support_too_weak_n={_n}'
+                elif source in _no_draw_sources:
+                    _draw_reason = f'blocked_source={source}'
+            if is_lower_small_block:
+                _cov = info.get('coverage', 0.0)
+                _res = info.get('residual', 0.0)
+                _ang = info.get('angle_diff', 0.0)
+                _n2 = info.get('n_pts', 0)
+                print(f"[SMALL_LINE_DECISION] block={block_name} r={r} col={col} source={source} n_pts={_n2} cov={_cov:.3f} res={_res:.3f} angle={_ang:.3f} draw={('true' if _draw_this_line else 'false')} reason={_draw_reason}")
+            if _draw_this_line:
+                print(f'[SMALL_DRAW_LINE] block={block_name} r={r} col={col} source={source} xL={P_L[0]:.3f} yL={P_L[1]:.3f} xR={P_R[0]:.3f} yR={P_R[1]:.3f}')
+                dx = P_R[0] - P_L[0]
+                dy = P_R[1] - P_L[1]
+                length = math.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    ux = dx / length
+                    uy = dy / length
+                    P_L_ext = (P_L[0] - 2.0 * ux, P_L[1] - 2.0 * uy)
+                    P_R_ext = (P_R[0] + 2.0 * ux, P_R[1] + 2.0 * uy)
+                else:
+                    P_L_ext = P_L
+                    P_R_ext = P_R
+                P_L_orig = transform_local_to_orig(P_L_ext[0], P_L_ext[1])
+                P_R_orig = transform_local_to_orig(P_R_ext[0], P_R_ext[1])
+                if is_lower_small_block and source == 'small_prior_grid_line':
+                    cv2.line(img_support, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (180, 180, 180), 1)
+                else:
+                    cv2.line(img_snap, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (255, 0, 255), 1)
+                    cv2.line(img_support, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (255, 0, 255), 1)
+                if not (is_lower_small_block and source == 'small_prior_grid_line'):
+                    for pt in info.get('clean_pts', []):
+                        pt_orig = transform_local_to_orig(pt[0], pt[1])
+                        cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+    proposals = {}
+    for (row, col), p in grid_panels.items():
+        TL = horiz_endpoints[row, col]['L']
+        TR = horiz_endpoints[row, col]['R']
+        BR = horiz_endpoints[row + 1, col]['R']
+        BL = horiz_endpoints[row + 1, col]['L']
+        proposals[row, col] = [TL, TR, BR, BL]
+    final_polys = {}
+    final_sources = {}
+    final_reasons = {}
+    for (row, col), p in grid_panels.items():
+        poly_prop = proposals[row, col]
+        poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+        valid_rail_sources_geometry = ('direct_support', 'foreground_edge', 'foreground_edge_line', 'left_crop_foreground_edge', 'vertical_support_line', 'borrowed_slope_with_local_anchor', 'neighbor_inherit_with_local_anchor', 'left_crop_image_boundary', 'pure_yolo')
+        if is_lower_small_block:
+            valid_line_sources = ('small_block_grid_line', 'small_prior_grid_line')
+        else:
+            valid_line_sources = ('small_support_points_line', 'small_borrow_neighbor_line', 'small_neighbor_inherit', 'small_pitch_clamped_support', 'small_clean_support_line', 'small_regularized_support_line')
+        left_rail_name = 'left' if col == 0 else 'middle'
+        right_rail_name = 'middle' if col == 0 and n_cols == 2 else 'right'
+        left_src = rail_sources.get(left_rail_name, 'missing')
+        right_src = rail_sources.get(right_rail_name, 'missing')
+        top_src = lines_dict[row, col]['source'] if (row, col) in lines_dict else 'missing'
+        bot_src = lines_dict[row + 1, col]['source'] if (row + 1, col) in lines_dict else 'missing'
+        left_ok = left_src in valid_rail_sources_geometry
+        right_ok = right_src in valid_rail_sources_geometry
+        top_ok = top_src in valid_line_sources
+        bottom_ok = bot_src in valid_line_sources
+        if is_lower_small_block:
+            print(f'[LOWER_EDGE_CHECK] block={block_name} row={row} col={col} top_exists={(row, col) in lines_dict} top_source={top_src} valid_top={top_ok} bottom_exists={(row + 1, col) in lines_dict} bottom_source={bot_src} valid_bottom={bottom_ok} left_exists={left_rail_name in rail_sources} left_source={left_src} valid_left={left_ok} right_exists={right_rail_name in rail_sources} right_source={right_src} valid_right={right_ok}')
+        edges_ok = left_ok and right_ok and top_ok and bottom_ok
+        is_valid = True
+        reason = ''
+        if not edges_ok:
+            is_valid = False
+            if not top_ok:
+                reason = f'missing_top_line:{top_src}'
+            elif not bottom_ok:
+                reason = f'missing_bottom_line:{bot_src}'
+            elif not left_ok:
+                reason = f'missing_left_rail:{left_src}'
+            else:
+                reason = f'missing_right_rail:{right_src}'
+        else:
+            TL_new, TR_new, BR_new, BL_new = V34__sort_panel_corners(poly_prop)
+            w_prop = math.sqrt((TR_new[0] - TL_new[0]) ** 2 + (TR_new[1] - TL_new[1]) ** 2)
+            h_prop = math.sqrt((BL_new[0] - TL_new[0]) ** 2 + (BL_new[1] - TL_new[1]) ** 2)
+            if w_prop <= 0 or h_prop <= 0:
+                is_valid = False
+                reason = 'zero_size'
+            else:
+                is_convex = cv2.isContourConvex(np.array(poly_prop, dtype=np.float32).astype(np.int32))
+                area_prop = cv2.contourArea(np.array(poly_prop, dtype=np.float32))
+                area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+                area_ratio = area_prop / (area_yolo + 1e-06)
+                cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+                cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+                TL_yolo, TR_yolo, BR_yolo, BL_yolo = V34__sort_panel_corners(poly_init)
+                cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+                cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+                center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                panel_height = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                if not is_convex:
+                    is_valid = False
+                    reason = 'not_convex'
+                elif is_lower_small_block and (not 0.65 <= area_ratio <= 1.35):
+                    is_valid = False
+                    reason = f'area_ratio_{area_ratio:.2f}'
+                elif not is_lower_small_block and (not 0.65 <= area_ratio <= 1.4):
+                    is_valid = False
+                    reason = f'area_ratio_{area_ratio:.2f}'
+                elif is_lower_small_block and center_shift > max(10.0, 0.4 * panel_height):
+                    is_valid = False
+                    reason = f'center_shift_{center_shift:.2f}'
+                elif not is_lower_small_block and center_shift > max(10.0, 0.45 * panel_height):
+                    is_valid = False
+                    reason = f'center_shift_{center_shift:.2f}'
+                if is_valid and is_lower_small_block:
+                    y_t = lines_dict[row, col]['support_line_m'] * priors_dict[row, col]['P_mid'][0] + lines_dict[row, col]['support_line_c']
+                    y_b = lines_dict[row + 1, col]['support_line_m'] * priors_dict[row + 1, col]['P_mid'][0] + lines_dict[row + 1, col]['support_line_c']
+                    if y_t >= y_b:
+                        is_valid = False
+                        reason = 'non_monotonic_pitch'
+                    y_mid = (y_min_local + y_max_local) / 2.0
+                    x_left = V34__get_boundary_x_at_y(boundaries['left_boundary'], y_mid)
+                    x_right = V34__get_boundary_x_at_y(boundaries['right_boundary'], y_mid)
+                    if n_cols == 2:
+                        x_middle = V34__get_boundary_x_at_y(boundaries['middle_boundary'], y_mid)
+                        if not x_left < x_middle < x_right:
+                            is_valid = False
+                            reason = 'invalid_rail_ordering'
+                    elif not x_left < x_right:
+                        is_valid = False
+                        reason = 'invalid_rail_ordering'
+        if is_valid:
+            final_polys[row, col] = poly_prop
+            if is_lower_small_block:
+                top_src = lines_dict[row, col]['source'] if (row, col) in lines_dict else 'missing'
+                bot_src = lines_dict[row + 1, col]['source'] if (row + 1, col) in lines_dict else 'missing'
+                if top_src == 'small_prior_grid_line' or bot_src == 'small_prior_grid_line':
+                    final_sources[row, col] = 'lower_prior_grid'
+                    final_reasons[row, col] = 'valid_prior_grid'
+                else:
+                    final_sources[row, col] = 'lower_micro_grid'
+                    final_reasons[row, col] = 'valid_refine'
+                print(f'[LOWER_PANEL_SOURCE] block={block_name} row={row} col={col} source={final_sources[row, col]} reason={final_reasons[row, col]} top_source={top_src} bottom_source={bot_src}')
+            else:
+                final_sources[row, col] = 'snap_grid'
+                final_reasons[row, col] = 'valid_refine'
+        else:
+            final_polys[row, col] = poly_init
+            final_sources[row, col] = 'fallback_yolo'
+            final_reasons[row, col] = reason if reason else 'boundary_failed'
+            if is_lower_small_block:
+                if n_rows == 1:
+                    print(f'[SINGLE_ROW_PANEL] block={block_name} row={row} col={col} source=fallback reason={reason}')
+                else:
+                    _area_r = 'n/a'
+                    _shift_r = 'n/a'
+                    try:
+                        _area_r = f'{cv2.contourArea(np.array(poly_prop, dtype=np.float32)) / (cv2.contourArea(np.array(poly_init, dtype=np.float32)) + 1e-06):.3f}'
+                        TL_fb, TR_fb, BR_fb, BL_fb = V34__sort_panel_corners(poly_prop)
+                        cx_fb = (TL_fb[0] + TR_fb[0] + BR_fb[0] + BL_fb[0]) / 4.0
+                        cy_fb = (TL_fb[1] + TR_fb[1] + BR_fb[1] + BL_fb[1]) / 4.0
+                        TLy, TRy, BRy, BLy = V34__sort_panel_corners(poly_init)
+                        cxy = (TLy[0] + TRy[0] + BRy[0] + BLy[0]) / 4.0
+                        cyy = (TLy[1] + TRy[1] + BRy[1] + BLy[1]) / 4.0
+                        _shift_r = f'{math.sqrt((cx_fb - cxy) ** 2 + (cy_fb - cyy) ** 2):.2f}'
+                    except Exception:
+                        pass
+                    print(f'[LOWER_PANEL_FALLBACK] block={block_name} row={row} col={col} reason={reason} area_ratio={_area_r} shift={_shift_r}')
+
+    def get_iou(p1, p2):
+        poly1 = np.array(p1, dtype=np.float32)
+        poly2 = np.array(p2, dtype=np.float32)
+        inter_area = V34__get_polygon_intersection_area(poly1, poly2)
+        area1 = cv2.contourArea(poly1)
+        area2 = cv2.contourArea(poly2)
+        union_area = area1 + area2 - inter_area
+        return inter_area / union_area if union_area > 0.0 else 0.0
+    for row1, col1 in grid_panels.keys():
+        if final_sources[row1, col1] == 'snap_grid':
+            for row2, col2 in grid_panels.keys():
+                if (row1, col1) != (row2, col2):
+                    iou = get_iou(final_polys[row1, col1], final_polys[row2, col2])
+                    if iou > 0.03:
+                        final_polys[row1, col1] = V34__get_local_yolo_polygon_prior(grid_panels[row1, col1]['orig_ref'], transform_orig_to_local)
+                        final_sources[row1, col1] = 'fallback_yolo'
+                        final_reasons[row1, col1] = 'overlap_fallback'
+                        break
+    for (row, col), p in grid_panels.items():
+        src = final_sources[row, col]
+        source_str = src if src in ('snap_grid', 'lower_micro_grid', 'lower_prior_grid', 'single_row_edge_grid') else 'fallback'
+        print(f'[SMALL_PANEL_BUILD] block={block_name} row={row} col={col} source={source_str} reason={final_reasons[row, col]}')
+    panels_result = []
+    for (row, col), p in grid_panels.items():
+        poly_final = final_polys[row, col]
+        source = final_sources[row, col]
+        reason = final_reasons[row, col]
+        max_overlap_iou = 0.0
+        for (other_row, other_col), other_poly in final_polys.items():
+            if (row, col) != (other_row, other_col):
+                iou = get_iou(poly_final, other_poly)
+                if iou > max_overlap_iou:
+                    max_overlap_iou = iou
+        TL_new, TR_new, BR_new, BL_new = V34__sort_panel_corners(poly_final)
+        cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+        cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+        poly_init = V34__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+        TL_yolo, TR_yolo, BR_yolo, BL_yolo = V34__sort_panel_corners(poly_init)
+        cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+        cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+        center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+        area_prop = cv2.contourArea(np.array(poly_final, dtype=np.float32))
+        area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+        area_ratio = area_prop / (area_yolo + 1e-06)
+        anchors = V34__get_panel_hybrid_anchors(p['orig_ref'])
+        panels_result.append({'col': col, 'row': row, 'polygon': poly_final, 'quality': 'fallback' if source == 'fallback_yolo' else 'pass', 'source': source, 'reason': reason, 'shift': center_shift, 'area_ratio': area_ratio, 'overlap': max_overlap_iou, 'orig_p': p['orig_ref'], 'anchors': anchors})
+    return panels_result
+
+def V34__refine_crop_left_panel_individually(rotated_gray, p_local, block_name, row_idx, row_count, img_support, img_snap, transform_info):
+    Minv = transform_info['rot_M_inv']
+    roi_x1 = transform_info['roi_x1']
+    roi_y1 = transform_info['roi_y1']
+    M = cv2.invertAffineTransform(Minv)
+
+    def transform_local_to_orig(x_local, y_local):
+        x_rel = Minv[0, 0] * float(x_local) + Minv[0, 1] * float(y_local) + Minv[0, 2]
+        y_rel = Minv[1, 0] * float(x_local) + Minv[1, 1] * float(y_local) + Minv[1, 2]
+        return (float(x_rel + roi_x1), float(y_rel + roi_y1))
+
+    def transform_orig_to_local(x, y):
+        x_rel = float(x) - roi_x1
+        y_rel = float(y) - roi_y1
+        x_local = M[0, 0] * x_rel + M[0, 1] * y_rel + M[0, 2]
+        y_local = M[1, 0] * x_rel + M[1, 1] * y_rel + M[1, 2]
+        return (float(x_local), float(y_local))
+    poly_init = V34__get_local_yolo_polygon_prior(p_local['orig_ref'], transform_orig_to_local)
+    poly_refined, support_pts_dict = V34__refine_panel_edges_locally_with_yolo_prior(rotated_gray, poly_init, is_crop_left=True)
+    for edge_key, clean_pts in support_pts_dict.items():
+        for pt in clean_pts:
+            pt_orig = transform_local_to_orig(pt[0], pt[1])
+            cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+    TL, TR, BR, BL = V34__sort_panel_corners(poly_init)
+    panel_height = math.sqrt((BL[0] - TL[0]) ** 2 + (BL[1] - TL[1]) ** 2)
+    TL_new, TR_new, BR_new, BL_new = V34__sort_panel_corners(poly_refined)
+    is_convex = cv2.isContourConvex(np.array(poly_refined, dtype=np.int32))
+    area_prop = cv2.contourArea(np.array(poly_refined, dtype=np.float32))
+    area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+    area_ratio = area_prop / (area_yolo + 1e-06)
+    cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+    cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+    cx_yolo = (TL[0] + TR[0] + BR[0] + BL[0]) / 4.0
+    cy_yolo = (TL[1] + TR[1] + BR[1] + BL[1]) / 4.0
+    center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+    angle_prop = np.degrees(math.atan2(TR_new[1] - TL_new[1], TR_new[0] - TL_new[0]))
+    angle_yolo = np.degrees(math.atan2(TR[1] - TL[1], TR[0] - TL[0]))
+    diff_angle = abs(angle_prop - angle_yolo)
+    while diff_angle > 90:
+        diff_angle = abs(diff_angle - 180)
+    angle_prop_b = np.degrees(math.atan2(BR_new[1] - BL_new[1], BR_new[0] - BL_new[0]))
+    angle_yolo_b = np.degrees(math.atan2(BR[1] - BL[1], BR[0] - BL[0]))
+    diff_angle_b = abs(angle_prop_b - angle_yolo_b)
+    while diff_angle_b > 90:
+        diff_angle_b = abs(diff_angle_b - 180)
+    is_valid = is_convex and 0.85 <= area_ratio <= 1.15 and (center_shift <= 0.15 * panel_height) and (diff_angle <= 3.0) and (diff_angle_b <= 3.0) and (abs(angle_prop - angle_prop_b) <= 4.0)
+    if is_valid:
+        has_refinement = 'top' in support_pts_dict or 'bottom' in support_pts_dict
+        source = 'crop_left_top_bottom' if has_refinement else 'crop_left_yolo'
+        return (poly_refined, source, center_shift, area_ratio, 'valid_refine')
+    else:
+        return (poly_init, 'crop_left_yolo', center_shift, area_ratio, 'invalid_refine')
+
+def V34__build_small_block_from_yolo_edges_hybrid(block, block_name, gray, img_support, img_snap, img_hybrid_sources, img_lines, img_panels, img_panels_verified, img_quality, b_local, rotated_gray, transform_local_to_orig, transform_orig_to_local):
+    row_count = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 0
+    is_small_block = V34__is_generic_small_block(row_count, len(b_local['panels']), len(b_local['columns']))
+    if is_small_block:
+        panels_result = V34__refine_small_block_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local)
+        for col_idx, col in enumerate(b_local['columns']):
+            for row_idx, p in enumerate(col):
+                match_res = None
+                for pr in panels_result:
+                    if pr['col'] == col_idx and pr['row'] == row_idx:
+                        match_res = pr
+                        break
+                if match_res is not None:
+                    p['polygon'] = match_res['polygon']
+                    p['quality'] = match_res['quality']
+                    p['source'] = match_res['source']
+                    p['reason'] = match_res['reason']
+                    p['shift'] = match_res['shift']
+                    p['area_ratio'] = match_res['area_ratio']
+                    p['overlap'] = match_res['overlap']
+        return {'boundaries': {}, 'snapped_horiz_gaps': [], 'block_angle_deg': 0.0, 'is_grid': False}
+    panels_result = V34__refine_local_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig)
+    y_min_local = min((p['bbox'][1] for p in b_local['panels']))
+    y_max_local = max((p['bbox'][3] for p in b_local['panels']))
+    n_cols = len(b_local['columns'])
+    row_count = max((len(col) for col in b_local['columns']))
+    MIN_SPLITTABLE_RAIL_LEN_PX = 120
+    MIN_ROWS_FOR_GRID_SPLIT = 4
+    MIN_RAIL_SUPPORT_RATIO = 0.55
+    MIN_VERTICAL_RAIL_GAP_PX = 12
+    pass_panels = [p for p in panels_result if p['quality'] == 'pass']
+    support_ratio = len(pass_panels) / len(panels_result) if panels_result else 0.0
+    rail_len = y_max_local - y_min_local
+    should_split = True
+    split_reason = 'row_count_ok'
+    if rail_len < MIN_SPLITTABLE_RAIL_LEN_PX:
+        should_split = False
+        split_reason = 'rail_len_under_threshold'
+    elif row_count < MIN_ROWS_FOR_GRID_SPLIT:
+        should_split = False
+        split_reason = 'row_count_under_threshold'
+    elif support_ratio < MIN_RAIL_SUPPORT_RATIO:
+        should_split = False
+        split_reason = 'support_ratio_under_threshold'
+    col0 = [p for p in panels_result if p['col'] == 0]
+    left_pts = [p['polygon'][0] for p in col0] + [p['polygon'][3] for p in col0]
+    if n_cols == 1:
+        right_pts = [p['polygon'][1] for p in col0] + [p['polygon'][2] for p in col0]
+        left_rail = V34__fit_consensus_vertical_boundary(left_pts, y_min_local, y_max_local, row_count)
+        right_rail = V34__fit_consensus_vertical_boundary(right_pts, y_min_local, y_max_local, row_count)
+        mid_rail = None
+    else:
+        col1 = [p for p in panels_result if p['col'] == 1]
+        mid_pts = [p['polygon'][1] for p in col0] + [p['polygon'][2] for p in col0] + [p['polygon'][0] for p in col1] + [p['polygon'][3] for p in col1]
+        right_pts = [p['polygon'][1] for p in col1] + [p['polygon'][2] for p in col1]
+        left_rail = V34__fit_consensus_vertical_boundary(left_pts, y_min_local, y_max_local, row_count)
+        mid_rail = V34__fit_consensus_vertical_boundary(mid_pts, y_min_local, y_max_local, row_count)
+        right_rail = V34__fit_consensus_vertical_boundary(right_pts, y_min_local, y_max_local, row_count)
+        if should_split:
+            gap_left_mid = abs(np.mean([pt[0] for pt in left_rail]) - np.mean([pt[0] for pt in mid_rail]))
+            gap_mid_right = abs(np.mean([pt[0] for pt in mid_rail]) - np.mean([pt[0] for pt in right_rail]))
+            if min(gap_left_mid, gap_mid_right) < MIN_VERTICAL_RAIL_GAP_PX:
+                should_split = False
+                split_reason = 'gap_too_small'
+    boundaries = {}
+    if should_split:
+        boundaries['left_outer'] = left_rail
+        boundaries['right_outer'] = right_rail
+        if mid_rail is not None:
+            boundaries['middle_divider'] = mid_rail
+    else:
+        left_rails = []
+        right_rails = []
+        for col_idx in range(n_cols):
+            col_panels = [p for p in panels_result if p['col'] == col_idx]
+            left_pts_c = [p['polygon'][0] for p in col_panels] + [p['polygon'][3] for p in col_panels]
+            right_pts_c = [p['polygon'][1] for p in col_panels] + [p['polygon'][2] for p in col_panels]
+            left_rails.append(V34__fit_consensus_vertical_boundary(left_pts_c, y_min_local, y_max_local, row_count))
+            right_rails.append(V34__fit_consensus_vertical_boundary(right_pts_c, y_min_local, y_max_local, row_count))
+        if n_cols == 2:
+            gap_mid = abs(np.mean([pt[0] for pt in right_rails[0]]) - np.mean([pt[0] for pt in left_rails[1]]))
+            if gap_mid < MIN_VERTICAL_RAIL_GAP_PX:
+                col0 = [p for p in panels_result if p['col'] == 0]
+                col1 = [p for p in panels_result if p['col'] == 1]
+                mid_pts = [p['polygon'][1] for p in col0] + [p['polygon'][2] for p in col0] + [p['polygon'][0] for p in col1] + [p['polygon'][3] for p in col1]
+                merged_mid = V34__fit_consensus_vertical_boundary(mid_pts, y_min_local, y_max_local, row_count)
+                boundaries['left_col_0'] = left_rails[0]
+                boundaries['right_col_0'] = merged_mid
+                boundaries['left_col_1'] = merged_mid
+                boundaries['right_col_1'] = right_rails[1]
+            else:
+                boundaries['left_col_0'] = left_rails[0]
+                boundaries['right_col_0'] = right_rails[0]
+                boundaries['left_col_1'] = left_rails[1]
+                boundaries['right_col_1'] = right_rails[1]
+        else:
+            boundaries['left_col_0'] = left_rails[0]
+            boundaries['right_col_0'] = right_rails[0]
+    action_str = 'split' if should_split else 'merge' if split_reason == 'gap_too_small' else 'single'
+    print(f'[RAIL_SPLIT] {block_name} left_outer {rail_len:.1f} {support_ratio:.2f} {row_count} action={action_str} reason={split_reason}')
+    if n_cols == 2:
+        mid_action = 'merge' if action_str == 'merge' or not should_split else 'split'
+        print(f'[RAIL_SPLIT] {block_name} middle_divider {rail_len:.1f} {support_ratio:.2f} {row_count} action={mid_action} reason={split_reason}')
+    print(f'[RAIL_SPLIT] {block_name} right_outer {rail_len:.1f} {support_ratio:.2f} {row_count} action={action_str} reason={split_reason}')
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            match_res = None
+            for pr in panels_result:
+                if pr['col'] == col_idx and pr['row'] == row_idx:
+                    match_res = pr
+                    break
+            if match_res is not None:
+                p['polygon'] = match_res['polygon']
+                p['quality'] = match_res['quality']
+                p['source'] = match_res['source']
+    snapped_horiz_gaps = []
+    x_min_roi_local = min((p['bbox'][0] for p in b_local['panels'])) - 10
+    x_max_roi_local = max((p['bbox'][2] for p in b_local['panels'])) + 10
+    for r in range(row_count + 1):
+        if r == 0:
+            row_0_panels = [p for p in panels_result if p['row'] == 0]
+            yolo_pts = [p['polygon'][0] for p in row_0_panels] + [p['polygon'][1] for p in row_0_panels]
+        elif r == row_count:
+            row_last_panels = [p['polygon'] for p in panels_result if p['row'] == row_count - 1]
+            yolo_pts = [p[3] for p in row_last_panels] + [p[2] for p in row_last_panels]
+        else:
+            row_prev = [p for p in panels_result if p['row'] == r - 1]
+            row_curr = [p for p in panels_result if p['row'] == r]
+            yolo_pts = [p['polygon'][3] for p in row_prev] + [p['polygon'][2] for p in row_prev] + [p['polygon'][0] for p in row_curr] + [p['polygon'][1] for p in row_curr]
+        xs_yolo = [pt[0] for pt in yolo_pts]
+        ys_yolo = [pt[1] for pt in yolo_pts]
+        m_yolo, c_yolo = np.polyfit(xs_yolo, ys_yolo, 1)
+        is_outer = r == 0 or r == row_count
+        m_fit, c_fit, clean_pts, coverage, std_res, support_valid, n_raw = V34__extract_support_points_for_horizontal_edge(rotated_gray, m_yolo, c_yolo, x_min_roi_local, x_max_roi_local, block_name, r, row_count, is_outer_edge=is_outer)
+        if support_valid:
+            m_row = m_fit
+            c_row = c_fit
+            selected_cand = 'support'
+            reason = 'valid_support'
+            for pt in clean_pts:
+                pt_orig = transform_local_to_orig(pt[0], pt[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        else:
+            m_row = m_yolo
+            c_row = c_yolo
+            selected_cand = 'yolo'
+            reason = 'fallback_yolo'
+        print(f'[SUPPORT_EDGE] {block_name} {r} raw={n_raw} clean={len(clean_pts)} coverage={coverage:.3f} residual={std_res:.3f} source={selected_cand} reason={reason}')
+        snapped_horiz_gaps.append({'y_snap': m_row * ((x_min_roi_local + x_max_roi_local) / 2.0) + c_row, 'selected_cand': selected_cand, 'm_row': m_row, 'c_row': c_row, 'm_yolo': m_yolo, 'c_yolo': c_yolo, 'support_pts': clean_pts, 'support_valid': support_valid, 'support_line_m': m_fit, 'support_line_c': c_fit, 'support_clean_pts': clean_pts, 'support_coverage': coverage, 'support_residual_std': std_res})
+    boundaries_orig = {bkey: [transform_local_to_orig(pt[0], pt[1]) for pt in boundaries[bkey]] for bkey in boundaries}
+    for bkey in boundaries_orig:
+        V34__draw_polyline(img_snap, boundaries_orig[bkey], (180, 0, 0), 2)
+    return {'boundaries': boundaries, 'snapped_horiz_gaps': snapped_horiz_gaps, 'block_angle_deg': 0.0, 'is_grid': should_split}
+
+def V34__run_current_image():
+    img_path = V34__extract_input_image()
+    img = cv2.imread(str(img_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {img_path}')
+    global V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG
+    V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG = None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray_clahe = clahe.apply(gray)
+    blur = cv2.GaussianBlur(gray_clahe, (5, 5), 0)
+    edges = cv2.Canny(blur, 40, 120, apertureSize=3)
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_x_abs = np.abs(sobel_x)
+    panels = V34__load_panels_from_logs()
+    x_blocks = V34__group_into_blocks(panels)
+    original_block_count = len(x_blocks)
+    blocks = []
+    block_split_meta = []
+    for xb in x_blocks:
+        sub_blocks, median_h, gaps_used = V34__split_block_by_y_gap(xb)
+        block_split_meta.append({'original_n_cols': len(xb['columns']), 'original_panel_count': len(xb['panels']), 'sub_block_count': len(sub_blocks), 'median_panel_height': median_h, 'gaps_used': gaps_used})
+        blocks.extend(sub_blocks)
+    split_block_count = len(blocks)
+    img_blocks = img.copy()
+    img_support = img.copy()
+    img_snap = img.copy()
+    img_panels_from_snap = img.copy()
+    snap_blocks = []
+    stats = []
+    global V34__GLOBAL_LARGE_BLOCK_INFOS
+    V34__GLOBAL_LARGE_BLOCK_INFOS = []
+    for temp_idx, temp_b in enumerate(blocks):
+        temp_cols = temp_b['columns']
+        temp_panels = temp_b['panels']
+        temp_row_count = max((len(col) for col in temp_cols)) if temp_cols else 0
+        is_small = V34__is_generic_small_block(temp_row_count, len(temp_panels), len(temp_cols))
+        if not is_small:
+            temp_bx_min = min((p['bbox'][0] for p in temp_panels))
+            temp_bx_max = max((p['bbox'][2] for p in temp_panels))
+            temp_by_min = min((p['bbox'][1] for p in temp_panels))
+            temp_by_max = max((p['bbox'][3] for p in temp_panels))
+            center_x = (temp_bx_min + temp_bx_max) / 2.0
+            center_y = (temp_by_min + temp_by_max) / 2.0
+            slopes = []
+            for col in temp_cols:
+                if len(col) >= 2:
+                    cxs = [(p['bbox'][0] + p['bbox'][2]) / 2.0 for p in col]
+                    cys = [(p['bbox'][1] + p['bbox'][3]) / 2.0 for p in col]
+                    try:
+                        slope, _ = np.polyfit(cys, cxs, 1)
+                        slopes.append(float(slope))
+                    except Exception:
+                        pass
+            if not slopes:
+                slopes = [0.0]
+            V34__GLOBAL_LARGE_BLOCK_INFOS.append({'block_name': f'block_{temp_idx + 1}', 'center_x': float(center_x), 'center_y': float(center_y), 'slopes': slopes})
+    for b_idx, b in enumerate(blocks):
+        block_name = f'block_{b_idx + 1}'
+        n_cols = len(b['columns'])
+        bx_min = min((p['bbox'][0] for p in b['panels']))
+        bx_max = max((p['bbox'][2] for p in b['panels']))
+        by_min = min((p['bbox'][1] for p in b['panels']))
+        by_max = max((p['bbox'][3] for p in b['panels']))
+        block_angles = []
+        for col in b['columns']:
+            if len(col) >= 2:
+                cxs = [(p['bbox'][0] + p['bbox'][2]) / 2.0 for p in col]
+                cys = [(p['bbox'][1] + p['bbox'][3]) / 2.0 for p in col]
+                try:
+                    slope, _ = np.polyfit(cys, cxs, 1)
+                    angle_rad = math.atan(slope)
+                    block_angles.append(angle_rad)
+                except Exception:
+                    pass
+        if block_angles:
+            rotation_rad = np.median(block_angles)
+        else:
+            rotation_rad = 0.0
+        rotation_deg = np.degrees(rotation_rad)
+        margin = 60
+        roi_x1 = max(0, int(bx_min - margin))
+        roi_y1 = max(0, int(by_min - margin))
+        roi_x2 = min(gray.shape[1], int(bx_max + margin))
+        roi_y2 = min(gray.shape[0], int(by_max + margin))
+        roi_w = roi_x2 - roi_x1
+        roi_h = roi_y2 - roi_y1
+        center_x = roi_w / 2.0
+        center_y = roi_h / 2.0
+        M = cv2.getRotationMatrix2D((center_x, center_y), -rotation_deg, 1.0)
+        Minv = cv2.invertAffineTransform(M)
+
+        def transform_orig_to_local(x, y):
+            x_rel = float(x) - roi_x1
+            y_rel = float(y) - roi_y1
+            x_local = M[0, 0] * x_rel + M[0, 1] * y_rel + M[0, 2]
+            y_local = M[1, 0] * x_rel + M[1, 1] * y_rel + M[1, 2]
+            return (float(x_local), float(y_local))
+
+        def transform_local_to_orig(x_local, y_local):
+            x_rel = Minv[0, 0] * float(x_local) + Minv[0, 1] * float(y_local) + Minv[0, 2]
+            y_rel = Minv[1, 0] * float(x_local) + Minv[1, 1] * float(y_local) + Minv[1, 2]
+            return (float(x_rel + roi_x1), float(y_rel + roi_y1))
+        roi_gray = gray[roi_y1:roi_y2, roi_x1:roi_x2]
+        rotated_gray = cv2.warpAffine(roi_gray, M, (roi_w, roi_h), flags=cv2.INTER_CUBIC)
+        roi_edges = edges[roi_y1:roi_y2, roi_x1:roi_x2]
+        rotated_edges = cv2.warpAffine(roi_edges, M, (roi_w, roi_h), flags=cv2.INTER_NEAREST)
+        roi_sobel_x_abs = sobel_x_abs[roi_y1:roi_y2, roi_x1:roi_x2]
+        rotated_sobel_x_abs = cv2.warpAffine(roi_sobel_x_abs, M, (roi_w, roi_h), flags=cv2.INTER_CUBIC)
+        b_local = {'columns': [], 'panels': []}
+        panel_map = {}
+        for p in b['panels']:
+            local_poly = [transform_orig_to_local(pt[0], pt[1]) for pt in p['refined_polygon']]
+            l_xs = [pt[0] for pt in local_poly]
+            l_ys = [pt[1] for pt in local_poly]
+            local_bbox = [min(l_xs), min(l_ys), max(l_xs), max(l_ys)]
+            p_local = {'bbox': local_bbox, 'refined_polygon': local_poly, 'orig_ref': p}
+            panel_map[id(p)] = p_local
+            b_local['panels'].append(p_local)
+        for col in b['columns']:
+            col_local = [panel_map[id(p)] for p in col]
+            b_local['columns'].append(col_local)
+        y_min_local = min((p['bbox'][1] for p in b_local['panels']))
+        y_max_local = max((p['bbox'][3] for p in b_local['panels']))
+        x_min_roi_local = min((p['bbox'][0] for p in b_local['panels'])) - 10
+        x_max_roi_local = max((p['bbox'][2] for p in b_local['panels'])) + 10
+        cv2.rectangle(img_blocks, (int(bx_min - 10), int(by_min)), (int(bx_max + 10), int(by_max)), (0, 255, 0), 2)
+        cv2.putText(img_blocks, f'{block_name} ({rotation_deg:.1f} deg)', (int(bx_min - 5), int(by_min) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+        row_count = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 10
+        MIN_LARGE_BLOCK_ROWS = 4
+        MIN_SMALL_BLOCK_PANELS = 2
+        block_panels = b['panels']
+        if len(block_panels) < MIN_SMALL_BLOCK_PANELS:
+            continue
+        local_xs = [p['bbox'][0] for p in b_local['panels']] + [p['bbox'][2] for p in b_local['panels']]
+        local_ys = [p['bbox'][1] for p in b_local['panels']] + [p['bbox'][3] for p in b_local['panels']]
+        l_min_x, l_max_x = (min(local_xs), max(local_xs))
+        l_min_y, l_max_y = (min(local_ys), max(local_ys))
+        orig_xs = [p['bbox'][0] for p in b['panels']] + [p['bbox'][2] for p in b['panels']]
+        orig_ys = [p['bbox'][1] for p in b['panels']] + [p['bbox'][3] for p in b['panels']]
+        o_min_x, o_max_x = (min(orig_xs), max(orig_xs))
+        o_min_y, o_max_y = (min(orig_ys), max(orig_ys))
+        print(f'[SNAP_BLOCK] {block_name} local_bbox=({l_min_x:.1f},{l_min_y:.1f},{l_max_x:.1f},{l_max_y:.1f}) orig_bbox=({o_min_x:.1f},{o_min_y:.1f},{o_max_x:.1f},{o_max_y:.1f})')
+        is_small_block = V34__is_generic_small_block(row_count, len(b['panels']), n_cols)
+        if is_small_block:
+            result = V34__build_small_block_from_yolo_edges_hybrid(b, block_name, gray, img_support, img_snap, None, None, None, None, None, b_local, rotated_gray, transform_local_to_orig, transform_orig_to_local)
+            boundaries = result['boundaries']
+            snapped_horiz_gaps = result['snapped_horiz_gaps']
+            snap_blocks.append({'block_name': block_name, 'n_cols': n_cols, 'row_count': row_count, 'is_large_grid': False, 'is_grid': result['is_grid'], 'boundaries': copy.deepcopy(boundaries), 'snapped_horiz_gaps': copy.deepcopy(snapped_horiz_gaps), 'm_perp': 0.0, 'x_mid': float((x_min_roi_local + x_max_roi_local) / 2.0), 'b_local': copy.deepcopy(b_local), 'transform_info': {'rot_M_inv': Minv.copy(), 'roi_x1': int(roi_x1), 'roi_y1': int(roi_y1), 'local_w': int(roi_w), 'local_h': int(roi_h)}, 'rotation_deg': float(rotation_deg), 'is_small_block': True, 'rotated_gray': rotated_gray.copy()})
+            continue
+        if n_cols == 1:
+            boundary_keys = ['left_outer', 'right_outer']
+        else:
+            boundary_keys = ['left_outer', 'middle_divider', 'right_outer']
+        boundaries, snapped_horiz_gaps, consensus_stats = V34__build_grid_from_yolo_edge_consensus(rotated_gray, rotated_sobel_x_abs, b_local, y_min_local, y_max_local, n_cols, row_count, x_min_roi_local, x_max_roi_local, block_name, img_w=gray.shape[1], img_h=gray.shape[0])
+        bad_block_orientation = bool(consensus_stats.get('bad_block_orientation', False))
+        best_theta = math.atan(consensus_stats['m_consensus'])
+        m_perp = math.tan(best_theta)
+        x_mid = (x_min_roi_local + x_max_roi_local) / 2.0
+        boundaries_orig = {bkey: [transform_local_to_orig(pt[0], pt[1]) for pt in boundaries[bkey]] for bkey in boundaries}
+        for g in snapped_horiz_gaps:
+            for pt in g['support_pts']:
+                pt_orig = transform_local_to_orig(pt[0], pt[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        left_snapped_horiz_gaps_by_col = consensus_stats.get('left_snapped_horiz_gaps_by_col')
+        has_crop_left_col_runtime = left_snapped_horiz_gaps_by_col is not None
+        if has_crop_left_col_runtime:
+            has_gaps = left_snapped_horiz_gaps_by_col is not None
+            cols = list(left_snapped_horiz_gaps_by_col.keys()) if has_gaps else []
+            rows_col0 = sorted(left_snapped_horiz_gaps_by_col[0].keys()) if has_gaps and 0 in left_snapped_horiz_gaps_by_col else []
+            rows_col1 = sorted(left_snapped_horiz_gaps_by_col[1].keys()) if has_gaps and 1 in left_snapped_horiz_gaps_by_col else []
+            print(f'[CROP_LEFT_SNAPBLOCK_CHECK] block={block_name} has_left_snapped_horiz_gaps_by_col={str(has_gaps).lower()} cols={cols} rows_col0={rows_col0} rows_col1={rows_col1}')
+        if left_snapped_horiz_gaps_by_col:
+            for col_idx in left_snapped_horiz_gaps_by_col:
+                for r in left_snapped_horiz_gaps_by_col[col_idx]:
+                    g = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    for pt in g['support_pts']:
+                        pt_orig = transform_local_to_orig(pt[0], pt[1])
+                        cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        V34__draw_polyline(img_snap, boundaries_orig['left_outer'], (180, 0, 0), 2)
+        V34__draw_polyline(img_snap, boundaries_orig['right_outer'], (180, 0, 0), 2)
+        if 'middle_divider' in boundaries_orig:
+            V34__draw_polyline(img_snap, boundaries_orig['middle_divider'], (180, 0, 0), 2)
+        if left_snapped_horiz_gaps_by_col:
+            for col_idx in [0, 1]:
+                gaps = left_snapped_horiz_gaps_by_col.get(col_idx, {})
+                for r in range(row_count + 1):
+                    if r not in gaps:
+                        if has_crop_left_col_runtime:
+                            print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source=None allowed=false pL_ok=false pR_ok=false xL=None yL=None xR=None yR=None reason=missing_gap')
+                        continue
+                    g = gaps[r]
+                    source_name = g.get('selected_cand') or g.get('source') or 'unknown'
+                    if bad_block_orientation:
+                        print(f"[HORIZ_DRAW_SUPPRESSED] block={block_name} r={r} col={col_idx} source={source_name} support_valid={str(bool(g.get('support_valid', False))).lower()} reason=bad_block_orientation")
+                        continue
+                    valid_crop_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    allowed = source_name in valid_crop_sources
+                    if not allowed:
+                        if has_crop_left_col_runtime:
+                            print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source={source_name} allowed=false pL_ok=false pR_ok=false xL=None yL=None xR=None yR=None reason=source_not_allowed')
+                            print(f'[CROP_LEFT_SKIP_LINE] block={block_name} r={r} col={col_idx} source={source_name} reason=no_support_line')
+                        continue
+                    support_line_m = g.get('support_line_m')
+                    support_line_c = g.get('support_line_c')
+                    if support_line_m is None or support_line_c is None:
+                        if has_crop_left_col_runtime:
+                            print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source={source_name} allowed=true pL_ok=false pR_ok=false xL=None yL=None xR=None yR=None reason=missing_support_line_m_c')
+                        continue
+                    m_final = float(support_line_m)
+                    c_final = float(support_line_c)
+                    left_boundary = boundaries['left_outer'] if col_idx == 0 else boundaries['middle_divider']
+                    right_boundary = boundaries['middle_divider'] if col_idx == 0 else boundaries['right_outer']
+                    pL = V34__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, left_boundary)
+                    pL_ok = pL is not None
+                    if pL_ok:
+                        xL, yL = pL
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xL = V34__get_boundary_x_at_y(left_boundary, y_ref)
+                        yL = m_final * xL + c_final
+                    pR = V34__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, right_boundary)
+                    pR_ok = pR is not None
+                    if pR_ok:
+                        xR, yR = pR
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xR = V34__get_boundary_x_at_y(right_boundary, y_ref)
+                        yR = m_final * xR + c_final
+                    vx = xR - xL
+                    vy = yR - yL
+                    norm = max(1e-06, math.sqrt(vx * vx + vy * vy))
+                    ux, uy = (vx / norm, vy / norm)
+                    extend_px = 2.0
+                    xL2 = xL - extend_px * ux
+                    yL2 = yL - extend_px * uy
+                    xR2 = xR + extend_px * ux
+                    yR2 = yR + extend_px * uy
+                    reason_val = 'ok'
+                    if not pL_ok or not pR_ok:
+                        reason_val = 'rail_intersection_failed'
+                    h_rot, w_rot = rotated_gray.shape[:2]
+                    out_of_bounds = not (0 <= xL2 < w_rot and 0 <= yL2 < h_rot and (0 <= xR2 < w_rot) and (0 <= yR2 < h_rot))
+                    if out_of_bounds:
+                        reason_val = 'endpoint_out_of_image'
+                    if has_crop_left_col_runtime:
+                        print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source={source_name} allowed=true pL_ok={str(pL_ok).lower()} pR_ok={str(pR_ok).lower()} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f} reason={reason_val}')
+                        print(f'[CROP_LEFT_DRAW_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source={source_name} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f}')
+                    pt1_orig = transform_local_to_orig(xL2, yL2)
+                    pt2_orig = transform_local_to_orig(xR2, yR2)
+                    p1_snap = (int(round(pt1_orig[0])), int(round(pt1_orig[1])))
+                    p2_snap = (int(round(pt2_orig[0])), int(round(pt2_orig[1])))
+                    cv2.line(img_snap, p1_snap, p2_snap, (255, 0, 255), 1, lineType=cv2.LINE_AA)
+        if not left_snapped_horiz_gaps_by_col:
+            for r, g in enumerate(snapped_horiz_gaps):
+                source_name = g.get('selected_cand', 'unknown')
+                support_valid = bool(g.get('support_valid', False))
+                real_line_for_draw = source_name in ('support', 'thermal', 'support_prefit', 'profile_recovered', 'profile_recovered_locked', 'profile_pitch') and support_valid and (g.get('support_line_m') is not None) and (g.get('support_line_c') is not None)
+                if bad_block_orientation or not real_line_for_draw:
+                    print(f"[HORIZ_DRAW_SUPPRESSED] block={block_name} r={r} source={source_name} support_valid={str(support_valid).lower()} reason={('bad_block_orientation' if bad_block_orientation else 'fallback_line_source')}")
+                    continue
+                if support_valid and g.get('support_line_m') is not None and (g.get('support_line_c') is not None):
+                    m_final = float(g['support_line_m'])
+                    c_final = float(g['support_line_c'])
+                else:
+                    m_final = float(g.get('m_row', 0.0))
+                    c_final = float(g.get('c_row', g.get('c_selected', 0.0)))
+                left_boundary = boundaries.get('left_outer')
+                right_boundary = boundaries.get('right_outer')
+                if left_boundary is None or right_boundary is None:
+                    continue
+                pL = V34__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, left_boundary)
+                if pL is None:
+                    y_ref = m_final * x_mid + c_final
+                    xL = V34__get_boundary_x_at_y(left_boundary, y_ref)
+                    yL = m_final * xL + c_final
+                else:
+                    xL, yL = pL
+                pR = V34__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, right_boundary)
+                if pR is None:
+                    y_ref = m_final * x_mid + c_final
+                    xR = V34__get_boundary_x_at_y(right_boundary, y_ref)
+                    yR = m_final * xR + c_final
+                else:
+                    xR, yR = pR
+                vx = xR - xL
+                vy = yR - yL
+                norm = max(1e-06, math.sqrt(vx * vx + vy * vy))
+                ux, uy = (vx / norm, vy / norm)
+                xL2, yL2 = (xL - 2.0 * ux, yL - 2.0 * uy)
+                xR2, yR2 = (xR + 2.0 * ux, yR + 2.0 * uy)
+                pt1_orig = transform_local_to_orig(xL2, yL2)
+                pt2_orig = transform_local_to_orig(xR2, yR2)
+                cv2.line(img_snap, (int(round(pt1_orig[0])), int(round(pt1_orig[1]))), (int(round(pt2_orig[0])), int(round(pt2_orig[1]))), (255, 0, 255), 1, lineType=cv2.LINE_AA)
+                print(f'[HORIZ_DRAW_LINE] block={block_name} r={r} source={source_name} support_valid={str(support_valid).lower()} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f}')
+        snap_blocks.append({'block_name': block_name, 'n_cols': n_cols, 'row_count': row_count, 'is_large_grid': True, 'boundaries': copy.deepcopy(boundaries), 'snapped_horiz_gaps': copy.deepcopy(snapped_horiz_gaps), 'left_snapped_horiz_gaps_by_col': copy.deepcopy(left_snapped_horiz_gaps_by_col), 'bad_block_orientation': bool(consensus_stats.get('bad_block_orientation', False)), 'bad_block_orientation_angle_deg': float(consensus_stats.get('bad_block_orientation_angle_deg', 0.0)), 'm_perp': float(m_perp), 'x_mid': float(x_mid), 'b_local': copy.deepcopy(b_local), 'transform_info': {'rot_M_inv': Minv.copy(), 'roi_x1': int(roi_x1), 'roi_y1': int(roi_y1), 'local_w': int(roi_w), 'local_h': int(roi_h)}, 'rotation_deg': float(rotation_deg), 'rotated_gray': rotated_gray.copy()})
+    drawn_panel_count = V34__build_panel_polygons_from_visible_snap_evidence(img_panels_from_snap, snap_blocks, img_support, img_snap)
+    out_dir = Path(V34__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    old_files = [f'debug_{V34__IMAGE_STEM}_panels_quality.JPG', f'debug_{V34__IMAGE_STEM}_panels_verified.JPG', f'debug_{V34__IMAGE_STEM}_full_image_panels_verified_seg10.JPG', f'debug_{V34__IMAGE_STEM}_hybrid_sources.JPG', f'debug_{V34__IMAGE_STEM}_yolo_edge_consensus_lines.JPG', f'debug_{V34__IMAGE_STEM}_yolo_edge_consensus_panels.JPG', f'debug_{V34__IMAGE_STEM}_yolo_edge_consensus_quality.JPG', f'debug_{V34__IMAGE_STEM}_blocks.JPG', f'debug_{V34__IMAGE_STEM}_support_points.JPG', f'debug_{V34__IMAGE_STEM}_panels_from_snap.JPG', f'debug_{V34__IMAGE_STEM}_lower_support_debug.JPG', f'debug_{V34__IMAGE_STEM}_inner_margin_x2.JPG', f'panel_inner_area_{V34__IMAGE_STEM}.csv']
+    for old_name in old_files:
+        (out_dir / old_name).unlink(missing_ok=True)
+    cv2.imwrite(str(out_dir / f'debug_{V34__IMAGE_STEM}_line_snap.JPG'), img_snap)
+    print('\n' + '=' * 95)
+    print(f'TOTAL DRAWN PANELS FROM SNAP: {drawn_panel_count}')
+    print('=' * 95)
+
+def V34___find_panel_log_for_stem(stem, logs_dir):
+    logs_dir = Path(logs_dir)
+    candidates = [logs_dir / f'{stem}_panel_refine.jsonl', logs_dir / f'{stem}_panel_refine.json', logs_dir / f'{stem}.jsonl', logs_dir / f'{stem}.json']
+    for p in candidates:
+        if p.exists():
+            return p
+    loose = sorted(logs_dir.glob(f'*{stem}*panel*.*'))
+    for p in loose:
+        if p.suffix.lower() in ('.jsonl', '.json'):
+            return p
+    return None
+
+def V34___cleanup_outputs_for_stem(stem, out_dir):
+    out_dir = Path(out_dir)
+    keep = {f'debug_{stem}_line_snap.JPG', f'debug_{stem}_calc_inner_polygon.JPG'}
+    for p in out_dir.glob(f'debug_{stem}_*'):
+        if p.name not in keep:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    for p in out_dir.glob(f'*{stem}*.csv'):
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+def V34___cleanup_global_debug_side_outputs(out_dir):
+    """Remove legacy side-output debug files from previous runs.
+
+    The local test workflow must keep only *_line_snap.JPG and *_calc_inner_polygon.JPG.
+    This also removes old hardcoded DJI_0087 crop-left files that older builds emitted.
+    """
+    out_dir = Path(out_dir)
+    patterns = ['debug_*_crop_left_snap_debug.JPG', 'debug_*_crop_left_profiles.jsonl', 'debug_*_smallblock_mask.JPG', 'debug_*_block_*_mask.JPG', 'debug_*_inner_margin_x2.JPG', 'panel_inner_area_*.csv', 'panel_calc_polygon_*.csv']
+    for pat in patterns:
+        for q in out_dir.glob(pat):
+            try:
+                q.unlink()
+            except Exception:
+                pass
+
+def V34__main():
+    parser = argparse.ArgumentParser(description='Batch PV geometry post-processor using the preserved v18 line-snap pipeline + v34 dense middle-rail/row-valley refinement.')
+    parser.add_argument('--dataset', default='D:\\\\Image\\\\Plot_16_50MW\\\\content\\\\Dataset\\\\Plot_16_50MW\\\\DATASET', help='Folder containing input JPG/JPEG/PNG images')
+    parser.add_argument('--logs', default='data/results/debug_logs', help='Folder containing *_panel_refine.jsonl/json files')
+    parser.add_argument('--out', default='data/results/debug', help='Output folder')
+    parser.add_argument('--image', default=None, help='Optional single image path')
+    parser.add_argument('--panels', default=None, help='Optional panel json/jsonl path for --image')
+    parser.add_argument('--pattern', default='*.JPG', help='Image glob pattern when processing --dataset')
+    parser.add_argument('--limit', type=int, default=0, help='Max number of images to process; 0 means all')
+    args = parser.parse_args()
+    global V34__IMAGE_STEM, V34__CURRENT_IMAGE_PATH, V34__CURRENT_PANELS_PATH, V34__OUTPUT_DEBUG_DIR, V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG
+    V34__OUTPUT_DEBUG_DIR = args.out
+    Path(V34__OUTPUT_DEBUG_DIR).mkdir(parents=True, exist_ok=True)
+    V34___cleanup_global_debug_side_outputs(V34__OUTPUT_DEBUG_DIR)
+    if args.image:
+        images = [Path(args.image)]
+    else:
+        dataset_dir = Path(args.dataset)
+        if not dataset_dir.exists():
+            raise FileNotFoundError(f'Dataset folder not found: {dataset_dir}')
+        patterns = [args.pattern]
+        if args.pattern == '*.JPG':
+            patterns = ['*.JPG', '*.jpg', '*.JPEG', '*.jpeg', '*.PNG', '*.png']
+        images = []
+        for pat in patterns:
+            images.extend(sorted(dataset_dir.glob(pat)))
+        seen = set()
+        images = [p for p in images if not (str(p).lower() in seen or seen.add(str(p).lower()))]
+        if args.limit and args.limit > 0:
+            images = images[:args.limit]
+    if not images:
+        print('[BATCH] no input images found')
+        return
+    ok = 0
+    skipped = 0
+    for img_path in images:
+        stem = img_path.stem
+        panel_path = Path(args.panels) if args.panels and len(images) == 1 else V34___find_panel_log_for_stem(stem, args.logs)
+        if panel_path is None or not panel_path.exists():
+            print(f'[SKIP] stem={stem} reason=missing_panel_log')
+            skipped += 1
+            continue
+        V34__IMAGE_STEM = stem
+        V34__CURRENT_IMAGE_PATH = str(img_path)
+        V34__CURRENT_PANELS_PATH = str(panel_path)
+        V34__GLOBAL_LOWER_SUPPORT_DEBUG_IMG = None
+        print(f'[RUN] stem={stem} image={img_path} panels={panel_path}')
+        try:
+            V34__run_current_image()
+            V34___cleanup_outputs_for_stem(stem, V34__OUTPUT_DEBUG_DIR)
+            print(f'[DONE] stem={stem} outputs=debug_{stem}_line_snap.JPG,debug_{stem}_calc_inner_polygon.JPG')
+            ok += 1
+        except Exception as exc:
+            print(f'[ERROR] stem={stem} type={type(exc).__name__} message={exc}')
+    V34___cleanup_global_debug_side_outputs(V34__OUTPUT_DEBUG_DIR)
+    print(f'[BATCH_SUMMARY] ok={ok} skipped={skipped} total={len(images)} out={V34__OUTPUT_DEBUG_DIR}')
+
+# ===== V42 FULL LOCAL ENGINE NAMESPACE =====
+import os
+import json
+import math
+import copy
+import numpy as np
+import cv2
+import csv
+import argparse
+from pathlib import Path
+V42__HORIZONTAL_OUTER_MARGIN_PX = 0.3
+V42__THERMAL_GAP_SNAP_WINDOW = 4
+V42__PITCH_REGULARIZATION_WEIGHT = 0.4
+V42__MAX_HORIZONTAL_ROW_ANGLE_DEG = 4.0
+V42__BAD_BLOCK_RAW_ANGLE_DEG = 10.0
+V42__VERTICAL_OUTER_INSET_PX = 1.2
+V42__MIDDLE_DIVIDER_INSET_PX = 0.7
+V42__LAST_ROW_SNAP_WINDOW = 5
+V42__LAST_ROW_PITCH_WEIGHT = 0.05
+V42__IMAGE_STEM = ''
+V42__CURRENT_IMAGE_PATH = None
+V42__CURRENT_PANELS_PATH = None
+V42__OUTPUT_DEBUG_DIR = 'data/results/debug'
+V42__VISUAL_PANEL_THICKNESS = 3
+V42__INNER_MARGIN_BASE_PX = 3
+V42__INNER_MARGIN_FACTORS = (1, 2, 3)
+V42__SAVE_INNER_MASK_DEBUG = False
+V42__DRAW_INNER_CONTOUR_DEBUG = False
+V42__INNER_PANEL_MARGIN_PX = 3
+V42__USE_INNER_PANEL_FOR_CALC = True
+V42__DRAW_INNER_PANEL_DEBUG = True
+V42__GLOBAL_SMALL_RAIL_SLOPES = []
+V42__GLOBAL_LARGE_BLOCK_INFOS = []
+V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG = None
+V42__V34_ROW_X_SAMPLE_STEP_PX = 0.85
+V42__V34_ROW_DY_STEP_PX = 0.5
+V42__V34_ROW_SEARCH_RADIUS_PX = 6.0
+V42__V34_MIDDLE_RAIL_Y_STEP_PX = 3.0
+V42__V34_MIDDLE_RAIL_SEARCH_RADIUS_PX = 7.0
+
+def V42__extract_input_image():
+    """Return the currently selected image path.
+
+    In the original research script this function extracted one hard-coded image
+    from Dataset.zip.  In this universal runner it is intentionally reduced to a
+    path resolver so the rest of the 18th-version geometry pipeline remains
+    unchanged.
+    """
+    global V42__CURRENT_IMAGE_PATH
+    if V42__CURRENT_IMAGE_PATH is None:
+        candidate = Path(f'data/precalib/{V42__IMAGE_STEM}.JPG')
+    else:
+        candidate = Path(V42__CURRENT_IMAGE_PATH)
+    if not candidate.exists():
+        raise FileNotFoundError(f'Missing input image: {candidate}')
+    return candidate
+
+def V42__load_panels_from_logs():
+    """Load panel detections from the currently selected json/jsonl file."""
+    global V42__CURRENT_PANELS_PATH
+    log_path = Path(V42__CURRENT_PANELS_PATH) if V42__CURRENT_PANELS_PATH is not None else Path(f'data/results/debug_logs/{V42__IMAGE_STEM}_panel_refine.jsonl')
+    if not log_path.exists():
+        raise FileNotFoundError(f'Missing panel detection log at {log_path}')
+    panels = []
+    if log_path.suffix.lower() == '.json':
+        data = json.loads(log_path.read_text(encoding='utf-8'))
+        if isinstance(data, dict):
+            data = data.get('panels', data.get('detections', []))
+        if not isinstance(data, list):
+            raise ValueError(f'Unsupported panel JSON structure: {log_path}')
+        panels = data
+    else:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                panels.append(json.loads(line))
+    if not panels:
+        raise ValueError(f'No panels loaded from {log_path}')
+    return panels
+
+def V42__is_generic_small_block(row_count, panel_count, n_cols=None):
+    """Route compact 1x1/1x2/2x1/2x2 blocks to the shared-quad small-block logic.
+
+    This replaces image-name rules such as DJI_0845_R + block_3/block_5/block_7.
+    Long strings remain on the consensus rail + horizontal support pipeline.
+    """
+    if panel_count < 2 or panel_count > 4:
+        return False
+    if row_count > 2:
+        return False
+    if n_cols is not None and n_cols > 2:
+        return False
+    return True
+
+def V42__is_single_row_two_col_block(row_count, n_cols, panel_count):
+    """Generalized replacement for the old block_7 branch."""
+    return row_count == 1 and n_cols == 2 and (panel_count == 2)
+
+def V42__clamp_horizontal_slope_to_reasonable(m, max_abs_angle_deg=4.0):
+    """Keep generic horizontal separators from turning into diagonal panel-body lines.
+
+    In the block-local coordinate system used by this script, true row separators
+    should be close to horizontal. Some bad YOLO priors can make all row priors
+    in a block lean diagonally; support points then look clean but are still the
+    wrong structure. This helper clamps only the slope, not the row location.
+    """
+    try:
+        ang = math.degrees(math.atan(float(m)))
+        lim = float(max_abs_angle_deg)
+        if abs(ang) <= lim:
+            return (float(m), False, ang)
+        return (math.tan(math.radians(lim if ang > 0 else -lim)), True, ang)
+    except Exception:
+        return (0.0, True, 999.0)
+
+def V42__clamp_slope_about_anchor(m_src, c_src, m_ref, x_anchor, max_angle_deg=4.0):
+    """Clamp a horizontal line slope around a reference slope while preserving y at x_anchor."""
+    a_src = math.atan(float(m_src))
+    a_ref = math.atan(float(m_ref))
+    diff = a_src - a_ref
+    max_diff = math.radians(float(max_angle_deg))
+    if abs(diff) <= max_diff:
+        return (float(m_src), float(c_src), False, math.degrees(abs(diff)))
+    a_new = a_ref + math.copysign(max_diff, diff)
+    m_new = math.tan(a_new)
+    y_anchor = float(m_src) * float(x_anchor) + float(c_src)
+    c_new = y_anchor - m_new * float(x_anchor)
+    return (float(m_new), float(c_new), True, math.degrees(abs(diff)))
+
+def V42__apply_horizontal_snap_slope_guard(snapped_horiz_gaps, m_consensus, x_mid, block_name, max_angle_deg=2.0, reject_angle_deg=3.0):
+    """Reject or gently clamp bad horizontal support lines.
+
+    v19 still allowed support-fitted lines to keep a wrong center after clamping
+    their slope. In low-contrast/purple panels this created long diagonal magenta
+    lines inside the panel body, and the final polygons followed those wrong lines.
+
+    v20 rule:
+    - If support slope differs too much from the block consensus, reject support
+      evidence entirely and fall back to the YOLO/pitch row prior.
+    - If the slope is only mildly different, clamp it around x_mid.
+    """
+    for r, g in enumerate(snapped_horiz_gaps):
+        if not g.get('support_valid', False):
+            continue
+        m_s = g.get('support_line_m', None)
+        c_s = g.get('support_line_c', None)
+        if m_s is None or c_s is None:
+            continue
+        angle_diff = abs(math.degrees(math.atan(float(m_s))) - math.degrees(math.atan(float(m_consensus))))
+        while angle_diff > 90:
+            angle_diff = abs(angle_diff - 180)
+        if angle_diff > reject_angle_deg:
+            fallback_c = g.get('c_row_yolo', None)
+            fallback_src = 'yolo'
+            if fallback_c is None:
+                fallback_c = g.get('c_row_pitch', g.get('c_row', c_s))
+                fallback_src = 'pitch'
+            g['support_valid'] = False
+            g['support_line_m_rejected'] = float(m_s)
+            g['support_line_c_rejected'] = float(c_s)
+            g['support_reject_reason'] = f'slope_angle_{angle_diff:.2f}>{reject_angle_deg:.2f}'
+            g['support_line_m'] = None
+            g['support_line_c'] = None
+            g['m_row'] = float(m_consensus)
+            g['c_row'] = float(fallback_c)
+            g['y_snap'] = float(m_consensus) * float(x_mid) + float(fallback_c)
+            old_src = g.get('selected_cand', 'support')
+            g['selected_cand'] = f'{old_src}_rejected_slope_{fallback_src}'
+            print(f'[HORIZ_REJECT_BAD_SUPPORT] block={block_name} r={r} angle_diff={angle_diff:.2f} reject>{reject_angle_deg:.2f} fallback={fallback_src} m_raw={float(m_s):.5f} m_consensus={float(m_consensus):.5f}')
+            continue
+        m_new, c_new, changed, _ = V42__clamp_slope_about_anchor(m_s, c_s, m_consensus, x_mid, max_angle_deg=max_angle_deg)
+        if changed:
+            g['support_line_m_raw'] = float(m_s)
+            g['support_line_c_raw'] = float(c_s)
+            g['support_line_m'] = m_new
+            g['support_line_c'] = c_new
+            g['m_row'] = m_new
+            g['c_row'] = c_new
+            g['y_snap'] = m_new * x_mid + c_new
+            old_src = g.get('selected_cand', 'support')
+            g['selected_cand'] = f'{old_src}_slope_guard'
+            print(f'[HORIZ_SLOPE_GUARD] block={block_name} r={r} angle_diff={angle_diff:.2f} max={max_angle_deg:.2f} m_raw={float(m_s):.5f} m_new={m_new:.5f}')
+    return snapped_horiz_gaps
+
+def V42__inset_quad_polygon(poly, margin_px):
+    """
+    Input:
+        poly: np.ndarray shape (4,2), final polygon.
+        margin_px: number of pixels to inset.
+    Output:
+        inner_poly: np.ndarray shape (4,2)
+        source: "geometric_inset" or "centroid_fallback"
+        valid: bool
+    """
+    poly_f = np.array(poly, dtype=np.float32)
+    if poly_f.shape != (4, 2):
+        return (poly_f, 'invalid_shape', False)
+    centroid = np.mean(poly_f, axis=0)
+    angles = np.arctan2(poly_f[:, 1] - centroid[1], poly_f[:, 0] - centroid[0])
+    sorted_indices = np.argsort(angles)
+    q = poly_f[sorted_indices]
+    lines = []
+    has_zero_edge = False
+    for i in range(4):
+        p_i = q[i]
+        p_j = q[(i + 1) % 4]
+        dx = p_j[0] - p_i[0]
+        dy = p_j[1] - p_i[1]
+        edge_len = math.sqrt(dx * dx + dy * dy)
+        if edge_len < 1e-06:
+            has_zero_edge = True
+            break
+        nx = -dy / edge_len
+        ny = dx / edge_len
+        midpoint = (p_i + p_j) / 2.0
+        to_centroid_x = centroid[0] - midpoint[0]
+        to_centroid_y = centroid[1] - midpoint[1]
+        dot_val = nx * to_centroid_x + ny * to_centroid_y
+        if dot_val < 0:
+            nx = -nx
+            ny = -ny
+        d = nx * p_i[0] + ny * p_i[1] + margin_px
+        lines.append((nx, ny, d))
+    q_inner = []
+    intersect_fail = False
+    if not has_zero_edge:
+        for i in range(4):
+            nx1, ny1, d1 = lines[(i - 1) % 4]
+            nx2, ny2, d2 = lines[i]
+            det = nx1 * ny2 - ny1 * nx2
+            if abs(det) < 1e-06:
+                intersect_fail = True
+                break
+            x = (d1 * ny2 - ny1 * d2) / det
+            y = (nx1 * d2 - d1 * nx2) / det
+            if not np.isfinite(x) or not np.isfinite(y):
+                intersect_fail = True
+                break
+            q_inner.append([x, y])
+    valid = False
+    source = 'geometric_inset'
+    inner_poly = None
+    if not has_zero_edge and (not intersect_fail) and (len(q_inner) == 4):
+        q_inner_np = np.array(q_inner, dtype=np.float32)
+        area = cv2.contourArea(q_inner_np)
+        is_convex = cv2.isContourConvex(q_inner_np.astype(np.int32))
+        if area > 0 and is_convex:
+            inner_poly = np.zeros_like(poly_f)
+            for original_idx in range(4):
+                sorted_idx_pos = np.where(sorted_indices == original_idx)[0][0]
+                inner_poly[original_idx] = q_inner_np[sorted_idx_pos]
+            valid = True
+    if not valid:
+        source = 'centroid_fallback'
+        dists = np.linalg.norm(poly_f - centroid, axis=1)
+        avg_radius = np.mean(dists)
+        scale = max(0.0, 1.0 - margin_px / max(avg_radius, 1.0))
+        inner_poly = centroid + scale * (poly_f - centroid)
+        fallback_area = cv2.contourArea(inner_poly)
+        fallback_is_convex = cv2.isContourConvex(inner_poly.astype(np.int32))
+        if fallback_area > 0 and fallback_is_convex:
+            valid = True
+        else:
+            valid = False
+    return (inner_poly, source, valid)
+
+def V42__polygon_to_mask(image_shape, polygon):
+    h, w = image_shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    poly_np = np.array(polygon, dtype=np.int32)
+    cv2.fillPoly(mask, [poly_np], 255)
+    return mask
+
+def V42__build_panel_inner_mask(image_shape, polygon, margin_px):
+    h, w = image_shape[:2]
+    raw_mask = np.zeros((h, w), dtype=np.uint8)
+    poly_np = np.array(polygon, dtype=np.int32)
+    cv2.fillPoly(raw_mask, [poly_np], 255)
+    if margin_px <= 0:
+        inner_mask = raw_mask.copy()
+    else:
+        kernel_size = 2 * margin_px + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        inner_mask = cv2.erode(raw_mask, kernel, iterations=1)
+    raw_area = int(np.count_nonzero(raw_mask))
+    inner_area = int(np.count_nonzero(inner_mask))
+    area_ratio = float(inner_area / raw_area) if raw_area > 0 else 0.0
+    return (raw_mask, inner_mask, raw_area, inner_area, area_ratio)
+
+def V42__summarize_panel_inner_areas(image_shape, panel_polygons, panel_sources=None, image_stem=None, debug_img_base=None):
+    if image_stem is None:
+        image_stem = 'unknown'
+    if panel_sources is None:
+        panel_sources = ['unknown'] * len(panel_polygons)
+    n = len(panel_polygons)
+    raw_total = 0
+    m1_total = 0
+    m2_total = 0
+    m3_total = 0
+    ratios_m1 = []
+    ratios_m2 = []
+    ratios_m3 = []
+    rows_csv = []
+    debug_img = None
+    if debug_img_base is not None:
+        debug_img = debug_img_base.copy()
+    for idx, poly in enumerate(panel_polygons):
+        poly_np = np.array(poly, dtype=np.float32)
+        source = panel_sources[idx]
+        _, mask_m1, raw_a, m1_a, r1 = V42__build_panel_inner_mask(image_shape, poly_np, V42__INNER_MARGIN_BASE_PX * 1)
+        _, mask_m2, _, m2_a, r2 = V42__build_panel_inner_mask(image_shape, poly_np, V42__INNER_MARGIN_BASE_PX * 2)
+        _, mask_m3, _, m3_a, r3 = V42__build_panel_inner_mask(image_shape, poly_np, V42__INNER_MARGIN_BASE_PX * 3)
+        if not raw_a >= m1_a >= m2_a >= m3_a:
+            print(f'[PANEL_INNER_AREA_WARN] idx={idx} reason=non_monotonic raw={raw_a} m1={m1_a} m2={m2_a} m3={m3_a}')
+        raw_total += raw_a
+        m1_total += m1_a
+        m2_total += m2_a
+        m3_total += m3_a
+        ratios_m1.append(r1)
+        ratios_m2.append(r2)
+        ratios_m3.append(r3)
+        print(f'[PANEL_INNER_AREA] image={image_stem} idx={idx} source={source} raw={raw_a} m1={m1_a} ratio1={r1:.3f} m2={m2_a} ratio2={r2:.3f} m3={m3_a} ratio3={r3:.3f}')
+        rows_csv.append({'image': image_stem, 'idx': idx, 'source': source, 'raw_area': raw_a, 'margin_1_area': m1_a, 'margin_1_ratio': f'{r1:.3f}', 'margin_2_area': m2_a, 'margin_2_ratio': f'{r2:.3f}', 'margin_3_area': m3_a, 'margin_3_ratio': f'{r3:.3f}'})
+        if debug_img is not None:
+            cv2.polylines(debug_img, [poly_np.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            contours, _ = cv2.findContours(mask_m2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid_contours = [c for c in contours if cv2.contourArea(c) > 5]
+            if valid_contours:
+                cv2.drawContours(debug_img, valid_contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+            else:
+                cv2.drawContours(debug_img, contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+    if V42__SAVE_INNER_MASK_DEBUG and debug_img is not None:
+        out_dir = Path(V42__OUTPUT_DEBUG_DIR)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out_dir / f'debug_{image_stem}_inner_margin_x2.JPG'), debug_img)
+    if V42__DRAW_INNER_CONTOUR_DEBUG and debug_img_base is not None:
+        for idx, poly in enumerate(panel_polygons):
+            poly_np = np.array(poly, dtype=np.float32)
+            _, mask_m2, _, _, _ = V42__build_panel_inner_mask(image_shape, poly_np, V42__INNER_MARGIN_BASE_PX * 2)
+            contours, _ = cv2.findContours(mask_m2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            valid_contours = [c for c in contours if cv2.contourArea(c) > 5]
+            if valid_contours:
+                cv2.drawContours(debug_img_base, valid_contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+            else:
+                cv2.drawContours(debug_img_base, contours, -1, (255, 255, 0), 1, lineType=cv2.LINE_AA)
+    r1_total = m1_total / raw_total if raw_total > 0 else 0.0
+    r2_total = m2_total / raw_total if raw_total > 0 else 0.0
+    r3_total = m3_total / raw_total if raw_total > 0 else 0.0
+    print(f'[PANEL_INNER_AREA_SUMMARY] image={image_stem} n={n} raw_total={raw_total} m1_total={m1_total} ratio1={r1_total:.3f} m2_total={m2_total} ratio2={r2_total:.3f} m3_total={m3_total} ratio3={r3_total:.3f}')
+    if ratios_m1:
+        print(f'[PANEL_INNER_AREA_STATS] image={image_stem} margin=1 min={np.min(ratios_m1):.3f} mean={np.mean(ratios_m1):.3f} max={np.max(ratios_m1):.3f}')
+        print(f'[PANEL_INNER_AREA_STATS] image={image_stem} margin=2 min={np.min(ratios_m2):.3f} mean={np.mean(ratios_m2):.3f} max={np.max(ratios_m2):.3f}')
+        print(f'[PANEL_INNER_AREA_STATS] image={image_stem} margin=3 min={np.min(ratios_m3):.3f} mean={np.mean(ratios_m3):.3f} max={np.max(ratios_m3):.3f}')
+    out_dir = Path(V42__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / f'panel_inner_area_{image_stem}.csv'
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['image', 'idx', 'source', 'raw_area', 'margin_1_area', 'margin_1_ratio', 'margin_2_area', 'margin_2_ratio', 'margin_3_area', 'margin_3_ratio'])
+        writer.writeheader()
+        writer.writerows(rows_csv)
+
+def V42__group_into_blocks(panels):
+    """Groups panels into 1-column or 2-column blocks based on X coordinate."""
+    panels_with_cx = []
+    for p in panels:
+        x1, y1, x2, y2 = p['bbox']
+        cx = (x1 + x2) / 2.0
+        panels_with_cx.append((cx, p))
+    panels_with_cx.sort(key=lambda x: x[0])
+    columns = []
+    for cx, p in panels_with_cx:
+        if not columns:
+            columns.append([p])
+        else:
+            mean_x = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in columns[-1]])
+            if cx - mean_x > 40:
+                columns.append([p])
+            else:
+                columns[-1].append(p)
+    for col in columns:
+        col.sort(key=lambda p: (p['bbox'][1] + p['bbox'][3]) / 2.0)
+    columns.sort(key=lambda col: np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in col]))
+    blocks = []
+    i = 0
+    n_cols = len(columns)
+    while i < n_cols:
+        col_curr = columns[i]
+        cx_curr = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in col_curr])
+        if i + 1 < n_cols:
+            col_next = columns[i + 1]
+            cx_next = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in col_next])
+            if cx_next - cx_curr < 70:
+                blocks.append({'columns': [col_curr, col_next], 'panels': col_curr + col_next})
+                i += 2
+                continue
+        blocks.append({'columns': [col_curr], 'panels': col_curr})
+        i += 1
+    return blocks
+
+def V42__split_block_by_y_gap(block):
+    """Split a single block into sub-blocks along Y when a large vertical gap exists.
+    
+    - Sort panels by y_top inside each column, then across the full block.
+    - Compute median panel height as the reference scale.
+    - Split when gap between consecutive row-groups exceeds max(45px, 1.8 * median_height).
+    # Discard sub-blocks with too few panels: <2.
+    """
+    n_cols = len(block['columns'])
+    min_panels = 2
+    all_panels = sorted(block['panels'], key=lambda p: p['bbox'][1])
+    heights = [p['bbox'][3] - p['bbox'][1] for p in all_panels]
+    median_h = float(np.median(heights)) if heights else 30.0
+    gap_threshold = max(45.0, 1.8 * median_h)
+    row_clusters = []
+    for p in all_panels:
+        placed = False
+        for rc in row_clusters:
+            rc_mid_y = np.mean([(rp['bbox'][1] + rp['bbox'][3]) / 2.0 for rp in rc])
+            p_mid_y = (p['bbox'][1] + p['bbox'][3]) / 2.0
+            if abs(p_mid_y - rc_mid_y) < median_h:
+                rc.append(p)
+                placed = True
+                break
+        if not placed:
+            row_clusters.append([p])
+    row_clusters.sort(key=lambda rc: np.mean([(p['bbox'][1] + p['bbox'][3]) / 2.0 for p in rc]))
+    split_indices = []
+    for k in range(len(row_clusters) - 1):
+        bottom_k = max((p['bbox'][3] for p in row_clusters[k]))
+        top_k1 = min((p['bbox'][1] for p in row_clusters[k + 1]))
+        gap = top_k1 - bottom_k
+        if gap > gap_threshold:
+            split_indices.append(k + 1)
+    if not split_indices:
+        block['y_range'] = (min((p['bbox'][1] for p in all_panels)), max((p['bbox'][3] for p in all_panels)))
+        block['panel_count'] = len(all_panels)
+        block['median_panel_height'] = median_h
+        block['max_gap_used'] = gap_threshold
+        return ([block], median_h, [])
+    all_split_points = [0] + split_indices + [len(row_clusters)]
+    sub_row_groups = []
+    for i in range(len(all_split_points) - 1):
+        start_idx = all_split_points[i]
+        end_idx = all_split_points[i + 1]
+        sub_rows = row_clusters[start_idx:end_idx]
+        sub_panels = [p for rc in sub_rows for p in rc]
+        sub_row_groups.append((sub_panels, sub_rows))
+    sub_blocks = []
+    gaps_used = []
+    for i, (sub_panels_list, sub_rows) in enumerate(sub_row_groups):
+        if len(sub_panels_list) < min_panels:
+            continue
+        sub_panels_sorted_x = sorted(sub_panels_list, key=lambda p: (p['bbox'][0] + p['bbox'][2]) / 2.0)
+        sub_cols = []
+        for p in sub_panels_sorted_x:
+            px_cx = (p['bbox'][0] + p['bbox'][2]) / 2.0
+            if not sub_cols:
+                sub_cols.append([p])
+            else:
+                mean_x = np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in sub_cols[-1]])
+                if px_cx - mean_x > 40:
+                    sub_cols.append([p])
+                else:
+                    sub_cols[-1].append(p)
+        for sc in sub_cols:
+            sc.sort(key=lambda p: (p['bbox'][1] + p['bbox'][3]) / 2.0)
+        sub_cols.sort(key=lambda sc: np.mean([(pt['bbox'][0] + pt['bbox'][2]) / 2.0 for pt in sc]))
+        if i > 0:
+            prev_rows = sub_row_groups[i - 1][1]
+            prev_bottom = max((p['bbox'][3] for rc in prev_rows for p in rc))
+            curr_top = min((p['bbox'][1] for p in sub_panels_list))
+            gaps_used.append(float(curr_top - prev_bottom))
+        sub_blocks.append({'columns': sub_cols, 'panels': sub_panels_list, 'y_range': (min((p['bbox'][1] for p in sub_panels_list)), max((p['bbox'][3] for p in sub_panels_list))), 'panel_count': len(sub_panels_list), 'median_panel_height': median_h, 'max_gap_used': gap_threshold})
+    if not sub_blocks:
+        block['y_range'] = (min((p['bbox'][1] for p in all_panels)), max((p['bbox'][3] for p in all_panels)))
+        block['panel_count'] = len(all_panels)
+        block['median_panel_height'] = median_h
+        block['max_gap_used'] = gap_threshold
+        return ([block], median_h, [])
+    return (sub_blocks, median_h, gaps_used)
+
+def V42__get_boundary_x_at_y(boundary_pts, y_val):
+    if not boundary_pts:
+        return 0.0
+    if len(boundary_pts) == 1:
+        return boundary_pts[0][0]
+    pts = sorted(boundary_pts, key=lambda p: p[1])
+    if y_val <= pts[0][1]:
+        return pts[0][0]
+    if y_val >= pts[-1][1]:
+        return pts[-1][0]
+    for i in range(len(pts) - 1):
+        p0, p1 = (pts[i], pts[i + 1])
+        if p0[1] <= y_val <= p1[1]:
+            if abs(p1[1] - p0[1]) < 1e-05:
+                return p0[0]
+            t = (y_val - p0[1]) / (p1[1] - p0[1])
+            return p0[0] + t * (p1[0] - p0[0])
+    return pts[0][0]
+
+def V42__intersect_line_y_eq_mx_c_with_polyline(m, c, rail_pts):
+    if not rail_pts or len(rail_pts) < 2:
+        return None
+    for i in range(len(rail_pts) - 1):
+        x0, y0 = rail_pts[i]
+        x1, y1 = rail_pts[i + 1]
+        dx = x1 - x0
+        dy = y1 - y0
+        denom = dy - m * dx
+        if abs(denom) > 1e-06:
+            t = (m * x0 + c - y0) / denom
+            if 0.0 <= t <= 1.0:
+                return (x0 + t * dx, y0 + t * dy)
+    return None
+
+def V42__intersect_horizontal_line_with_vertical_boundary(m, c, boundary_pts):
+    for i in range(len(boundary_pts) - 1):
+        x0, y0 = boundary_pts[i]
+        x1, y1 = boundary_pts[i + 1]
+        dy = y1 - y0
+        dx = x1 - x0
+        if abs(dy) < 1e-05:
+            continue
+        denom = 1.0 - m * (dx / dy)
+        if abs(denom) < 1e-05:
+            continue
+        y_intersect = (m * x0 - m * y0 * (dx / dy) + c) / denom
+        if y0 <= y_intersect <= y1:
+            x_intersect = x0 + (y_intersect - y0) * (dx / dy)
+            return (x_intersect, y_intersect)
+    x0, y0 = boundary_pts[0]
+    x1, y1 = boundary_pts[1]
+    dy = y1 - y0
+    dx = x1 - x0
+    y_intersect = (m * x0 - m * y0 * (dx / (dy or 1.0)) + c) / (1.0 - m * (dx / (dy or 1.0)))
+    x_intersect = x0 + (y_intersect - y0) * (dx / (dy or 1.0))
+    return (x_intersect, y_intersect)
+
+def V42__draw_polyline(img, pts, color, thickness=2):
+    for idx in range(len(pts) - 1):
+        p1 = (int(round(pts[idx][0])), int(round(pts[idx][1])))
+        p2 = (int(round(pts[idx + 1][0])), int(round(pts[idx + 1][1])))
+        cv2.line(img, p1, p2, color, thickness, lineType=cv2.LINE_AA)
+
+def V42__detect_horizontal_gap_lines(gray, panels):
+    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    sobel_y_abs = np.abs(sobel_y)
+    gap_lines = []
+    rows = []
+    sorted_panels = sorted(panels, key=lambda p: (p['bbox'][1] + p['bbox'][3]) / 2.0)
+    for p in sorted_panels:
+        yc = (p['bbox'][1] + p['bbox'][3]) / 2.0
+        placed = False
+        for r in rows:
+            r_yc = np.mean([(pt['bbox'][1] + pt['bbox'][3]) / 2.0 for pt in r])
+            if abs(yc - r_yc) < 20:
+                r.append(p)
+                placed = True
+                break
+        if not placed:
+            rows.append([p])
+    rows.sort(key=lambda r: np.mean([(pt['bbox'][1] + pt['bbox'][3]) / 2.0 for pt in r]))
+    search_regions = []
+    r_top_y = min((p['bbox'][1] for p in rows[0]))
+    search_regions.append((r_top_y - 6, r_top_y + 6, rows[0]))
+    for i in range(len(rows) - 1):
+        r_bot_y = max((p['bbox'][3] for p in rows[i]))
+        r_top_y_next = min((p['bbox'][1] for p in rows[i + 1]))
+        y_mid = (r_bot_y + r_top_y_next) / 2.0
+        combined_panels = rows[i] + rows[i + 1]
+        search_regions.append((y_mid - 8, y_mid + 8, combined_panels))
+    r_bot_y_last = max((p['bbox'][3] for p in rows[-1]))
+    search_regions.append((r_bot_y_last - 6, r_bot_y_last + 6, rows[-1]))
+    h_img, w_img = gray.shape[:2]
+    for idx_reg, (y_start, y_end, reg_panels) in enumerate(search_regions):
+        y_start_int = int(max(0, math.floor(y_start)))
+        y_end_int = int(min(h_img - 1, math.ceil(y_end)))
+        if y_start_int >= y_end_int:
+            y_mid = int(round((y_start + y_end) / 2.0))
+            x_min = int(max(0, min((p['bbox'][0] for p in reg_panels)) - 5))
+            x_max = int(min(w_img - 1, max((p['bbox'][2] for p in reg_panels)) + 5))
+            gap_lines.append((y_mid, x_min, x_max))
+            continue
+        x_min = int(max(0, min((p['bbox'][0] for p in reg_panels)) - 5))
+        x_max = int(min(w_img - 1, max((p['bbox'][2] for p in reg_panels)) + 5))
+        intensities = []
+        for y_coord in range(y_start_int, y_end_int + 1):
+            val = np.mean(sobel_y_abs[y_coord, x_min:x_max])
+            intensities.append((val, y_coord))
+        best_y = max(intensities, key=lambda x: x[0])[1]
+        gap_lines.append((best_y, x_min, x_max))
+    return gap_lines
+
+def V42__evaluate_angle_candidate(gray, raw_gaps, x_mid, theta, n_samples=25):
+    m = math.tan(theta)
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    total_depth = 0.0
+    max_offset = 6
+    for y_anchor, x_start, x_end in raw_gaps:
+        xs = np.linspace(x_start, x_end, n_samples)
+        profile_sums = np.zeros(2 * max_offset + 1)
+        profile_counts = np.zeros(2 * max_offset + 1)
+        for dn in range(-max_offset, max_offset + 1):
+            for x in xs:
+                x_sample = x - dn * sin_theta
+                y_sample = m * (x - x_mid) + y_anchor + dn * cos_theta
+                x_idx = int(round(x_sample))
+                y_idx = int(round(y_sample))
+                if 0 <= x_idx < gray.shape[1] and 0 <= y_idx < gray.shape[0]:
+                    profile_sums[dn + max_offset] += gray[y_idx, x_idx]
+                    profile_counts[dn + max_offset] += 1
+        profile = profile_sums / np.maximum(profile_counts, 1)
+        smoothed = np.convolve(profile, np.ones(3) / 3.0, mode='same')
+        best_depth = 0.0
+        for v in range(1, len(smoothed) - 1):
+            if smoothed[v] < smoothed[v - 1] and smoothed[v] < smoothed[v + 1]:
+                left_peak = np.max(smoothed[:v])
+                right_peak = np.max(smoothed[v + 1:]) if v + 1 < len(smoothed) else smoothed[v]
+                depth = min(left_peak, right_peak) - smoothed[v]
+                if depth > best_depth:
+                    best_depth = depth
+        total_depth += best_depth
+    return total_depth
+
+def V42__get_oriented_line_y_at_x(m, x_mid, y_anchor, x_val):
+    return m * (x_val - x_mid) + y_anchor
+
+def V42__intersect_oriented_line_with_boundary(m_perp, x_mid, y_anchor, boundary_pts):
+    c = y_anchor - m_perp * x_mid
+    return V42__intersect_horizontal_line_with_vertical_boundary(m_perp, c, boundary_pts)
+
+def V42__shift_boundary_x(boundary_pts, dx):
+    return [(float(x) + float(dx), float(y)) for x, y in boundary_pts]
+
+def V42__sort_panel_corners(poly):
+    if len(poly) != 4:
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        x1, y1, x2, y2 = (min(xs), min(ys), max(xs), max(ys))
+        corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    else:
+        corners = poly
+    sorted_by_y = sorted(corners, key=lambda p: p[1])
+    top_two = sorted(sorted_by_y[:2], key=lambda p: p[0])
+    bottom_two = sorted(sorted_by_y[2:], key=lambda p: p[0])
+    TL = top_two[0]
+    TR = top_two[1]
+    BR = bottom_two[1]
+    BL = bottom_two[0]
+    return (TL, TR, BR, BL)
+
+def V42__fit_consensus_vertical_boundary(points, y_min, y_max, row_count):
+    ys = [p[1] for p in points]
+    xs = [p[0] for p in points]
+    if len(xs) < 2:
+        val = float(np.mean(xs) if xs else 0.0)
+        return [(val, float(y)) for y in np.linspace(y_min, y_max, 11)]
+    a_base, b_base = np.polyfit(ys, xs, 1)
+    if row_count < 8:
+        return [(a_base * y + b_base, y) for y in np.linspace(y_min, y_max, 11)]
+    else:
+        try:
+            coeffs = np.polyfit(ys, xs, 2)
+            fn = np.poly1d(coeffs)
+            pts = []
+            for y in np.linspace(y_min, y_max, 11):
+                x_val = fn(y)
+                x_base = a_base * y + b_base
+                x_val = max(x_base - 4.0, min(x_base + 4.0, x_val))
+                pts.append((x_val, y))
+            return pts
+        except Exception:
+            return [(a_base * y + b_base, y) for y in np.linspace(y_min, y_max, 11)]
+
+def V42__extract_support_points_for_horizontal_edge(rotated_gray, m_ref, c_ref, x_left, x_right, block_name, row_idx, row_count, is_outer_edge=False):
+    num_samples = max(80, int(abs(x_right - x_left) / 2))
+    sample_xs = np.linspace(x_left, x_right, num_samples)
+    length = math.sqrt(1.0 + m_ref ** 2)
+    nx = -m_ref / length
+    ny = 1.0 / length
+    win = 3 if is_outer_edge else 4
+    support_pts = []
+    min_x = x_left + 4 if is_outer_edge else x_left
+    max_x = x_right - 4 if is_outer_edge else x_right
+    for sx in sample_xs:
+        if sx < min_x or sx > max_x:
+            continue
+        sy_est = m_ref * sx + c_ref
+        profile = []
+        for d in range(-win, win + 1):
+            px = sx + d * nx
+            py = sy_est + d * ny
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(rotated_gray[y_idx, x_idx])
+        if len(profile) < 3:
+            continue
+        min_idx = np.argmin(profile)
+        if 0 < min_idx < len(profile) - 1:
+            if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                left_peak = np.max(profile[:min_idx])
+                right_peak = np.max(profile[min_idx + 1:])
+                valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                    px_val = sx + (min_idx - win) * nx
+                    py_val = sy_est + (min_idx - win) * ny
+                    support_pts.append((px_val, py_val))
+    clean_pts = []
+    if len(support_pts) >= 4:
+        xs = np.array([pt[0] for pt in support_pts])
+        ys = np.array([pt[1] for pt in support_pts])
+        res = ys - (m_ref * xs + c_ref)
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep_step1 = devs <= max(2.0, 2.5 * mad)
+        xs_s1 = xs[keep_step1]
+        ys_s1 = ys[keep_step1]
+        if len(xs_s1) >= 4:
+            curr_xs = xs_s1.copy()
+            curr_ys = ys_s1.copy()
+            m_fit, c_fit = (m_ref, c_ref)
+            for _ in range(3):
+                if len(curr_xs) < 4:
+                    break
+                try:
+                    m_fit, c_fit = np.polyfit(curr_xs, curr_ys, 1)
+                    res_fit = np.abs(curr_ys - (m_fit * curr_xs + c_fit))
+                    keep_step2 = res_fit <= 2.0
+                    if np.sum(keep_step2) == len(curr_xs):
+                        break
+                    curr_xs = curr_xs[keep_step2]
+                    curr_ys = curr_ys[keep_step2]
+                except Exception:
+                    break
+            if len(curr_xs) >= 4:
+                clean_pts = [(float(x), float(y)) for x, y in zip(curr_xs, curr_ys)]
+    support_valid = False
+    support_line_m = m_ref
+    support_line_c = c_ref
+    support_coverage = 0.0
+    support_residual_std = 0.0
+    if len(clean_pts) >= max(8, int(0.35 * num_samples)):
+        xs_clean = np.array([pt[0] for pt in clean_pts])
+        ys_clean = np.array([pt[1] for pt in clean_pts])
+        try:
+            residuals_to_ref = ys_clean - float(m_ref) * xs_clean
+            c_ref_fit = float(np.median(residuals_to_ref))
+            std_res_fit = float(np.std(ys_clean - (float(m_ref) * xs_clean + c_ref_fit)))
+            n_bins = 8
+            bins = np.linspace(x_left, x_right, n_bins + 1)
+            bin_indices = np.digitize(xs_clean, bins) - 1
+            unique_bins = np.unique(bin_indices)
+            unique_bins = unique_bins[(unique_bins >= 0) & (unique_bins < n_bins)]
+            coverage = len(unique_bins) / n_bins
+            center_x = 0.5 * (float(x_left) + float(x_right))
+            center_shift = float(m_ref) * center_x + c_ref_fit - (float(m_ref) * center_x + float(c_ref))
+            max_shift = 7.0 if not is_outer_edge else 5.0
+            if coverage >= 0.65 and std_res_fit <= 2.0 and (abs(center_shift) <= max_shift):
+                support_valid = True
+                support_line_m = float(m_ref)
+                support_line_c = c_ref_fit
+                support_coverage = coverage
+                support_residual_std = std_res_fit
+        except Exception:
+            pass
+    return (support_line_m, support_line_c, clean_pts, support_coverage, support_residual_std, support_valid, len(support_pts))
+
+def V42__snap_horizontal_boundary(rotated_gray, m_row, c_row_yolo, c_row_pitch, left_bound_x, right_bound_x, r, row_count, block_name, x_mid):
+    win = V42__LAST_ROW_SNAP_WINDOW if r == row_count else V42__THERMAL_GAP_SNAP_WINDOW
+    is_outer = r == 0 or r == row_count
+    m_fit, c_fit, clean_pts, coverage, std_res, support_valid, n_raw = V42__extract_support_points_for_horizontal_edge(rotated_gray, m_row, c_row_yolo, left_bound_x, right_bound_x, block_name, r, row_count, is_outer_edge=is_outer)
+    sample_xs = np.linspace(left_bound_x, right_bound_x, 30)
+    best_thermal_dy = 0
+    min_thermal_val = 99999.0
+    for dy in range(-win, win + 1):
+        vals = []
+        for sx in sample_xs:
+            y_val = int(round(m_row * sx + c_row_yolo)) + dy
+            y_val = max(0, min(rotated_gray.shape[0] - 1, y_val))
+            x_val = max(0, min(rotated_gray.shape[1] - 1, int(round(sx))))
+            vals.append(rotated_gray[y_val, x_val])
+        avg_v = np.mean(vals) if vals else 255.0
+        if avg_v < min_thermal_val:
+            min_thermal_val = avg_v
+            best_thermal_dy = dy
+    c_row_thermal = c_row_yolo + best_thermal_dy
+    thermal_ok = min_thermal_val < 135.0
+    if support_valid:
+        c_final = m_fit * x_mid + c_fit
+        selected_cand = 'support'
+        reason = 'valid_support'
+    elif c_row_yolo is not None:
+        c_final = c_row_yolo
+        selected_cand = 'yolo'
+        reason = 'support_invalid_fallback_yolo'
+    elif thermal_ok:
+        c_final = c_row_thermal
+        selected_cand = 'thermal'
+        reason = 'support_invalid_fallback_thermal'
+    else:
+        c_final = c_row_pitch
+        selected_cand = 'pitch'
+        reason = 'support_invalid_fallback_pitch'
+    print(f'[SUPPORT_EDGE] {block_name} {r} raw={n_raw} clean={len(clean_pts)} coverage={coverage:.3f} residual={std_res:.3f} source={selected_cand} reason={reason}')
+    return (c_final, selected_cand, coverage, clean_pts, c_fit, c_row_thermal, c_row_yolo, c_row_pitch, c_final, m_fit, c_fit, clean_pts, coverage, std_res, support_valid)
+
+def V42__recover_bad_orientation_horizontal_gaps_from_profile(rotated_gray, boundaries, row_count, y_min, y_max, x_mid, m_base, block_name):
+    """Recover horizontal separators from the thermal image when row priors are unusable.
+
+    This is intentionally NOT a YOLO-polygon fallback. YOLO only gives row_count and a
+    coarse y-range. The actual row positions are selected from a dark-line projection
+    between the fitted vertical rails. The result is allowed to draw/build polygons
+    because every row line is reconstructed from image intensity inside the rail span.
+    """
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    right_rail = boundaries.get('right_outer')
+    if left_rail is None or right_rail is None or row_count <= 0:
+        return None
+    y0 = max(0.0, float(y_min))
+    y1 = min(float(h - 1), float(y_max))
+    if y1 <= y0 + 8:
+        return None
+    pitch = (y1 - y0) / float(row_count)
+    prof = {}
+    for yi in range(int(math.floor(y0)), int(math.ceil(y1)) + 1):
+        xL = V42__get_boundary_x_at_y(left_rail, yi) + 7.0
+        xR = V42__get_boundary_x_at_y(right_rail, yi) - 7.0
+        if not xR > xL + 10:
+            continue
+        xs = np.linspace(max(0, xL), min(w - 1, xR), max(25, int((xR - xL) / 3)))
+        vals = []
+        for xx in xs:
+            vals.append(float(rotated_gray[int(max(0, min(h - 1, yi))), int(max(0, min(w - 1, round(xx))))]))
+        if vals:
+            prof[yi] = float(np.percentile(vals, 20))
+    if len(prof) < max(10, row_count):
+        return None
+    ys_all = sorted(prof.keys())
+    vals_all = np.array([prof[y] for y in ys_all], dtype=np.float32)
+    vals_sm = vals_all.copy()
+    for i in range(len(vals_all)):
+        a = max(0, i - 2)
+        b = min(len(vals_all), i + 3)
+        vals_sm[i] = float(np.median(vals_all[a:b]))
+    prof_sm = {y: float(v) for y, v in zip(ys_all, vals_sm)}
+    chosen_y = []
+    for r in range(row_count + 1):
+        seed = y0 + r * pitch
+        win = max(4, min(14, 0.33 * pitch))
+        if r in (0, row_count):
+            win = max(3, min(9, 0.22 * pitch))
+        lo = int(max(y0, seed - win))
+        hi = int(min(y1, seed + win))
+        cand = [yy for yy in range(lo, hi + 1) if yy in prof_sm]
+        if not cand:
+            yy_best = seed
+        else:
+            yy_best = min(cand, key=lambda yy: prof_sm[yy] + 0.45 * abs(yy - seed))
+        chosen_y.append(float(yy_best))
+    for r in range(1, len(chosen_y)):
+        min_step = max(6.0, 0.45 * pitch)
+        if chosen_y[r] <= chosen_y[r - 1] + min_step:
+            chosen_y[r] = chosen_y[r - 1] + pitch
+    if chosen_y[-1] > y1 + 2:
+        shift = chosen_y[-1] - (y1 + 2)
+        chosen_y = [yy - shift for yy in chosen_y]
+    recovered = []
+    m_ref = float(m_base)
+    for r, y_seed in enumerate(chosen_y):
+        xL_seed = V42__get_boundary_x_at_y(left_rail, y_seed) + 8.0
+        xR_seed = V42__get_boundary_x_at_y(right_rail, y_seed) - 8.0
+        xs = np.linspace(max(0, xL_seed), min(w - 1, xR_seed), max(30, int(max(10, xR_seed - xL_seed) / 2)))
+        pts = []
+        for sx in xs:
+            best_y = None
+            best_score = 1000000000.0
+            for dy in range(-5, 6):
+                yy = int(round(y_seed + dy))
+                if yy < 1 or yy >= h - 1:
+                    continue
+                xx = int(max(0, min(w - 1, round(sx))))
+                center = float(rotated_gray[yy, xx])
+                above = float(rotated_gray[max(0, yy - 3), xx])
+                below = float(rotated_gray[min(h - 1, yy + 3), xx])
+                contrast = min(above, below) - center
+                score = center - 0.35 * max(contrast, 0.0) + 1.0 * abs(dy)
+                if center < 170 and score < best_score:
+                    best_score = score
+                    best_y = float(yy)
+            if best_y is not None:
+                pts.append((float(sx), best_y))
+        if len(pts) >= 8:
+            xs_arr = np.array([q[0] for q in pts], dtype=np.float32)
+            ys_arr = np.array([q[1] for q in pts], dtype=np.float32)
+            try:
+                m_raw, c_raw = np.polyfit(xs_arr, ys_arr, 1)
+                pred = m_raw * xs_arr + c_raw
+                resid = ys_arr - pred
+                mad = float(np.median(np.abs(resid - np.median(resid)))) + 1e-06
+                keep = np.abs(resid) <= max(1.5, 2.5 * mad)
+                if int(np.sum(keep)) >= 8:
+                    m_raw, c_raw = np.polyfit(xs_arr[keep], ys_arr[keep], 1)
+                    pts_clean = [(float(x), float(y)) for x, y, k in zip(xs_arr, ys_arr, keep) if bool(k)]
+                else:
+                    pts_clean = pts
+                x_anchor = float(np.mean([xL_seed, xR_seed]))
+                m_line, c_line, changed, angle_diff = V42__clamp_slope_about_anchor(float(m_raw), float(c_raw), m_ref, x_anchor, max_angle_deg=3.0)
+                y_center = m_line * x_mid + c_line
+                if abs(y_center - y_seed) > max(4.0, 0.18 * pitch):
+                    c_line += y_seed - y_center
+                source = 'profile_recovered'
+                support_valid = True
+                residual_std = float(np.std([y - (m_line * x + c_line) for x, y in pts_clean])) if pts_clean else 0.0
+            except Exception:
+                m_line = m_ref
+                c_line = y_seed - m_line * x_mid
+                pts_clean = []
+                source = 'profile_pitch'
+                support_valid = True
+                residual_std = 0.0
+        else:
+            m_line = m_ref
+            c_line = y_seed - m_line * x_mid
+            pts_clean = []
+            source = 'profile_pitch'
+            support_valid = True
+            residual_std = 0.0
+        recovered.append({'y_snap': float(m_line * x_mid + c_line), 'is_good': True, 'support_ratio': 1.0, 'mean_offset': 0.0, 'pitch_deviation': 0.0, 'support_pts': pts_clean, 'x_start': float(xL_seed), 'x_end': float(xR_seed), 'm_row': float(m_line), 'c_row': float(c_line), 'c_selected': float(c_line), 'c_row_yolo': None, 'c_row_thermal': None, 'c_row_pitch': float(y_seed - m_ref * x_mid), 'c_row_support': float(c_line), 'selected_cand': source, 'support_valid': support_valid, 'support_line_m': float(m_line), 'support_line_c': float(c_line), 'support_clean_pts': pts_clean, 'support_coverage': 1.0 if pts_clean else 0.0, 'support_residual_std': residual_std})
+        print(f'[PROFILE_ROW_RECOVER] block={block_name} r={r} source={source} y={m_line * x_mid + c_line:.2f} n={len(pts_clean)} m={m_line:.5f}')
+    if recovered:
+        m_candidates = []
+        for g in recovered:
+            src = g.get('selected_cand')
+            n_pts = len(g.get('support_clean_pts', []) or [])
+            if src in ('profile_recovered', 'profile_pitch') and g.get('support_line_m') is not None and (n_pts >= 8):
+                m_candidates.append(float(g['support_line_m']))
+        if len(m_candidates) >= max(2, min(5, len(recovered) // 3)):
+            m_locked = float(np.median(m_candidates))
+        else:
+            m_locked = float(m_ref)
+        for r_idx, g in enumerate(recovered):
+            y_anchor_old = float(g.get('y_snap', m_locked * x_mid + g.get('c_row', 0.0)))
+            pts_for_anchor = g.get('support_clean_pts', []) or []
+            if len(pts_for_anchor) >= 8:
+                c_from_pts = float(np.median([float(y) - m_locked * float(x) for x, y in pts_for_anchor]))
+                y_from_pts = m_locked * float(x_mid) + c_from_pts
+                max_center_shift = 2.0
+                if abs(y_from_pts - y_anchor_old) > max_center_shift:
+                    c_from_pts += math.copysign(abs(y_anchor_old - y_from_pts) - max_center_shift, y_anchor_old - y_from_pts)
+                c_locked = c_from_pts
+                anchor_src = 'median_support_residual'
+            else:
+                c_locked = y_anchor_old - m_locked * float(x_mid)
+                anchor_src = 'x_mid_anchor'
+            y_anchor = m_locked * float(x_mid) + c_locked
+            g['m_row_raw'] = float(g.get('m_row', m_locked))
+            g['c_row_raw'] = float(g.get('c_row', c_locked))
+            g['support_line_m_raw'] = float(g.get('support_line_m', m_locked))
+            g['support_line_c_raw'] = float(g.get('support_line_c', c_locked))
+            g['m_row'] = m_locked
+            g['c_row'] = c_locked
+            g['c_selected'] = c_locked
+            g['support_line_m'] = m_locked
+            g['support_line_c'] = c_locked
+            g['y_snap'] = y_anchor
+            g['selected_cand'] = 'profile_recovered_locked' if g.get('selected_cand') == 'profile_recovered' else g.get('selected_cand')
+            g['profile_lock_anchor_source'] = anchor_src
+            print(f'[PROFILE_ROW_LOCK_ANCHOR] block={block_name} r={r_idx} source={anchor_src} y_old={y_anchor_old:.2f} y_new={y_anchor:.2f} n={len(pts_for_anchor)}')
+        print(f'[PROFILE_ROW_SLOPE_LOCK] block={block_name} m_locked={m_locked:.5f} n_rows={len(recovered)} n_candidates={len(m_candidates)}')
+    print(f'[BAD_BLOCK_RECOVERED] block={block_name} source=dark_profile rows={len(recovered)} pitch={pitch:.2f} action=use_snap_not_yolo')
+    return recovered
+
+def V42__refine_horizontal_rows_to_dark_groove(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=2, margin_px=8.0, min_samples=20):
+    """Small post-refinement: keep row slope, nudge only intercept so the snapped
+    row sits tighter on the actual dark groove between the fitted rails.
+
+    This is intentionally conservative: only a tiny +/-search_radius pixel search is
+    allowed, and the row is moved only when the dark-groove score improves clearly.
+    """
+    if not snapped_horiz_gaps:
+        return snapped_horiz_gaps
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    right_rail = boundaries.get('right_outer')
+    if left_rail is None or right_rail is None:
+        return snapped_horiz_gaps
+    refined = []
+    for r_idx, g in enumerate(snapped_horiz_gaps):
+        try:
+            m_row = float(g.get('support_line_m') if g.get('support_line_m') is not None else g.get('m_row', 0.0))
+            c_row = float(g.get('support_line_c') if g.get('support_line_c') is not None else g.get('c_row', 0.0))
+            y_mid = float(m_row * x_mid + c_row)
+            x0 = float(g.get('x_start', V42__get_boundary_x_at_y(left_rail, y_mid) + margin_px))
+            x1 = float(g.get('x_end', V42__get_boundary_x_at_y(right_rail, y_mid) - margin_px))
+            if not x1 > x0 + 10:
+                x0 = float(V42__get_boundary_x_at_y(left_rail, y_mid) + margin_px)
+                x1 = float(V42__get_boundary_x_at_y(right_rail, y_mid) - margin_px)
+            if not x1 > x0 + 10:
+                refined.append(g)
+                continue
+            xs = np.linspace(max(0.0, x0), min(float(w - 1), x1), max(min_samples, int((x1 - x0) / 3)))
+            base_score = None
+            best_score = None
+            best_dy = 0.0
+            best_stats = None
+            for dy in range(-int(search_radius), int(search_radius) + 1):
+                vals_c = []
+                vals_a = []
+                vals_b = []
+                for xx in xs:
+                    yy = int(round(m_row * float(xx) + c_row + float(dy)))
+                    xi = int(round(xx))
+                    if yy < 2 or yy >= h - 2 or xi < 0 or (xi >= w):
+                        continue
+                    vals_c.append(float(rotated_gray[yy, xi]))
+                    vals_a.append(float(rotated_gray[yy - 2, xi]))
+                    vals_b.append(float(rotated_gray[yy + 2, xi]))
+                if len(vals_c) < min_samples:
+                    continue
+                center_med = float(np.median(vals_c))
+                center_q25 = float(np.percentile(vals_c, 25))
+                contrasts = [min(a, b) - c for a, b, c in zip(vals_a, vals_b, vals_c)]
+                contrast_pos = [max(0.0, v) for v in contrasts]
+                contrast_med = float(np.median(contrast_pos)) if contrast_pos else 0.0
+                dark_ratio = float(sum((1 for v in vals_c if v < 135.0)) / max(1, len(vals_c)))
+                score = center_q25 + 0.35 * center_med - 0.85 * contrast_med - 10.0 * dark_ratio + 0.4 * abs(float(dy))
+                stats = (center_med, center_q25, contrast_med, dark_ratio, len(vals_c))
+                if dy == 0:
+                    base_score = score
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_dy = float(dy)
+                    best_stats = stats
+            if best_score is None or base_score is None:
+                refined.append(g)
+                continue
+            improve = float(base_score - best_score)
+            if abs(best_dy) >= 0.5 and improve >= 1.2:
+                new_c = c_row + best_dy
+                g = dict(g)
+                g['c_row'] = float(new_c)
+                g['c_selected'] = float(new_c)
+                g['y_snap'] = float(m_row * x_mid + new_c)
+                if g.get('support_line_c') is not None:
+                    g['support_line_c'] = float(new_c)
+                if g.get('c_row_support') is not None and str(g.get('selected_cand')) in ('support', 'support_prefit', 'profile_recovered', 'profile_recovered_locked', 'profile_pitch', 'thermal'):
+                    g['c_row_support'] = float(new_c)
+                g['dark_refine_dy'] = float(best_dy)
+                g['dark_refine_improve'] = improve
+                cm, cq25, ccontr, dr, ns = best_stats
+                print(f'[ROW_DARK_REFINE] block={block_name} r={r_idx} dy={best_dy:+.2f} improve={improve:.2f} med={cm:.1f} q25={cq25:.1f} contrast={ccontr:.2f} dark_ratio={dr:.2f} n={ns}')
+                refined.append(g)
+            else:
+                refined.append(g)
+        except Exception:
+            refined.append(g)
+    return refined
+
+def V42__refine_horizontal_rows_by_local_valley_anchors(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=V42__V34_ROW_SEARCH_RADIUS_PX, margin_px=7.0, max_shift_px=4.0, min_coverage=0.5, max_residual_std=2.6):
+    """V34 row refinement: denser sub-pixel valley anchors + guarded slope refit.
+
+    Compared with V33, this pass increases x-density and searches at 0.5 px vertical
+    increments using bilinear sampling. It keeps the previous safety rules: rows are
+    built only from fitted rails and image dark valleys; YOLO polygons are not used
+    as final geometry.
+    """
+    if not snapped_horiz_gaps:
+        return snapped_horiz_gaps
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    right_rail = boundaries.get('right_outer')
+    if left_rail is None or right_rail is None:
+        return snapped_horiz_gaps
+
+    def _angle_delta_deg(m1, m2):
+        return abs(math.degrees(math.atan(float(m1))) - math.degrees(math.atan(float(m2))))
+
+    def _line_residual_std(points, m, c):
+        if not points:
+            return 999.0
+        arr = np.array(points, dtype=np.float32)
+        return float(np.std(arr[:, 1] - (float(m) * arr[:, 0] + float(c))))
+
+    def _sample_gray_bilinear(img, x, y):
+        h2, w2 = img.shape[:2]
+        if x < 0 or y < 0 or x >= w2 - 1 or (y >= h2 - 1):
+            xi = int(max(0, min(w2 - 1, round(x))))
+            yi = int(max(0, min(h2 - 1, round(y))))
+            return float(img[yi, xi])
+        x0i = int(math.floor(x))
+        y0i = int(math.floor(y))
+        dx = float(x - x0i)
+        dy = float(y - y0i)
+        v00 = float(img[y0i, x0i])
+        v10 = float(img[y0i, x0i + 1])
+        v01 = float(img[y0i + 1, x0i])
+        v11 = float(img[y0i + 1, x0i + 1])
+        return (1 - dx) * (1 - dy) * v00 + dx * (1 - dy) * v10 + (1 - dx) * dy * v01 + dx * dy * v11
+    refined = []
+    for r_idx, g0 in enumerate(snapped_horiz_gaps):
+        g = dict(g0)
+        try:
+            m_row = float(g.get('support_line_m') if g.get('support_line_m') is not None else g.get('m_row', 0.0))
+            c_row = float(g.get('support_line_c') if g.get('support_line_c') is not None else g.get('c_row', 0.0))
+            y_mid = float(m_row * x_mid + c_row)
+            rail_x0 = float(V42__get_boundary_x_at_y(left_rail, y_mid) + margin_px)
+            rail_x1 = float(V42__get_boundary_x_at_y(right_rail, y_mid) - margin_px)
+            x0 = float(g.get('x_start', rail_x0))
+            x1 = float(g.get('x_end', rail_x1))
+            if not x1 > x0 + 12:
+                x0, x1 = (rail_x0, rail_x1)
+            x0 = max(0.0, min(max(x0, rail_x0), rail_x1 - 14.0))
+            x1 = min(float(w - 1), max(min(x1, rail_x1), rail_x0 + 14.0))
+            if not x1 > x0 + 20:
+                refined.append(g0)
+                continue
+            xs = np.linspace(x0, x1, max(72, int((x1 - x0) / V42__V34_ROW_X_SAMPLE_STEP_PX)))
+            anchor_pts = []
+            for xx in xs:
+                xi = int(round(xx))
+                if xi < 1 or xi >= w - 1:
+                    continue
+                y_ref = m_row * float(xx) + c_row
+                best = None
+                for dy in np.arange(-float(search_radius), float(search_radius) + 0.001, V42__V34_ROW_DY_STEP_PX):
+                    yyf = float(y_ref + float(dy))
+                    if yyf < 4 or yyf >= h - 4:
+                        continue
+                    center = _sample_gray_bilinear(rotated_gray, float(xx), yyf)
+                    up2 = _sample_gray_bilinear(rotated_gray, float(xx), yyf - 2.0)
+                    dn2 = _sample_gray_bilinear(rotated_gray, float(xx), yyf + 2.0)
+                    up4 = _sample_gray_bilinear(rotated_gray, float(xx), yyf - 4.0)
+                    dn4 = _sample_gray_bilinear(rotated_gray, float(xx), yyf + 4.0)
+                    side_min = min(up2, dn2, up4, dn4)
+                    side_med = float(np.median([up2, dn2, up4, dn4]))
+                    contrast = max(0.0, side_min - center)
+                    valley_shape = max(0.0, side_med - center)
+                    score = center - 0.85 * contrast - 0.35 * valley_shape + 0.22 * abs(float(dy))
+                    if best is None or score < best[0]:
+                        best = (score, float(yyf), center, contrast, valley_shape, float(dy))
+                if best is None:
+                    continue
+                _, yy_best, center_best, contrast_best, valley_shape, dy_best = best
+                if center_best < 165.0 or contrast_best >= 3.5 or valley_shape >= 7.0:
+                    anchor_pts.append((float(xx), float(yy_best), float(center_best), float(contrast_best), float(dy_best)))
+            if len(anchor_pts) < 9:
+                refined.append(g0)
+                continue
+            xs_a = np.array([p[0] for p in anchor_pts], dtype=np.float32)
+            ys_a = np.array([p[1] for p in anchor_pts], dtype=np.float32)
+            c_intercept = float(np.median(ys_a - m_row * xs_a))
+            resid0 = ys_a - (m_row * xs_a + c_intercept)
+            med0 = float(np.median(resid0))
+            mad0 = float(np.median(np.abs(resid0 - med0))) + 1e-06
+            keep0 = np.abs(resid0 - med0) <= max(1.5, 2.6 * mad0)
+            if int(np.sum(keep0)) < 9:
+                keep0 = np.ones_like(xs_a, dtype=bool)
+            xs_k = xs_a[keep0]
+            ys_k = ys_a[keep0]
+            pts_kept = [(float(x), float(y)) for x, y in zip(xs_k, ys_k)]
+            n_bins = 10
+            bins = np.linspace(x0, x1, n_bins + 1)
+            bin_ids = np.digitize([p[0] for p in pts_kept], bins) - 1
+            unique_bins = sorted(set((int(b) for b in bin_ids if 0 <= int(b) < n_bins)))
+            coverage = float(len(unique_bins) / n_bins)
+            if coverage < min_coverage:
+                refined.append(g0)
+                continue
+            m_fit = m_row
+            c_fit = float(np.median(ys_k - m_row * xs_k))
+            used_slope_fit = False
+            if len(xs_k) >= 12 and float(np.max(xs_k) - np.min(xs_k)) >= 0.55 * (x1 - x0):
+                try:
+                    contrast_w = np.array([max(1.0, min(4.0, 1.0 + p[3] / 22.0)) for p in anchor_pts], dtype=np.float32)[keep0]
+                    m_raw, c_raw = np.polyfit(xs_k, ys_k, 1, w=contrast_w)
+                    pred = m_raw * xs_k + c_raw
+                    res = ys_k - pred
+                    mad = float(np.median(np.abs(res - np.median(res)))) + 1e-06
+                    keep1 = np.abs(res - np.median(res)) <= max(1.25, 2.3 * mad)
+                    if int(np.sum(keep1)) >= 10:
+                        m_raw, c_raw = np.polyfit(xs_k[keep1], ys_k[keep1], 1, w=contrast_w[keep1])
+                    src = str(g.get('selected_cand'))
+                    max_angle_delta = 1.8
+                    if src in ('profile_recovered', 'profile_recovered_locked', 'profile_pitch'):
+                        max_angle_delta = 2.75
+                    angle_delta = _angle_delta_deg(m_raw, m_row)
+                    if angle_delta > max_angle_delta:
+                        a_ref = math.atan(m_row)
+                        a_raw = math.atan(float(m_raw))
+                        a_new = a_ref + math.copysign(math.radians(max_angle_delta), a_raw - a_ref)
+                        m_fit = math.tan(a_new)
+                    else:
+                        m_fit = float(m_raw)
+                    c_fit = float(np.median(ys_k - m_fit * xs_k))
+                    used_slope_fit = True
+                except Exception:
+                    m_fit = m_row
+                    c_fit = float(np.median(ys_k - m_row * xs_k))
+            c_old_slope = float(np.median(ys_k - m_row * xs_k))
+            residual_old = _line_residual_std(pts_kept, m_row, c_old_slope)
+            residual_new = _line_residual_std(pts_kept, m_fit, c_fit)
+            if used_slope_fit and residual_new <= residual_old + 0.15:
+                m_new = float(m_fit)
+                c_new = float(c_fit)
+                slope_mode = 'slope_anchor'
+            else:
+                m_new = float(m_row)
+                c_new = float(c_old_slope)
+                residual_new = residual_old
+                slope_mode = 'intercept_anchor'
+            old_y = float(m_row * x_mid + c_row)
+            new_y_raw = float(m_new * x_mid + c_new)
+            shift = new_y_raw - old_y
+            if abs(shift) > max_shift_px:
+                c_new += math.copysign(max_shift_px - abs(shift), shift)
+                shift = math.copysign(max_shift_px, shift)
+            dark_med = float(np.median([p[2] for p in anchor_pts]))
+            contrast_med = float(np.median([p[3] for p in anchor_pts]))
+            src = str(g.get('selected_cand'))
+            residual_limit = max_residual_std + (0.55 if src in ('profile_recovered', 'profile_recovered_locked', 'profile_pitch') else 0.0)
+            min_shift = 0.1 if src in ('profile_recovered', 'profile_recovered_locked', 'profile_pitch') else 0.16
+            angle_delta_final = _angle_delta_deg(m_new, m_row)
+            accept = coverage >= min_coverage and residual_new <= residual_limit and (abs(shift) >= min_shift or angle_delta_final >= 0.15)
+            if accept:
+                g['c_row'] = float(c_new)
+                g['c_selected'] = float(c_new)
+                g['y_snap'] = float(m_new * x_mid + c_new)
+                g['m_row'] = float(m_new)
+                g['support_line_m'] = float(m_new)
+                g['support_line_c'] = float(c_new)
+                g['support_valid'] = True
+                g['support_clean_pts'] = pts_kept
+                g['support_pts'] = pts_kept
+                g['support_coverage'] = coverage
+                g['support_residual_std'] = float(residual_new)
+                g['valley_anchor_shift'] = float(shift)
+                g['valley_anchor_slope_delta_deg'] = float(angle_delta_final)
+                g['valley_anchor_source'] = 'local_dark_valley_slope' if slope_mode == 'slope_anchor' else 'local_dark_valley_intercept'
+                print(f'[ROW_VALLEY_ANCHOR_REFINE_V34] block={block_name} r={r_idx} mode={slope_mode} shift={shift:+.2f} dangle={angle_delta_final:.2f} coverage={coverage:.2f} residual={residual_new:.2f} dark_med={dark_med:.1f} contrast_med={contrast_med:.2f} n={len(pts_kept)}')
+                refined.append(g)
+            else:
+                refined.append(g0)
+        except Exception:
+            refined.append(g0)
+    return refined
+
+def V42__refine_middle_divider_by_dense_vertical_valley(rotated_gray, boundaries, y_min, y_max, row_count, block_name):
+    """V34: densify/refit the middle blue rail from real vertical dark-valley samples.
+
+    The middle divider must split the two panel halves reasonably evenly.  This pass
+    samples many y cross-sections, searches around the current middle rail, rejects
+    weak/short evidence, and fits x = m*y + c from the dark vertical groove.  The
+    final rail is still constrained by the left/right fitted rails, not by YOLO panel
+    polygons, so downstream calc polygons remain rail+row derived.
+    """
+    if not all((k in boundaries for k in ('left_outer', 'middle_divider', 'right_outer'))):
+        return boundaries
+    h, w = rotated_gray.shape[:2]
+    left_rail = boundaries.get('left_outer')
+    mid_rail = boundaries.get('middle_divider')
+    right_rail = boundaries.get('right_outer')
+    if not left_rail or not mid_rail or (not right_rail):
+        return boundaries
+
+    def _sample(img, x, y):
+        h2, w2 = img.shape[:2]
+        if x < 0 or y < 0 or x >= w2 - 1 or (y >= h2 - 1):
+            xi = int(max(0, min(w2 - 1, round(x))))
+            yi = int(max(0, min(h2 - 1, round(y))))
+            return float(img[yi, xi])
+        x0i = int(math.floor(x))
+        y0i = int(math.floor(y))
+        dx = float(x - x0i)
+        dy = float(y - y0i)
+        v00 = float(img[y0i, x0i])
+        v10 = float(img[y0i, x0i + 1])
+        v01 = float(img[y0i + 1, x0i])
+        v11 = float(img[y0i + 1, x0i + 1])
+        return (1 - dx) * (1 - dy) * v00 + dx * (1 - dy) * v10 + (1 - dx) * dy * v01 + dx * dy * v11
+    y0 = max(2.0, float(y_min) + 3.0)
+    y1 = min(float(h - 3), float(y_max) - 3.0)
+    if y1 <= y0 + 30:
+        return boundaries
+    y_samples = np.linspace(y0, y1, max(80, int((y1 - y0) / V42__V34_MIDDLE_RAIL_Y_STEP_PX)))
+    pts = []
+    for yy in y_samples:
+        x_left = V42__get_boundary_x_at_y(left_rail, yy)
+        x_right = V42__get_boundary_x_at_y(right_rail, yy)
+        x_mid_old = V42__get_boundary_x_at_y(mid_rail, yy)
+        if not x_left + 16.0 < x_mid_old < x_right - 16.0:
+            continue
+        x_balance = 0.5 * (x_left + x_right)
+        width = max(1.0, x_right - x_left)
+        best = None
+        for dx in np.arange(-V42__V34_MIDDLE_RAIL_SEARCH_RADIUS_PX, V42__V34_MIDDLE_RAIL_SEARCH_RADIUS_PX + 0.001, 0.5):
+            xx = float(x_mid_old + dx)
+            if xx <= x_left + 6 or xx >= x_right - 6 or xx < 4 or (xx >= w - 4):
+                continue
+            center = _sample(rotated_gray, xx, yy)
+            l2 = _sample(rotated_gray, xx - 2.0, yy)
+            r2 = _sample(rotated_gray, xx + 2.0, yy)
+            l4 = _sample(rotated_gray, xx - 4.0, yy)
+            r4 = _sample(rotated_gray, xx + 4.0, yy)
+            side_min = min(l2, r2, l4, r4)
+            side_med = float(np.median([l2, r2, l4, r4]))
+            contrast = max(0.0, side_min - center)
+            valley_shape = max(0.0, side_med - center)
+            score = center - 0.85 * contrast - 0.3 * valley_shape + 0.08 * abs(dx) + 0.018 * abs(xx - x_balance)
+            if best is None or score < best[0]:
+                best = (score, xx, center, contrast, valley_shape, x_balance, width)
+        if best is None:
+            continue
+        _, xx, center, contrast, valley_shape, x_balance, width = best
+        if abs(xx - x_balance) > max(5.0, 0.14 * width):
+            continue
+        if center < 165.0 or contrast >= 3.5 or valley_shape >= 7.0:
+            pts.append((float(xx), float(yy), float(center), float(contrast)))
+    if len(pts) < max(18, int(0.25 * len(y_samples))):
+        print(f'[V34_MIDDLE_RAIL_SKIP] block={block_name} reason=insufficient_pts n={len(pts)} samples={len(y_samples)}')
+        return boundaries
+    arr = np.array([[p[0], p[1], p[3]] for p in pts], dtype=np.float32)
+    xs = arr[:, 0]
+    ys = arr[:, 1]
+    wts = np.clip(1.0 + arr[:, 2] / 22.0, 1.0, 4.0)
+    try:
+        m_raw, c_raw = np.polyfit(ys, xs, 1, w=wts)
+        res = xs - (m_raw * ys + c_raw)
+        mad = float(np.median(np.abs(res - np.median(res)))) + 1e-06
+        keep = np.abs(res - np.median(res)) <= max(1.5, 2.4 * mad)
+        if int(np.sum(keep)) >= 16:
+            m_raw, c_raw = np.polyfit(ys[keep], xs[keep], 1, w=wts[keep])
+            xs_fit, ys_fit = (xs[keep], ys[keep])
+        else:
+            xs_fit, ys_fit = (xs, ys)
+    except Exception:
+        return boundaries
+    old_ys = np.array([p[1] for p in mid_rail], dtype=np.float32)
+    old_xs = np.array([p[0] for p in mid_rail], dtype=np.float32)
+    try:
+        m_old, c_old = np.polyfit(old_ys, old_xs, 1)
+    except Exception:
+        m_old, c_old = (0.0, V42__get_boundary_x_at_y(mid_rail, 0.5 * (y_min + y_max)))
+    y_mid = 0.5 * (float(y_min) + float(y_max))
+    old_mid_x = float(m_old * y_mid + c_old)
+    raw_mid_x = float(m_raw * y_mid + c_raw)
+    shift = raw_mid_x - old_mid_x
+    max_shift = 3.0
+    if abs(shift) > max_shift:
+        c_raw += math.copysign(max_shift - abs(shift), shift)
+        shift = math.copysign(max_shift, shift)
+    a_old = math.atan(float(m_old))
+    a_raw = math.atan(float(m_raw))
+    max_da = math.radians(2.0)
+    if abs(a_raw - a_old) > max_da:
+        m_new = math.tan(a_old + math.copysign(max_da, a_raw - a_old))
+        x_anchor = old_mid_x + shift
+        c_new = x_anchor - m_new * y_mid
+    else:
+        m_new, c_new = (float(m_raw), float(c_raw))
+    new_pts = []
+    for yy in np.linspace(float(y_min), float(y_max), 15):
+        x_left = V42__get_boundary_x_at_y(left_rail, yy)
+        x_right = V42__get_boundary_x_at_y(right_rail, yy)
+        xx = float(m_new * yy + c_new)
+        xx = max(x_left + 8.0, min(x_right - 8.0, xx))
+        new_pts.append((xx, float(yy)))
+    boundaries = dict(boundaries)
+    boundaries['middle_divider'] = new_pts
+    residual = float(np.std(xs_fit - (m_new * ys_fit + c_new))) if len(xs_fit) else 999.0
+    print(f'[V34_MIDDLE_RAIL_DENSE_REFIT] block={block_name} n={len(pts)} shift={shift:+.2f} residual={residual:.2f} m_old={m_old:.5f} m_new={m_new:.5f}')
+    return boundaries
+
+def V42__build_grid_from_yolo_edge_consensus(rotated_gray, rotated_sobel_x_abs, b_local, y_min, y_max, n_cols, row_count, x_min_roi, x_max_roi, block_name, img_w=640, img_h=512):
+    col_corners = []
+    for col in b_local['columns']:
+        col_c = []
+        for p in col:
+            TL, TR, BR, BL = V42__sort_panel_corners(p['refined_polygon'])
+            col_c.append((TL, TR, BR, BL))
+        col_corners.append(col_c)
+    boundaries = {}
+    boundaries_n_segments_used = {}
+    boundaries_max_jumps = {}
+    boundaries_max_turns = {}
+    boundaries_fallback_to_baseline = {}
+    has_crop_left_col = False
+    if len(b_local['columns']) > 0:
+        for p in b_local['columns'][0]:
+            if p['orig_ref']['bbox'][0] < 15 or p['orig_ref']['bbox'][2] > img_w - 15 or p['orig_ref']['bbox'][1] < 15 or (p['orig_ref']['bbox'][3] > img_h - 15):
+                has_crop_left_col = True
+                break
+    if n_cols == 1:
+        col0 = col_corners[0]
+        left_pts = [c[0] for c in col0] + [c[3] for c in col0]
+        right_pts = [c[1] for c in col0] + [c[2] for c in col0]
+        boundaries['left_outer'] = V42__fit_consensus_vertical_boundary(left_pts, y_min, y_max, row_count)
+        boundaries['right_outer'] = V42__fit_consensus_vertical_boundary(right_pts, y_min, y_max, row_count)
+        boundary_keys = ['left_outer', 'right_outer']
+    else:
+        col0 = col_corners[0]
+        col1 = col_corners[1]
+        left_pts = [c[0] for c in col0] + [c[3] for c in col0]
+        if has_crop_left_col:
+            mid_pts = [c[0] for c in col1] + [c[3] for c in col1]
+        else:
+            mid_pts = [c[1] for c in col0] + [c[2] for c in col0] + [c[0] for c in col1] + [c[3] for c in col1]
+        right_pts = [c[1] for c in col1] + [c[2] for c in col1]
+        boundaries['left_outer'] = V42__fit_consensus_vertical_boundary(left_pts, y_min, y_max, row_count)
+        boundaries['middle_divider'] = V42__fit_consensus_vertical_boundary(mid_pts, y_min, y_max, row_count)
+        boundaries['right_outer'] = V42__fit_consensus_vertical_boundary(right_pts, y_min, y_max, row_count)
+        boundary_keys = ['left_outer', 'middle_divider', 'right_outer']
+    for k in boundary_keys:
+        boundaries_n_segments_used[k] = min(10, max(4, row_count - 2))
+        boundaries_max_jumps[k] = 0.0
+        boundaries_max_turns[k] = 0.0
+        boundaries_fallback_to_baseline[k] = False
+    boundaries = V42__refine_middle_divider_by_dense_vertical_valley(rotated_gray, boundaries, y_min, y_max, row_count, block_name)
+    m_independent = []
+    row_points_list = []
+    for r in range(row_count + 1):
+        row_pts = []
+        for col_idx, col in enumerate(b_local['columns']):
+            if has_crop_left_col and col_idx == 0:
+                continue
+            if r == 0:
+                if len(col) > 0:
+                    p = col[0]
+                    TL_c, TR_c, BR_c, BL_c = V42__sort_panel_corners(p['refined_polygon'])
+                    row_pts.extend([TL_c, TR_c])
+            elif r == row_count:
+                if len(col) >= row_count:
+                    p = col[row_count - 1]
+                    TL_c, TR_c, BR_c, BL_c = V42__sort_panel_corners(p['refined_polygon'])
+                    row_pts.extend([BL_c, BR_c])
+            else:
+                if len(col) > r - 1:
+                    p_prev = col[r - 1]
+                    TL_c, TR_c, BR_c, BL_c = V42__sort_panel_corners(p_prev['refined_polygon'])
+                    row_pts.extend([BL_c, BR_c])
+                if len(col) > r:
+                    p_curr = col[r]
+                    TL_c, TR_c, BR_c, BL_c = V42__sort_panel_corners(p_curr['refined_polygon'])
+                    row_pts.extend([TL_c, TR_c])
+        row_points_list.append(row_pts)
+        if len(row_pts) >= 2:
+            xs_r = [pt[0] for pt in row_pts]
+            ys_r = [pt[1] for pt in row_pts]
+            try:
+                m_r, _ = np.polyfit(xs_r, ys_r, 1)
+                m_independent.append(m_r)
+            except Exception:
+                pass
+    m_consensus_raw = float(np.median(m_independent)) if m_independent else 0.0
+    m_consensus, _mcons_clamped, _mcons_ang = V42__clamp_horizontal_slope_to_reasonable(m_consensus_raw, max_abs_angle_deg=V42__MAX_HORIZONTAL_ROW_ANGLE_DEG)
+    bad_block_orientation = abs(float(_mcons_ang)) > V42__BAD_BLOCK_RAW_ANGLE_DEG
+    if _mcons_clamped:
+        print(f'[BLOCK_SLOPE_QUARANTINE] block={block_name} m_raw={m_consensus_raw:.6f} angle_raw={_mcons_ang:.2f} m_used={m_consensus:.6f} max_abs_angle={V42__MAX_HORIZONTAL_ROW_ANGLE_DEG}')
+    if bad_block_orientation:
+        print(f'[BAD_BLOCK_ORIENTATION] block={block_name} angle_raw={_mcons_ang:.2f} action=disable_support_use_pitch_grid threshold={V42__BAD_BLOCK_RAW_ANGLE_DEG}')
+    pitches = []
+    for r in range(row_count):
+        y_r = np.mean([pt[1] for pt in row_points_list[r]]) if row_points_list[r] else y_min
+        y_r1 = np.mean([pt[1] for pt in row_points_list[r + 1]]) if row_points_list[r + 1] else y_max
+        pitches.append(y_r1 - y_r)
+    estimated_pitch = float(np.median(pitches)) if pitches else 30.0
+    pitch_std = float(np.std(pitches)) if pitches else 1.0
+    snapped_horiz_gaps = []
+    rejected_count = 0
+    interpolated_missing_count = 0
+    x_mid = (x_min_roi + x_max_roi) / 2.0
+    for r in range(row_count + 1):
+        row_pts = row_points_list[r]
+        if not row_pts:
+            y_est = y_min + r * estimated_pitch
+            m_row = m_consensus
+            c_row = y_est - m_row * x_mid
+        else:
+            xs_r = np.array([pt[0] for pt in row_pts])
+            ys_r = np.array([pt[1] for pt in row_pts])
+            try:
+                m_r, _ = np.polyfit(xs_r, ys_r, 1)
+            except Exception:
+                m_r = m_consensus
+            m_row_raw = 0.7 * float(m_r) + 0.3 * float(m_consensus)
+            y_anchor_raw = float(np.mean(ys_r - m_row_raw * xs_r) + m_row_raw * x_mid)
+            m_row, _mrow_clamped, _mrow_ang = V42__clamp_horizontal_slope_to_reasonable(m_row_raw, max_abs_angle_deg=V42__MAX_HORIZONTAL_ROW_ANGLE_DEG)
+            c_row = y_anchor_raw - m_row * x_mid
+            if _mrow_clamped:
+                print(f'[ROW_SLOPE_QUARANTINE] block={block_name} r={r} m_raw={m_row_raw:.6f} angle_raw={_mrow_ang:.2f} m_used={m_row:.6f}')
+        left_bound_x = V42__get_boundary_x_at_y(boundaries['left_outer'], m_row * x_mid + c_row)
+        if has_crop_left_col and 'middle_divider' in boundaries:
+            left_bound_x = V42__get_boundary_x_at_y(boundaries['middle_divider'], m_row * x_mid + c_row)
+        right_bound_x = V42__get_boundary_x_at_y(boundaries['right_outer'], m_row * x_mid + c_row)
+        c_row_yolo = c_row
+        y_pitch_est = y_min + r * estimated_pitch
+        c_row_pitch = y_pitch_est - m_row * x_mid
+        c_final, selected_cand, selected_score, support_pts, c_row_support, c_row_thermal, _, _, c_selected, support_line_m, support_line_c, support_clean_pts, support_coverage, support_residual_std, support_valid = V42__snap_horizontal_boundary(rotated_gray, m_row, c_row_yolo, c_row_pitch, left_bound_x, right_bound_x, r, row_count, block_name, x_mid)
+        if bad_block_orientation and selected_cand in ('support', 'thermal'):
+            c_final = c_row_pitch
+            c_selected = c_row_pitch
+            selected_cand = 'pitch_quarantine'
+            support_valid = False
+            support_line_m = None
+            support_line_c = None
+            support_clean_pts = []
+            print(f'[ROW_SUPPORT_SUPPRESSED] block={block_name} r={r} reason=bad_block_orientation')
+        pitch_used = selected_cand in ('pitch', 'pitch_quarantine')
+        print(f'[ROW] {block_name} {r} {selected_cand} {len(support_pts)} {pitch_used}')
+        if r == row_count:
+            y_before = m_row * x_mid + ((1.0 - 0.25) * c_selected + 0.25 * c_row_pitch)
+            y_after = m_row * x_mid + c_final
+            delta = y_after - y_before
+            print(f'[LAST_ROW] {block_name} {r} {selected_cand} {delta:.2f}')
+        if selected_cand not in ('support', 'thermal'):
+            rejected_count += 1
+            if selected_cand == 'pitch':
+                interpolated_missing_count += 1
+        snapped_horiz_gaps.append({'y_snap': m_row * x_mid + c_final, 'is_good': selected_cand in ('support', 'thermal'), 'support_ratio': selected_score, 'mean_offset': 0.0, 'pitch_deviation': abs(c_final - c_row_pitch), 'support_pts': support_pts, 'x_start': left_bound_x, 'x_end': right_bound_x, 'm_row': m_row, 'c_row': c_final, 'c_selected': c_selected, 'c_row_yolo': c_row_yolo, 'c_row_thermal': c_row_thermal, 'c_row_pitch': c_row_pitch, 'c_row_support': c_row_support, 'selected_cand': selected_cand, 'support_valid': support_valid, 'support_line_m': support_line_m, 'support_line_c': support_line_c, 'support_clean_pts': support_clean_pts, 'support_coverage': support_coverage, 'support_residual_std': support_residual_std})
+    snapped_horiz_gaps = V42__apply_horizontal_snap_slope_guard(snapped_horiz_gaps, m_consensus, x_mid, block_name, max_angle_deg=2.0, reject_angle_deg=3.0)
+    recovered_from_profile = False
+    if bad_block_orientation and (not has_crop_left_col):
+        recovered = V42__recover_bad_orientation_horizontal_gaps_from_profile(rotated_gray, boundaries, row_count, y_min, y_max, x_mid, m_consensus, block_name)
+        if recovered is not None and len(recovered) == row_count + 1:
+            snapped_horiz_gaps = recovered
+            bad_block_orientation = False
+            recovered_from_profile = True
+            print(f'[BAD_BLOCK_ORIENTATION_RECOVERED] block={block_name} action=use_profile_snap_rows no_yolo_geometry=true')
+        else:
+            print(f'[BAD_BLOCK_ORIENTATION_RECOVERY_FAILED] block={block_name} action=no_snap_polygon')
+    snapped_horiz_gaps = V42__refine_horizontal_rows_to_dark_groove(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=2, margin_px=8.0)
+    snapped_horiz_gaps = V42__refine_horizontal_rows_by_local_valley_anchors(rotated_gray, boundaries, snapped_horiz_gaps, x_mid, block_name, search_radius=V42__V34_ROW_SEARCH_RADIUS_PX, margin_px=7.0, max_shift_px=4.0)
+    left_snapped_horiz_gaps = []
+    left_snapped_horiz_gaps_by_col = None
+    if has_crop_left_col:
+
+        def get_yolo_line_col(col_idx, r_idx):
+            col_panels = b_local['columns'][col_idx]
+            if not col_panels:
+                return (m_consensus, y_min + r_idx * estimated_pitch - m_consensus * x_mid)
+            N = len(col_panels)
+            clamped_r = min(r_idx, N)
+            p = col_panels[0] if clamped_r == 0 else col_panels[-1] if clamped_r == N else None
+            if p:
+                corners = V42__sort_panel_corners(p['refined_polygon'])
+                xs_y = [corners[0][0], corners[1][0]] if clamped_r == 0 else [corners[3][0], corners[2][0]]
+                ys_y = [corners[0][1], corners[1][1]] if clamped_r == 0 else [corners[3][1], corners[2][1]]
+            else:
+                p_prev, p_curr = (col_panels[clamped_r - 1], col_panels[clamped_r])
+                c_prev = V42__sort_panel_corners(p_prev['refined_polygon'])
+                c_curr = V42__sort_panel_corners(p_curr['refined_polygon'])
+                xs_y = [c_prev[3][0], c_prev[2][0], c_curr[0][0], c_curr[1][0]]
+                ys_y = [c_prev[3][1], c_prev[2][1], c_curr[0][1], c_curr[1][1]]
+            try:
+                m_y, c_y = np.polyfit(xs_y, ys_y, 1)
+                return (m_y, c_y)
+            except Exception:
+                return (m_consensus, np.mean(ys_y) - m_consensus * np.mean(xs_y))
+        left_snapped_horiz_gaps_by_col = {0: {}, 1: {}}
+        crop_debug_img = None
+        jsonl_lines = []
+        if has_crop_left_col:
+            crop_debug_img = cv2.cvtColor(rotated_gray, cv2.COLOR_GRAY2BGR)
+        for r in range(row_count + 1):
+            for col_idx in [0, 1]:
+                m_yolo, c_yolo = get_yolo_line_col(col_idx, r)
+                y_val_ref = m_yolo * x_mid + c_yolo
+                x_left_outer = V42__get_boundary_x_at_y(boundaries['left_outer'], y_val_ref)
+                x_middle_rail = V42__get_boundary_x_at_y(boundaries['middle_divider'], y_val_ref)
+                x_right_outer = V42__get_boundary_x_at_y(boundaries['right_outer'], y_val_ref)
+                x0, x1 = (x_left_outer + 8, x_middle_rail - 6) if col_idx == 0 else (x_middle_rail + 6, x_right_outer - 8)
+                is_accepted, best_dy, min_score, contrast, median_pixel, dark_band, seg_clean_pts = (False, 0.0, 999999.0, 0.0, 255.0, [], [])
+                sorted_dys = []
+                x0_cand, x1_cand = (x_left_outer + 8, x_middle_rail - 6) if col_idx == 0 else (x_middle_rail + 6, x_right_outer - 8)
+                if x1_cand - x0_cand >= 20:
+                    xs_profile = np.linspace(x0_cand, x1_cand, max(15, int(x1_cand - x0_cand)))
+                    candidates = {}
+                    for dy in range(-7, 8):
+                        values = [int(rotated_gray[int(round(m_yolo * x + c_yolo + dy)), int(round(x))]) for x in xs_profile if 0 <= int(round(m_yolo * x + c_yolo + dy)) < rotated_gray.shape[0] and 0 <= int(round(x)) < rotated_gray.shape[1]]
+                        if len(values) >= 10:
+                            median_val = float(np.median(values))
+                            p10_val = float(np.percentile(values, 10))
+                            mean_val = float(np.mean(values))
+                            dark_ratio = float(sum((1 for v in values if v < 130)) / len(values))
+                            candidates[dy] = {'score': p10_val + 0.35 * median_val - 20.0 * dark_ratio, 'median_val': median_val, 'p10_val': p10_val, 'mean_val': mean_val, 'dark_ratio': dark_ratio}
+                    if candidates:
+                        min_score = min((candidates[dy]['score'] for dy in candidates))
+                        dark_band = [dy for dy in sorted(candidates.keys()) if candidates[dy]['score'] <= min_score + 6.0 and (candidates[dy]['dark_ratio'] >= 0.25 or candidates[dy]['median_val'] < 135.0)]
+                        if dark_band:
+                            best_dy = float(np.median(dark_band))
+                            far_scores = [candidates[dy]['score'] for dy in candidates if abs(dy) >= 5]
+                            contrast = float(np.median(far_scores) - min_score) if far_scores else 0.0
+                            min_median_val = min((candidates[dy]['median_val'] for dy in candidates))
+                            is_accepted = 1 <= len(dark_band) <= 5 and (contrast >= 8.0 or min_median_val < 125.0) and (abs(best_dy) <= 7.0)
+                            median_pixel = candidates.get(int(round(best_dy)), {}).get('median_val', 255.0)
+                            sorted_dys = sorted(candidates.keys(), key=lambda dy: candidates[dy]['score'])
+                support_pts = []
+                x0_fit = x_left_outer + 6 if col_idx == 0 else x_middle_rail + 4
+                x1_fit = x_middle_rail - 4 if col_idx == 0 else x_right_outer - 6
+                if x1_fit - x0_fit >= 10:
+                    xs_fit = np.linspace(x0_fit, x1_fit, max(30, int((x1_fit - x0_fit) / 2)))
+                    for x_val in xs_fit:
+                        xi = int(round(x_val))
+                        y_ref = m_yolo * x_val + c_yolo
+                        best_val = 999.0
+                        best_y = None
+                        y_start = int(round(y_ref - 6))
+                        y_end = int(round(y_ref + 6))
+                        for y_scan in range(y_start, y_end + 1):
+                            if 0 <= y_scan < rotated_gray.shape[0] and 0 <= xi < rotated_gray.shape[1]:
+                                val = float(rotated_gray[y_scan, xi])
+                                if val < best_val:
+                                    best_val = val
+                                    best_y = float(y_scan)
+                        if best_y is not None:
+                            yi = int(round(best_y))
+                            pixel_val = rotated_gray[yi, xi]
+                            y_prev = yi - 2
+                            y_next = yi + 2
+                            val_prev = float(rotated_gray[y_prev, xi]) if 0 <= y_prev < rotated_gray.shape[0] else 255.0
+                            val_next = float(rotated_gray[y_next, xi]) if 0 <= y_next < rotated_gray.shape[0] else 255.0
+                            local_contrast = max(val_prev, val_next) - pixel_val
+                            if pixel_val < 135 or local_contrast >= 8:
+                                support_pts.append((x_val, best_y))
+                fit_success = False
+                m_fit, c_fit, residual_std, angle_diff, coverage = (0.0, 0.0, 999.0, 999.0, 0.0)
+                clean_pts = []
+                if len(support_pts) >= 5:
+                    xs_arr = np.array([pt[0] for pt in support_pts])
+                    ys_arr = np.array([pt[1] for pt in support_pts])
+                    try:
+                        m_f, c_f = np.polyfit(xs_arr, ys_arr, 1)
+                        res = ys_arr - (m_f * xs_arr + c_f)
+                        med = np.median(res)
+                        mad = np.median(np.abs(res - med))
+                        keep = np.abs(res - med) <= max(1.5, 2.5 * mad)
+                        xs_clean = xs_arr[keep]
+                        ys_clean = ys_arr[keep]
+                        if len(xs_clean) >= 5:
+                            m_fit, c_fit = np.polyfit(xs_clean, ys_clean, 1)
+                            res_clean = ys_clean - (m_fit * xs_clean + c_fit)
+                            residual_std = float(np.std(res_clean))
+                            coverage = (max(xs_clean) - min(xs_clean)) / (x1_fit - x0_fit + 1e-09)
+                            angle_diff = abs(np.degrees(math.atan(m_fit)) - np.degrees(math.atan(m_yolo)))
+                            while angle_diff > 90:
+                                angle_diff = abs(angle_diff - 180)
+                            if len(xs_clean) >= 5 and coverage >= 0.3 and (residual_std <= 2.0) and (angle_diff <= 6.0):
+                                fit_success = True
+                                clean_pts = [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)]
+                    except Exception:
+                        pass
+                if fit_success:
+                    source = 'crop_left_support_points_line'
+                    m_final = m_fit
+                    c_final = c_fit
+                    best_dy = c_fit - c_yolo
+                elif is_accepted:
+                    source = 'crop_left_dy_fallback'
+                    m_final = m_yolo
+                    c_final = c_yolo + best_dy
+                else:
+                    source = 'crop_left_yolo'
+                    m_final = m_yolo
+                    c_final = c_yolo
+                    best_dy = 0.0
+                seg_clean_pts = clean_pts if fit_success else support_pts
+                print(f'[CROP_LEFT_FIT] block={block_name} r={r} col={col_idx} source={source} n={len(support_pts)} coverage={coverage:.3f} residual={residual_std:.3f} angle_diff={angle_diff:.3f}')
+                if crop_debug_img is not None:
+                    for pt in seg_clean_pts:
+                        cv2.circle(crop_debug_img, (int(round(pt[0])), int(round(pt[1]))), 2, (255, 0, 255), -1)
+                second_score_val = candidates.get(sorted_dys[1], {}).get('score', 999999.0) if len(sorted_dys) >= 2 else 999999.0
+                best_dy_idx = int(round(best_dy if is_accepted else 0.0))
+                best_dark_ratio = candidates.get(best_dy_idx, {}).get('dark_ratio', 0.0) if candidates else 0.0
+                print(f'[CROP_DEBUG] {block_name} {r} {col_idx} yolo_c={c_yolo:.2f} chosen_c={c_final:.2f} chosen_dy={(best_dy if is_accepted else 0.0):.2f} best_score={min_score:.2f} second_score={second_score_val:.2f} dark_ratio={best_dark_ratio:.2f} contrast={contrast:.2f} median={median_pixel:.1f} n_pts={len(seg_clean_pts)}')
+                dy_scores_list = []
+                if candidates:
+                    for dy_cand in sorted(candidates.keys()):
+                        info = candidates[dy_cand]
+                        dy_scores_list.append({'dy': int(dy_cand), 'score': float(info['score']), 'p10': float(info['p10_val']), 'median': float(info['median_val']), 'mean': float(info['mean_val']), 'dark_ratio': float(info['dark_ratio']), 'contrast': float(contrast)})
+                jsonl_lines.append({'r': int(r), 'col': int(col_idx), 'dy_scores': dy_scores_list, 'chosen_dy': float(best_dy if is_accepted else 0.0), 'chosen_source': str(source), 'n_support_pts': int(len(seg_clean_pts)), 'x_min': float(x0), 'x_max': float(x1)})
+                left_snapped_horiz_gaps_by_col[col_idx][r] = {'y_snap': m_final * x_mid + c_final, 'selected_cand': source, 'm_row': m_final, 'c_row': c_final, 'support_pts': seg_clean_pts, 'support_valid': source in ('crop_left_support_points_line', 'crop_left_borrow_right_line', 'crop_left_support_fit'), 'support_line_m': m_final, 'support_line_c': c_final, 'support_clean_pts': seg_clean_pts, 'support_coverage': coverage, 'support_residual_std': residual_std, 'best_dy': best_dy, 'm_yolo': m_yolo, 'c_yolo': c_yolo, 'm_fit_raw': m_fit if fit_success else m_final, 'c_fit_raw': c_fit if fit_success else c_final, 'm_final': m_final, 'c_final': c_final, 'fit_preserved': fit_success}
+        if has_crop_left_col:
+            real_fit_sources = ('crop_left_support_points_line', 'crop_left_support_fit')
+            delta_candidates = []
+            for row_i in range(row_count + 1):
+                g0_i = left_snapped_horiz_gaps_by_col[0][row_i]
+                g1_i = left_snapped_horiz_gaps_by_col[1][row_i]
+                src0_i = g0_i.get('selected_cand') or g0_i.get('source')
+                src1_i = g1_i.get('selected_cand') or g1_i.get('source')
+                if src0_i in real_fit_sources and src1_i in real_fit_sources:
+                    delta_candidates.append(g0_i['c_row'] - g1_i['c_row'])
+            if delta_candidates:
+                delta_col = float(np.median(delta_candidates))
+            else:
+                delta_col = 0.0
+            main_pitches = []
+            for r_i in range(1, len(snapped_horiz_gaps)):
+                main_pitches.append(snapped_horiz_gaps[r_i]['y_snap'] - snapped_horiz_gaps[r_i - 1]['y_snap'])
+            median_pitch = float(np.median(main_pitches)) if main_pitches else 32.0
+            valid_crop_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+            valid_neighbor_parent_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line')
+
+            def extrapolate_pitch_for_row(c_idx, row_r):
+                for dr in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+                    cand_r = row_r + dr
+                    if 0 <= cand_r <= row_count:
+                        cand_g = left_snapped_horiz_gaps_by_col[c_idx][cand_r]
+                        cand_src = cand_g.get('selected_cand') or cand_g.get('source')
+                        if cand_src in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_borrow_same_row_right'):
+                            m_ref = cand_g['support_line_m']
+                            c_ref = cand_g['support_line_c']
+                            c_ext = c_ref + dr * -1.0 * median_pitch
+                            return (m_ref, c_ext)
+                g_curr = left_snapped_horiz_gaps_by_col[c_idx][row_r]
+                return (g_curr['m_yolo'], g_curr['c_yolo'])
+            for col_idx in [1, 0]:
+                for r in range(row_count + 1):
+                    g = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    src = g.get('selected_cand') or g.get('source')
+                    if src in real_fit_sources:
+                        continue
+                    borrowed = False
+                    if col_idx == 0:
+                        g1 = left_snapped_horiz_gaps_by_col[1][r]
+                        src1 = g1.get('selected_cand') or g1.get('source')
+                        allowed_borrow_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit')
+                        if src1 in allowed_borrow_sources:
+                            m_col0 = g1['support_line_m']
+                            c_col0 = g1['support_line_c'] + delta_col
+                            collapsed = False
+                            if r > 0:
+                                g_prev = left_snapped_horiz_gaps_by_col[0][r - 1]
+                                if g_prev.get('selected_cand') in valid_crop_sources:
+                                    if abs(c_col0 - g_prev['c_row']) < 5.0:
+                                        collapsed = True
+                            if r < row_count:
+                                g_next = left_snapped_horiz_gaps_by_col[0][r + 1]
+                                if g_next.get('selected_cand') in valid_crop_sources:
+                                    if abs(c_col0 - g_next['c_row']) < 5.0:
+                                        collapsed = True
+                            if not collapsed:
+                                g['selected_cand'] = 'crop_left_borrow_same_row_right'
+                                g['source'] = 'crop_left_borrow_same_row_right'
+                                g['m_row'] = m_col0
+                                g['c_row'] = c_col0
+                                g['m_final'] = m_col0
+                                g['c_final'] = c_col0
+                                g['support_line_m'] = m_col0
+                                g['support_line_c'] = c_col0
+                                g['support_valid'] = True
+                                g['y_snap'] = m_col0 * x_mid + c_col0
+                                print(f'[CROP_LEFT_BORROW_SAME_ROW] block={block_name} r={r} col=0 from_col=1 delta={delta_col:.2f}')
+                                borrowed = True
+                    if borrowed:
+                        continue
+                    neighbor_r = None
+                    for dr in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+                        cand_r = r + dr
+                        if 0 <= cand_r <= row_count:
+                            cand_g = left_snapped_horiz_gaps_by_col[col_idx][cand_r]
+                            cand_src = cand_g.get('selected_cand') or cand_g.get('source')
+                            if cand_src in valid_neighbor_parent_sources:
+                                neighbor_r = cand_r
+                                break
+                    if neighbor_r is not None:
+                        neighbor = left_snapped_horiz_gaps_by_col[col_idx][neighbor_r]
+                        m_new = neighbor['support_line_m']
+                        m_yolo_current = g['m_yolo']
+                        c_yolo_current = g['c_yolo']
+                        y_val_ref = m_yolo_current * x_mid + c_yolo_current
+                        x_left_outer = V42__get_boundary_x_at_y(boundaries['left_outer'], y_val_ref)
+                        x_middle_rail = V42__get_boundary_x_at_y(boundaries['middle_divider'], y_val_ref)
+                        x_right_outer = V42__get_boundary_x_at_y(boundaries['right_outer'], y_val_ref)
+                        x_segment_left = x_left_outer if col_idx == 0 else x_middle_rail
+                        x_segment_right = x_middle_rail if col_idx == 0 else x_right_outer
+                        x_anchor = 0.5 * (x_segment_left + x_segment_right)
+                        y_anchor = m_yolo_current * x_anchor + c_yolo_current
+                        c_new = y_anchor - m_new * x_anchor
+                        support_pts = g.get('support_pts', [])
+                        if len(support_pts) >= 3:
+                            xs_sup = np.array([pt[0] for pt in support_pts])
+                            ys_sup = np.array([pt[1] for pt in support_pts])
+                            delta = np.median(ys_sup - (m_new * xs_sup + c_new))
+                            delta = np.clip(delta, -1.25, 1.25)
+                            c_new += delta
+                        collapsed = False
+                        if r > 0:
+                            g_prev = left_snapped_horiz_gaps_by_col[col_idx][r - 1]
+                            if g_prev.get('selected_cand') in valid_crop_sources:
+                                if abs(c_new - g_prev['c_row']) < 5.0:
+                                    collapsed = True
+                        if r < row_count:
+                            g_next = left_snapped_horiz_gaps_by_col[col_idx][r + 1]
+                            if g_next.get('selected_cand') in valid_crop_sources:
+                                if abs(c_new - g_next['c_row']) < 5.0:
+                                    collapsed = True
+                        if collapsed:
+                            m_ext, c_ext = extrapolate_pitch_for_row(col_idx, r)
+                            g['selected_cand'] = 'crop_left_pitch_extrapolate'
+                            g['source'] = 'crop_left_pitch_extrapolate'
+                            g['m_row'] = m_ext
+                            g['c_row'] = c_ext
+                            g['m_final'] = m_ext
+                            g['c_final'] = c_ext
+                            g['support_line_m'] = m_ext
+                            g['support_line_c'] = c_ext
+                            g['support_valid'] = True
+                            g['y_snap'] = g['m_row'] * x_mid + g['c_row']
+                            print(f'[CROP_LEFT_FIX_COLLAPSE] block={block_name} col={col_idx} r={r} old_c={c_new:.4f} new_c={c_ext:.4f} median_pitch={median_pitch:.4f} source=collapse_neighbor')
+                        else:
+                            g['selected_cand'] = 'crop_left_neighbor_inherit'
+                            g['source'] = 'crop_left_neighbor_inherit'
+                            g['m_row'] = m_new
+                            g['c_row'] = c_new
+                            g['m_final'] = m_new
+                            g['c_final'] = c_new
+                            g['support_line_m'] = m_new
+                            g['support_line_c'] = c_new
+                            g['support_valid'] = True
+                            g['inherited_from'] = neighbor_r
+                            g['y_snap'] = m_new * x_mid + c_new
+                            print(f'[CROP_LEFT_INHERIT] block={block_name} r={r} col={col_idx} from_r={neighbor_r} m={m_new:.5f} c={c_new:.2f} n_support={len(support_pts)}')
+                    else:
+                        m_ext, c_ext = extrapolate_pitch_for_row(col_idx, r)
+                        g['selected_cand'] = 'crop_left_pitch_extrapolate'
+                        g['source'] = 'crop_left_pitch_extrapolate'
+                        g['m_row'] = m_ext
+                        g['c_row'] = c_ext
+                        g['m_final'] = m_ext
+                        g['c_final'] = c_ext
+                        g['support_line_m'] = m_ext
+                        g['support_line_c'] = c_ext
+                        g['support_valid'] = True
+                        g['y_snap'] = g['m_row'] * x_mid + g['c_row']
+                        print(f"[CROP_LEFT_FIX_COLLAPSE] block={block_name} col={col_idx} r={r} old_c={g['c_yolo']:.4f} new_c={c_ext:.4f} median_pitch={median_pitch:.4f} source=no_neighbor")
+            for col_idx in [0, 1]:
+                for r in range(1, row_count + 1):
+                    g_prev = left_snapped_horiz_gaps_by_col[col_idx][r - 1]
+                    g_curr = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    y_center_prev = g_prev['m_row'] * x_mid + g_prev['c_row']
+                    y_center_curr = g_curr['m_row'] * x_mid + g_curr['c_row']
+                    if abs(y_center_curr - y_center_prev) < 0.45 * median_pitch:
+                        old_c = g_curr['c_row']
+                        m_new = g_prev['m_row']
+                        c_new = g_prev['c_row'] + median_pitch
+                        g_curr['selected_cand'] = 'crop_left_pitch_extrapolate'
+                        g_curr['source'] = 'crop_left_pitch_extrapolate'
+                        g_curr['m_row'] = m_new
+                        g_curr['c_row'] = c_new
+                        g_curr['m_final'] = m_new
+                        g_curr['c_final'] = c_new
+                        g_curr['support_line_m'] = m_new
+                        g_curr['support_line_c'] = c_new
+                        g_curr['support_valid'] = True
+                        g_curr['y_snap'] = m_new * x_mid + c_new
+                        print(f'[CROP_LEFT_FIX_COLLAPSE] block={block_name} col={col_idx} r={r} old_c={old_c:.4f} new_c={c_new:.4f} median_pitch={median_pitch:.4f} source=post_guard')
+        tan_2_deg = math.tan(np.radians(2.0))
+        for r in range(row_count + 1):
+            g0 = left_snapped_horiz_gaps_by_col[0][r]
+            g1 = left_snapped_horiz_gaps_by_col[1][r]
+            for col_idx, g in enumerate([g0, g1]):
+                if g['selected_cand'] in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate'):
+                    continue
+                g_other = g1 if col_idx == 0 else g0
+                if g_other['selected_cand'] != 'crop_left_support_fit':
+                    m_col = g['m_row']
+                    m_other = g_other['m_row']
+                    m_med = float(np.median([m_col, m_other]))
+                    if abs(m_col - m_med) > tan_2_deg:
+                        m_new = m_med + np.sign(m_col - m_med) * tan_2_deg
+                        y_val_ref = m_col * x_mid + g['c_row']
+                        x_left_outer = V42__get_boundary_x_at_y(boundaries['left_outer'], y_val_ref)
+                        x_middle_rail = V42__get_boundary_x_at_y(boundaries['middle_divider'], y_val_ref)
+                        x_right_outer = V42__get_boundary_x_at_y(boundaries['right_outer'], y_val_ref)
+                        x_center = (x_left_outer + x_middle_rail) / 2.0 if col_idx == 0 else (x_middle_rail + x_right_outer) / 2.0
+                        c_new = g['c_row'] + (m_col - m_new) * x_center
+                        g['m_row'] = m_new
+                        g['c_row'] = c_new
+                        g['support_line_m'] = m_new
+                        g['support_line_c'] = c_new
+                        g['y_snap'] = m_new * x_mid + c_new
+        if crop_debug_img is not None:
+            for r in range(row_count + 1):
+                for col_idx in [0, 1]:
+                    g = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    src = g['selected_cand']
+                    if src not in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate'):
+                        print(f'[CROP_LEFT_SKIP_LINE] block={block_name} r={r} col={col_idx} source={src} reason=no_support_line')
+                        continue
+                    m_final = float(g['support_line_m'])
+                    c_final = float(g['support_line_c'])
+                    left_boundary = boundaries['left_outer'] if col_idx == 0 else boundaries['middle_divider']
+                    right_boundary = boundaries['middle_divider'] if col_idx == 0 else boundaries['right_outer']
+                    pL = V42__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, left_boundary)
+                    if pL is not None:
+                        xL, yL = pL
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xL = V42__get_boundary_x_at_y(left_boundary, y_ref)
+                        yL = m_final * xL + c_final
+                    pR = V42__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, right_boundary)
+                    if pR is not None:
+                        xR, yR = pR
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xR = V42__get_boundary_x_at_y(right_boundary, y_ref)
+                        yR = m_final * xR + c_final
+                    vx = xR - xL
+                    vy = yR - yL
+                    norm = max(1e-06, math.sqrt(vx * vx + vy * vy))
+                    ux, uy = (vx / norm, vy / norm)
+                    extend_px = 2.0
+                    xL2 = xL - extend_px * ux
+                    yL2 = yL - extend_px * uy
+                    xR2 = xR + extend_px * ux
+                    yR2 = yR + extend_px * uy
+                    print(f'[CROP_LEFT_DRAW_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source={src} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f}')
+                    p1_d = (int(round(xL2)), int(round(yL2)))
+                    p2_d = (int(round(xR2)), int(round(yR2)))
+                    cv2.line(crop_debug_img, p1_d, p2_d, (255, 0, 255), 1, lineType=cv2.LINE_AA)
+        if False and crop_debug_img is not None:
+            pass
+    consensus_stats = {'estimated_pitch_px': estimated_pitch, 'pitch_std_px': pitch_std, 'rejected_horizontal_lines_count': rejected_count, 'number_of_interpolated_missing_lines': interpolated_missing_count, 'boundaries_n_segments_used': boundaries_n_segments_used, 'boundaries_max_jumps': boundaries_max_jumps, 'boundaries_max_turns': boundaries_max_turns, 'boundaries_fallback_to_baseline': boundaries_fallback_to_baseline, 'm_consensus': m_consensus, 'bad_block_orientation': bool(bad_block_orientation), 'bad_block_orientation_angle_deg': float(_mcons_ang), 'bad_block_orientation_action': 'no_snap_polygon' if bad_block_orientation else 'profile_recovered' if recovered_from_profile else 'none', 'bad_block_orientation_recovered': bool(recovered_from_profile)}
+    if has_crop_left_col:
+        consensus_stats['left_snapped_horiz_gaps_by_col'] = left_snapped_horiz_gaps_by_col
+        if block_name == 'block_1':
+            valid_crop_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+            for col in [0, 1]:
+                for r in range(row_count + 1):
+                    col_gaps = left_snapped_horiz_gaps_by_col.get(col, {})
+                    exists_val = r in col_gaps
+                    if exists_val:
+                        g = col_gaps[r]
+                        src = g.get('selected_cand') or g.get('source') or 'unknown'
+                        support_valid_val = g.get('support_valid', False)
+                        n_support = len(g.get('support_pts', []))
+                        m_val = g.get('support_line_m', 'None')
+                        c_val = g.get('support_line_c', 'None')
+                        inherited_from_val = g.get('inherited_from', 'None')
+                        draw_allowed_val = src in valid_crop_sources
+                    else:
+                        src = 'None'
+                        support_valid_val = 'False'
+                        n_support = 0
+                        m_val = 'None'
+                        c_val = 'None'
+                        inherited_from_val = 'None'
+                        draw_allowed_val = False
+                    print(f'[CROP_LEFT_TABLE] block={block_name} r={r} col={col} exists={str(exists_val).lower()} source={src} support_valid={str(support_valid_val).lower()} n_support={n_support} m={m_val} c={c_val} inherited_from={inherited_from_val} draw_allowed={str(draw_allowed_val).lower()}')
+    return (boundaries, snapped_horiz_gaps, consensus_stats)
+
+def V42__get_panel_hybrid_anchors(panel):
+    poly = None
+    source = None
+    if 'raw_yolo_poly' in panel and panel['raw_yolo_poly'] is not None and (len(panel['raw_yolo_poly']) >= 3):
+        pts = np.array(panel['raw_yolo_poly'], dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        poly = [tuple(pt) for pt in box]
+        source = 'raw_yolo_minarearect'
+    if poly is None and 'polygon' in panel and (panel['polygon'] is not None) and (len(panel['polygon']) >= 3):
+        pts = np.array(panel['polygon'], dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        poly = [tuple(pt) for pt in box]
+        source = 'polygon_minarearect'
+    if poly is None and 'refined_polygon' in panel and (panel['refined_polygon'] is not None) and (len(panel['refined_polygon']) >= 3):
+        pts = np.array(panel['refined_polygon'], dtype=np.float32)
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect)
+        poly = [tuple(pt) for pt in box]
+        source = 'refined_polygon_minarearect'
+    if poly is None:
+        x1, y1, x2, y2 = panel['bbox']
+        poly = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        source = 'bbox_fallback'
+    TL, TR, BR, BL = V42__sort_panel_corners(poly)
+    cx = (TL[0] + TR[0] + BR[0] + BL[0]) / 4.0
+    cy = (TL[1] + TR[1] + BR[1] + BL[1]) / 4.0
+    width = math.sqrt((TR[0] - TL[0]) ** 2 + (TR[1] - TL[1]) ** 2)
+    height = math.sqrt((BL[0] - TL[0]) ** 2 + (BL[1] - TL[1]) ** 2)
+    angle_rad = math.atan2(TR[1] - TL[1], TR[0] - TL[0])
+    angle_deg = np.degrees(angle_rad)
+    while angle_deg > 90:
+        angle_deg -= 180
+    while angle_deg < -90:
+        angle_deg += 180
+    if angle_deg > 45:
+        angle_deg -= 90
+    elif angle_deg < -45:
+        angle_deg += 90
+    return {'center': (cx, cy), 'width': width, 'height': height, 'angle_deg': angle_deg, 'top_edge': (TL, TR), 'bottom_edge': (BL, BR), 'left_edge': (TL, BL), 'right_edge': (TR, BR), 'poly_4pts': [TL, TR, BR, BL], 'source': source}
+
+def V42__get_rotated_rect_points(cx, cy, w, h, angle_deg):
+    angle_rad = np.radians(angle_deg)
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    dx_tl = -w / 2.0 * cos_a - -h / 2.0 * sin_a
+    dy_tl = -w / 2.0 * sin_a + -h / 2.0 * cos_a
+    dx_tr = w / 2.0 * cos_a - -h / 2.0 * sin_a
+    dy_tr = w / 2.0 * sin_a + -h / 2.0 * cos_a
+    dx_br = w / 2.0 * cos_a - h / 2.0 * sin_a
+    dy_br = w / 2.0 * sin_a + h / 2.0 * cos_a
+    dx_bl = -w / 2.0 * cos_a - h / 2.0 * sin_a
+    dy_bl = -w / 2.0 * sin_a + h / 2.0 * cos_a
+    TL = (cx + dx_tl, cy + dy_tl)
+    TR = (cx + dx_tr, cy + dy_tr)
+    BR = (cx + dx_br, cy + dy_br)
+    BL = (cx + dx_bl, cy + dy_bl)
+    return [TL, TR, BR, BL]
+
+def V42__refine_edge_with_thermal_gap(img_gray, p1, p2, search_window=3):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length == 0:
+        return (p1, p2)
+    nx = -dy / length
+    ny = dx / length
+    num_samples = 15
+    profile = []
+    for d in range(-search_window, search_window + 1):
+        vals = []
+        for i in range(num_samples):
+            t = i / (num_samples - 1)
+            x_sample = p1[0] + t * dx + d * nx
+            y_sample = p1[1] + t * dy + d * ny
+            x_idx = int(round(x_sample))
+            y_idx = int(round(y_sample))
+            if 0 <= x_idx < img_gray.shape[1] and 0 <= y_idx < img_gray.shape[0]:
+                vals.append(img_gray[y_idx, x_idx])
+        profile.append(np.mean(vals) if vals else 255.0)
+    best_d = 0
+    has_support = False
+    min_val = 255.0
+    for idx in range(1, len(profile) - 1):
+        if profile[idx] < profile[idx - 1] and profile[idx] < profile[idx + 1]:
+            if profile[idx] < 130 and profile[idx] < min_val:
+                min_val = profile[idx]
+                best_d = idx - search_window
+                has_support = True
+    if has_support:
+        p1_refined = (p1[0] + best_d * nx, p1[1] + best_d * ny)
+        p2_refined = (p2[0] + best_d * nx, p2[1] + best_d * ny)
+        return (p1_refined, p2_refined)
+    else:
+        return (p1, p2)
+
+def V42__get_polygon_intersection_area(poly1, poly2):
+    p1 = np.array(poly1, dtype=np.float32)
+    p2 = np.array(poly2, dtype=np.float32)
+    ret, inter_poly = cv2.intersectConvexConvex(p1, p2)
+    if ret > 0 and inter_poly is not None:
+        return cv2.contourArea(inter_poly)
+    return 0.0
+
+def V42__validate_and_fallback_panel(poly_proposal_orig, p_orig, gray, block_panels_polys=None):
+    poly_proposal_orig = np.array(poly_proposal_orig, dtype=np.float32)
+    is_convex = cv2.isContourConvex(poly_proposal_orig.astype(np.int32))
+    anchors = V42__get_panel_hybrid_anchors(p_orig)
+    yolo_poly = np.array(anchors['poly_4pts'], dtype=np.float32)
+    area_orig = cv2.contourArea(yolo_poly)
+    if area_orig <= 0:
+        x1, y1, x2, y2 = p_orig['bbox']
+        area_orig = (x2 - x1) * (y2 - y1)
+    area_prop = cv2.contourArea(poly_proposal_orig)
+    area_ratio = area_prop / area_orig if area_orig > 0 else 0.0
+    area_ok = 0.7 <= area_ratio <= 1.4
+    cx_prop = np.mean(poly_proposal_orig[:, 0])
+    cy_prop = np.mean(poly_proposal_orig[:, 1])
+    cx_orig = anchors['center'][0]
+    cy_orig = anchors['center'][1]
+    c_shift = math.sqrt((cx_prop - cx_orig) ** 2 + (cy_prop - cy_orig) ** 2)
+    panel_height = anchors['height']
+    shift_ok = c_shift <= max(12.0, 0.4 * panel_height)
+    overlap_ok = True
+    if block_panels_polys is not None:
+        for other_poly in block_panels_polys:
+            inter_area = V42__get_polygon_intersection_area(poly_proposal_orig, other_poly)
+            if inter_area > 0.35 * min(area_prop, cv2.contourArea(other_poly)):
+                overlap_ok = False
+                break
+    is_valid = is_convex and area_ok and shift_ok and overlap_ok
+    if is_valid:
+        return ([(float(pt[0]), float(pt[1])) for pt in poly_proposal_orig], 'pass')
+    else:
+        TL_ref, TR_ref = V42__refine_edge_with_thermal_gap(gray, anchors['poly_4pts'][0], anchors['poly_4pts'][1])
+        BL_ref, BR_ref = V42__refine_edge_with_thermal_gap(gray, anchors['poly_4pts'][3], anchors['poly_4pts'][2])
+        poly_fallback = [TL_ref, TR_ref, BR_ref, BL_ref]
+        return (poly_fallback, 'warning')
+
+def V42__refine_oriented_polygon(gray, poly):
+    TL, TR, BR, BL = V42__sort_panel_corners(poly)
+    TL_t, TR_t = V42__refine_edge_with_thermal_gap(gray, TL, TR, search_window=3)
+    BL_b, BR_b = V42__refine_edge_with_thermal_gap(gray, BL, BR, search_window=3)
+    TL_l, BL_l = V42__refine_edge_with_thermal_gap(gray, TL, BL, search_window=3)
+    TR_r, BR_r = V42__refine_edge_with_thermal_gap(gray, TR, BR, search_window=3)
+
+    def intersect_lines(p1, p2, q1, q2):
+        A1 = p2[1] - p1[1]
+        B1 = p1[0] - p2[0]
+        C1 = A1 * p1[0] + B1 * p1[1]
+        A2 = q2[1] - q1[1]
+        B2 = q1[0] - q2[0]
+        C2 = A2 * q1[0] + B2 * q1[1]
+        det = A1 * B2 - A2 * B1
+        if abs(det) < 1e-05:
+            return p1
+        x = (B2 * C1 - B1 * C2) / det
+        y = (A1 * C2 - A2 * C1) / det
+        return (x, y)
+    tl_new = intersect_lines(TL_t, TR_t, TL_l, BL_l)
+    tr_new = intersect_lines(TL_t, TR_t, TR_r, BR_r)
+    br_new = intersect_lines(BL_b, BR_b, TR_r, BR_r)
+    bl_new = intersect_lines(BL_b, BR_b, TL_l, BL_l)
+    return [tl_new, tr_new, br_new, bl_new]
+
+def V42__is_polygon_valid(poly, anchors, block_panels_polys=None):
+    poly_np = np.array(poly, dtype=np.float32)
+    if not cv2.isContourConvex(poly_np.astype(np.int32)):
+        return (False, 'not_convex')
+    area = cv2.contourArea(poly_np)
+    yolo_poly = np.array(anchors['poly_4pts'], dtype=np.float32)
+    area_orig = cv2.contourArea(yolo_poly)
+    if area_orig <= 0:
+        return (True, 'ok')
+    area_ratio = area / area_orig
+    if not 0.6 <= area_ratio <= 1.45:
+        return (False, 'bad_area')
+    dx_top = math.sqrt((poly[1][0] - poly[0][0]) ** 2 + (poly[1][1] - poly[0][1]) ** 2)
+    dy_left = math.sqrt((poly[3][0] - poly[0][0]) ** 2 + (poly[3][1] - poly[0][1]) ** 2)
+    if dy_left <= 0:
+        return (False, 'zero_height')
+    aspect_ratio = dx_top / dy_left
+    yolo_w = anchors['width']
+    yolo_h = anchors['height']
+    if yolo_h > 0:
+        yolo_aspect = yolo_w / yolo_h
+        if not 0.65 * yolo_aspect <= aspect_ratio <= 1.35 * yolo_aspect:
+            return (False, 'bad_aspect_ratio')
+    if block_panels_polys is not None:
+        for other_poly in block_panels_polys:
+            inter_area = V42__get_polygon_intersection_area(poly_np, other_poly)
+            if inter_area > 0.35 * min(area, cv2.contourArea(other_poly)):
+                return (False, 'overlap')
+    return (True, 'ok')
+
+def V42__intersect_snap_horizontal_with_rail(m, x_mid, y_snap, rail_pts):
+    A = -m
+    B = 1.0
+    C = m * x_mid - y_snap
+    for i in range(len(rail_pts) - 1):
+        x0, y0 = rail_pts[i]
+        x1, y1 = rail_pts[i + 1]
+        dx = x1 - x0
+        dy = y1 - y0
+        denom = A * dx + B * dy
+        if abs(denom) > 1e-06:
+            t = -(A * x0 + B * y0 + C) / denom
+            if 0.0 <= t <= 1.0:
+                return (x0 + t * dx, y0 + t * dy)
+    return None
+
+def V42__transform_points_local_to_orig(points, transform_info):
+    Minv = transform_info['rot_M_inv']
+    roi_x1 = transform_info['roi_x1']
+    roi_y1 = transform_info['roi_y1']
+    orig_pts = []
+    for x_local, y_local in points:
+        x_rel = Minv[0, 0] * float(x_local) + Minv[0, 1] * float(y_local) + Minv[0, 2]
+        y_rel = Minv[1, 0] * float(x_local) + Minv[1, 1] * float(y_local) + Minv[1, 2]
+        orig_pts.append((float(x_rel + roi_x1), float(y_rel + roi_y1)))
+    return orig_pts
+
+def V42__build_panel_polygons_from_visible_snap_evidence(img, snap_blocks, img_support=None, img_snap=None):
+    if img_support is None:
+        img_support = img.copy()
+    if img_snap is None:
+        img_snap = img.copy()
+    drawn_count = 0
+    all_polygons = []
+    all_sources = []
+    all_panel_dicts = []
+    for sb in snap_blocks:
+        block_name = sb['block_name']
+        n_cols = sb['n_cols']
+        row_count = sb['row_count']
+        drawn_block_polys = []
+        is_large_grid = sb['is_large_grid']
+        boundaries = sb['boundaries']
+        snapped_horiz_gaps = sb['snapped_horiz_gaps']
+        m_perp = sb['m_perp']
+        x_mid = sb['x_mid']
+        b_local = sb['b_local']
+        transform_info = sb['transform_info']
+        is_small_block = sb.get('is_small_block', False)
+        rotated_gray = sb.get('rotated_gray', None)
+        bad_block_orientation = bool(sb.get('bad_block_orientation', False))
+        bad_block_orientation_angle_deg = float(sb.get('bad_block_orientation_angle_deg', 0.0))
+        if bad_block_orientation:
+            print(f'[GEOMETRY_BLOCK_REJECT] block={block_name} reason=bad_block_orientation angle={bad_block_orientation_angle_deg:.2f} action=no_snap_polygon')
+        if is_small_block:
+            for col_idx, col in enumerate(b_local['columns']):
+                for row_idx in range(len(col)):
+                    p = col[row_idx]
+                    poly_proposal_local = p['polygon']
+                    poly_final_orig = V42__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                    poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                    drawn_count += 1
+                    source = p.get('source', 'small_block_yolo_limited')
+                    reason = p.get('reason', 'valid_refine')
+                    shift = p.get('shift', 0.0)
+                    area_ratio = p.get('area_ratio', 1.0)
+                    overlap = p.get('overlap', 0.0)
+                    print(f'[GEOMETRY_SOURCE] {block_name} {row_idx} {col_idx} source={source} reason={reason} shift={shift:.2f} area_ratio={area_ratio:.2f} overlap={overlap:.2f}')
+                    all_polygons.append(poly_final_orig)
+                    all_sources.append(source)
+                    all_panel_dicts.append(p)
+            continue
+        bx_min = min((panel['orig_ref']['bbox'][0] for panel in b_local['panels'])) if b_local['panels'] else 9999.0
+        fitted_horiz_lines = []
+        for r, g in enumerate(snapped_horiz_gaps):
+            support_valid = g.get('support_valid', False)
+            support_line_m = g.get('support_line_m', None)
+            support_line_c = g.get('support_line_c', None)
+            m_row_base = g.get('m_row', 0.0)
+            c_row_base = g.get('c_row', g.get('c_yolo', 0.0))
+            if support_valid and support_line_m is not None and (support_line_c is not None):
+                m_row = float(support_line_m)
+                c_row = float(support_line_c)
+                selected_cand = str(g.get('selected_cand', 'support_prefit'))
+                std_res = float(g.get('support_residual_std', 0.0))
+            else:
+                m_row = float(m_row_base)
+                c_row = float(c_row_base)
+                selected_cand = str(g.get('selected_cand', 'yolo_fallback'))
+                std_res = 0.0
+            print(f'[HORIZ_LINE] {block_name} r={r} source={selected_cand} m={m_row:.5f} c={c_row:.2f} residual={std_res:.3f}')
+            fitted_horiz_lines.append({'m_row': m_row, 'c_row': c_row, 'selected_cand': selected_cand, 'y_snap': m_row * x_mid + c_row})
+        left_snapped_horiz_gaps_by_col = sb.get('left_snapped_horiz_gaps_by_col', None)
+        has_crop_left_col = left_snapped_horiz_gaps_by_col is not None
+        left_fitted_horiz_lines_by_col = {0: [], 1: []}
+        if has_crop_left_col:
+            for col_idx in [0, 1]:
+                gaps = left_snapped_horiz_gaps_by_col[col_idx]
+                for r in sorted(gaps.keys()):
+                    g = gaps[r]
+                    cand = g.get('selected_cand')
+                    support_valid = cand in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    support_line_m = g.get('support_line_m', None)
+                    support_line_c = g.get('support_line_c', None)
+                    m_row_base = g.get('m_row', 0.0)
+                    c_row_base = g.get('c_row', 0.0)
+                    if support_valid and support_line_m is not None and (support_line_c is not None):
+                        m_row = float(support_line_m)
+                        c_row = float(support_line_c)
+                        selected_cand = cand
+                        std_res = float(g.get('support_residual_std', 0.0))
+                    else:
+                        m_row = float(g.get('m_yolo', m_row_base))
+                        c_row = float(g.get('c_yolo', c_row_base))
+                        selected_cand = 'yolo_fallback'
+                        std_res = 0.0
+                    offset = 0.0
+                    if r < len(snapped_horiz_gaps):
+                        g_adj = snapped_horiz_gaps[r]
+                        c_ref = g_adj['c_row']
+                        offset = c_row - c_ref
+                    print(f"[CROP_LEFT_LINE_USE] {block_name} {r} {col_idx} source={selected_cand} clean={len(g.get('support_clean_pts', []))} residual={std_res:.3f} offset={offset:.2f}")
+                    left_fitted_horiz_lines_by_col[col_idx].append({'m_row': m_row, 'c_row': c_row, 'support_line_m': g.get('support_line_m'), 'support_line_c': g.get('support_line_c'), 'selected_cand': selected_cand, 'y_snap': m_row * x_mid + c_row})
+        if bool(sb.get('bad_block_orientation_recovered', False)) and (not has_crop_left_col):
+            profile_cols = 2 if boundaries.get('middle_divider') is not None else 1
+            profile_rows = max(0, len(fitted_horiz_lines) - 1)
+            print(f'[PROFILE_GRID_BUILD] block={block_name} rows={profile_rows} cols={profile_cols} action=full_grid_from_recovered_rows_v29 source=line_snap_only')
+            for col_idx in range(profile_cols):
+                if profile_cols == 1:
+                    left_line = boundaries.get('left_outer')
+                    right_line = boundaries.get('right_outer')
+                else:
+                    left_line = boundaries.get('left_outer') if col_idx == 0 else boundaries.get('middle_divider')
+                    right_line = boundaries.get('middle_divider') if col_idx == 0 else boundaries.get('right_outer')
+                if left_line is None or right_line is None:
+                    print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} col={col_idx} reason=missing_vertical_rail')
+                    continue
+                for row_idx in range(profile_rows):
+                    if row_idx + 1 >= len(fitted_horiz_lines):
+                        print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} row={row_idx} col={col_idx} reason=missing_horizontal_line')
+                        continue
+                    g_t = fitted_horiz_lines[row_idx]
+                    g_b = fitted_horiz_lines[row_idx + 1]
+                    m_t, c_t = (float(g_t['m_row']), float(g_t['c_row']))
+                    m_b, c_b = (float(g_b['m_row']), float(g_b['c_row']))
+                    tl = V42__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, left_line)
+                    if tl is None and left_line is not None and (len(left_line) >= 2):
+                        y_ref = m_t * x_mid + c_t
+                        x_val = V42__get_boundary_x_at_y(left_line, y_ref)
+                        tl = (x_val, m_t * x_val + c_t)
+                    tr = V42__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, right_line)
+                    if tr is None and right_line is not None and (len(right_line) >= 2):
+                        y_ref = m_t * x_mid + c_t
+                        x_val = V42__get_boundary_x_at_y(right_line, y_ref)
+                        tr = (x_val, m_t * x_val + c_t)
+                    br = V42__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, right_line)
+                    if br is None and right_line is not None and (len(right_line) >= 2):
+                        y_ref = m_b * x_mid + c_b
+                        x_val = V42__get_boundary_x_at_y(right_line, y_ref)
+                        br = (x_val, m_b * x_val + c_b)
+                    bl = V42__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, left_line)
+                    if bl is None and left_line is not None and (len(left_line) >= 2):
+                        y_ref = m_b * x_mid + c_b
+                        x_val = V42__get_boundary_x_at_y(left_line, y_ref)
+                        bl = (x_val, m_b * x_val + c_b)
+                    if tl is None or tr is None or br is None or (bl is None):
+                        print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} row={row_idx} col={col_idx} reason=intersection_failed')
+                        continue
+                    poly_proposal_local = [tl, tr, br, bl]
+                    poly_prop_np = np.array(poly_proposal_local, dtype=np.float32)
+                    area_prop = float(cv2.contourArea(poly_prop_np))
+                    is_convex = bool(cv2.isContourConvex(poly_prop_np.astype(np.int32)))
+                    height_l = math.sqrt((bl[0] - tl[0]) ** 2 + (bl[1] - tl[1]) ** 2)
+                    height_r = math.sqrt((br[0] - tr[0]) ** 2 + (br[1] - tr[1]) ** 2)
+                    width_t = math.sqrt((tr[0] - tl[0]) ** 2 + (tr[1] - tl[1]) ** 2)
+                    width_b = math.sqrt((br[0] - bl[0]) ** 2 + (br[1] - bl[1]) ** 2)
+                    dims_ok = area_prop > 20.0 and min(height_l, height_r) > 4.0 and (min(width_t, width_b) > 6.0)
+                    overlap_ok = True
+                    if not (is_convex and dims_ok):
+                        print(f'[PROFILE_GRID_PANEL_SKIP] block={block_name} row={row_idx} col={col_idx} reason=invalid_grid convex={str(is_convex).lower()} dims={str(dims_ok).lower()} overlap=ignored area={area_prop:.1f}')
+                        continue
+                    poly_final_orig = V42__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                    poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                    drawn_count += 1
+                    drawn_block_polys.append(poly_final_orig)
+                    source = 'profile_snap_grid'
+                    all_polygons.append(poly_final_orig)
+                    all_sources.append(source)
+                    all_panel_dicts.append({'source': source, 'reason': 'bad_orientation_profile_grid', 'row': row_idx, 'col': col_idx, 'outer_polygon': np.array(poly_final_orig, dtype=np.float32)})
+                    print(f"[PROFILE_GRID_PANEL] block={block_name} row={row_idx} col={col_idx} source={source} top={g_t['selected_cand']} bottom={g_b['selected_cand']} area={area_prop:.1f} valid=true")
+            continue
+        if not has_crop_left_col and len(fitted_horiz_lines) >= 2 and (boundaries.get('left_outer') is not None) and (boundaries.get('right_outer') is not None):
+            grid_cols = 2 if boundaries.get('middle_divider') is not None else 1
+            grid_rows = max(0, len(fitted_horiz_lines) - 1)
+            print(f'[UNIVERSAL_SNAP_GRID_BUILD] block={block_name} rows={grid_rows} cols={grid_cols} source=line_snap_rails_rows')
+            for col_idx in range(grid_cols):
+                if grid_cols == 1:
+                    left_line = boundaries.get('left_outer')
+                    right_line = boundaries.get('right_outer')
+                else:
+                    left_line = boundaries.get('left_outer') if col_idx == 0 else boundaries.get('middle_divider')
+                    right_line = boundaries.get('middle_divider') if col_idx == 0 else boundaries.get('right_outer')
+                if left_line is None or right_line is None:
+                    print(f'[UNIVERSAL_SNAP_GRID_SKIP] block={block_name} col={col_idx} reason=missing_rail')
+                    continue
+                for row_idx in range(grid_rows):
+                    g_t = fitted_horiz_lines[row_idx]
+                    g_b = fitted_horiz_lines[row_idx + 1]
+                    m_t, c_t = (float(g_t['m_row']), float(g_t['c_row']))
+                    m_b, c_b = (float(g_b['m_row']), float(g_b['c_row']))
+
+                    def _intersect_or_project(mv, cv, rail):
+                        p_int = V42__intersect_line_y_eq_mx_c_with_polyline(mv, cv, rail)
+                        if p_int is not None:
+                            return p_int
+                        y_ref = mv * x_mid + cv
+                        x_val = V42__get_boundary_x_at_y(rail, y_ref)
+                        return (x_val, mv * x_val + cv)
+                    tl = _intersect_or_project(m_t, c_t, left_line)
+                    tr = _intersect_or_project(m_t, c_t, right_line)
+                    br = _intersect_or_project(m_b, c_b, right_line)
+                    bl = _intersect_or_project(m_b, c_b, left_line)
+                    poly_proposal_local = [tl, tr, br, bl]
+                    poly_prop_np = np.array(poly_proposal_local, dtype=np.float32)
+                    area_prop = float(cv2.contourArea(poly_prop_np))
+                    is_convex = bool(cv2.isContourConvex(poly_prop_np.astype(np.int32)))
+                    h_l = math.hypot(bl[0] - tl[0], bl[1] - tl[1])
+                    h_r = math.hypot(br[0] - tr[0], br[1] - tr[1])
+                    w_t = math.hypot(tr[0] - tl[0], tr[1] - tl[1])
+                    w_b = math.hypot(br[0] - bl[0], br[1] - bl[1])
+                    dims_ok = area_prop > 20.0 and min(h_l, h_r) > 4.0 and (min(w_t, w_b) > 6.0)
+                    if not (is_convex and dims_ok):
+                        print(f'[UNIVERSAL_SNAP_GRID_SKIP] block={block_name} row={row_idx} col={col_idx} reason=invalid_grid convex={str(is_convex).lower()} dims={str(dims_ok).lower()} area={area_prop:.1f}')
+                        continue
+                    poly_final_orig = V42__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                    poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                    drawn_count += 1
+                    drawn_block_polys.append(poly_final_orig)
+                    source = 'universal_snap_grid'
+                    all_polygons.append(poly_final_orig)
+                    all_sources.append(source)
+                    all_panel_dicts.append({'source': source, 'reason': 'line_snap_grid_no_yolo_polygon', 'row': row_idx, 'col': col_idx, 'outer_polygon': np.array(poly_final_orig, dtype=np.float32)})
+                    print(f"[UNIVERSAL_SNAP_GRID_PANEL] block={block_name} row={row_idx} col={col_idx} source={source} top={g_t.get('selected_cand')} bottom={g_b.get('selected_cand')} area={area_prop:.1f}")
+            continue
+        for col_idx, col in enumerate(b_local['columns']):
+            for row_idx in range(len(col)):
+                p = col[row_idx]
+                p_orig = p['orig_ref']
+                if has_crop_left_col:
+                    g_t = left_fitted_horiz_lines_by_col[col_idx][row_idx]
+                    g_b = left_fitted_horiz_lines_by_col[col_idx][row_idx + 1]
+                    if col_idx == 0:
+                        left_line = boundaries.get('left_outer')
+                        right_line = boundaries.get('middle_divider')
+                    else:
+                        left_line = boundaries.get('middle_divider')
+                        right_line = boundaries.get('right_outer')
+                    t_valid = g_t['selected_cand'] in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    b_valid = g_b['selected_cand'] in ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    m_t = g_t.get('support_line_m') if g_t.get('support_line_m') is not None else g_t['m_row']
+                    c_t = g_t.get('support_line_c') if g_t.get('support_line_c') is not None else g_t['c_row']
+                    m_b = g_b.get('support_line_m') if g_b.get('support_line_m') is not None else g_b['m_row']
+                    c_b = g_b.get('support_line_c') if g_b.get('support_line_c') is not None else g_b['c_row']
+                    tl = tr = br = bl = None
+                    fail_reasons = []
+                    if t_valid and b_valid:
+                        tl = V42__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, left_line)
+                        if tl is None and left_line is not None and (len(left_line) >= 2):
+                            y_ref_t = m_t * x_mid + c_t
+                            x_val = V42__get_boundary_x_at_y(left_line, y_ref_t)
+                            y_val = m_t * x_val + c_t
+                            tl = (x_val, y_val)
+                        tr = V42__intersect_line_y_eq_mx_c_with_polyline(m_t, c_t, right_line)
+                        if tr is None and right_line is not None and (len(right_line) >= 2):
+                            y_ref_t = m_t * x_mid + c_t
+                            x_val = V42__get_boundary_x_at_y(right_line, y_ref_t)
+                            y_val = m_t * x_val + c_t
+                            tr = (x_val, y_val)
+                        br = V42__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, right_line)
+                        if br is None and right_line is not None and (len(right_line) >= 2):
+                            y_ref_b = m_b * x_mid + c_b
+                            x_val = V42__get_boundary_x_at_y(right_line, y_ref_b)
+                            y_val = m_b * x_val + c_b
+                            br = (x_val, y_val)
+                        bl = V42__intersect_line_y_eq_mx_c_with_polyline(m_b, c_b, left_line)
+                        if bl is None and left_line is not None and (len(left_line) >= 2):
+                            y_ref_b = m_b * x_mid + c_b
+                            x_val = V42__get_boundary_x_at_y(left_line, y_ref_b)
+                            y_val = m_b * x_val + c_b
+                            bl = (x_val, y_val)
+                    else:
+                        fail_reasons.append('no_crop_left_support')
+                    is_valid_proposal = False
+                    poly_proposal_local = None
+                    poly_final_orig = None
+                    area_ratio = 1.0
+                    center_shift = 0.0
+                    if tl is not None and tr is not None and (br is not None) and (bl is not None):
+                        poly_proposal_local = [tl, tr, br, bl]
+                        poly_proposal_orig = V42__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                        poly_prop_np = np.array(poly_proposal_orig, dtype=np.float32)
+                        is_convex = cv2.isContourConvex(poly_prop_np.astype(np.int32))
+                        if not is_convex:
+                            fail_reasons.append('not_convex')
+                        yolo_poly_orig = p_orig.get('refined_polygon') or p_orig.get('polygon') or p_orig.get('bbox')
+                        if len(yolo_poly_orig) == 4:
+                            area_yolo = cv2.contourArea(np.array(yolo_poly_orig, dtype=np.float32))
+                        else:
+                            x1, y1, x2, y2 = yolo_poly_orig
+                            area_yolo = (x2 - x1) * (y2 - y1)
+                        area_prop = cv2.contourArea(poly_prop_np)
+                        area_ratio = area_prop / (area_yolo + 1e-06)
+                        area_ok = 0.7 <= area_ratio <= 1.35
+                        if not area_ok:
+                            fail_reasons.append(f'area_ratio_{area_ratio:.2f}_out_of_range')
+                        cx_prop = np.mean([pt[0] for pt in poly_proposal_orig])
+                        cy_prop = np.mean([pt[1] for pt in poly_proposal_orig])
+                        if len(yolo_poly_orig) == 4:
+                            cx_orig = np.mean([pt[0] for pt in yolo_poly_orig])
+                            cy_orig = np.mean([pt[1] for pt in yolo_poly_orig])
+                            TL_orig, TR_orig, BR_orig, BL_orig = V42__sort_panel_corners(yolo_poly_orig)
+                            panel_height = math.sqrt((BL_orig[0] - TL_orig[0]) ** 2 + (BL_orig[1] - TL_orig[1]) ** 2)
+                        else:
+                            x1, y1, x2, y2 = yolo_poly_orig
+                            cx_orig = (x1 + x2) / 2.0
+                            cy_orig = (y1 + y2) / 2.0
+                            panel_height = y2 - y1
+                        center_shift = math.sqrt((cx_prop - cx_orig) ** 2 + (cy_prop - cy_orig) ** 2)
+                        shift_ok = center_shift <= max(14.0, 0.45 * panel_height)
+                        if not shift_ok:
+                            fail_reasons.append(f'shift_{center_shift:.2f}_too_large')
+                        overlap_ok = True
+                        for other_poly in drawn_block_polys:
+                            inter_area = V42__get_polygon_intersection_area(poly_proposal_orig, other_poly)
+                            area_other = cv2.contourArea(np.array(other_poly, dtype=np.float32))
+                            if inter_area > 0.35 * min(area_prop, area_other):
+                                overlap_ok = False
+                                break
+                        if not overlap_ok:
+                            fail_reasons.append('overlap_detected')
+                        if is_convex and area_ok and shift_ok and overlap_ok:
+                            is_valid_proposal = True
+                            poly_final_orig = poly_proposal_orig
+                    elif not fail_reasons:
+                        fail_reasons.append('intersection_failed')
+                    if is_valid_proposal:
+                        poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                        drawn_count += 1
+                        drawn_block_polys.append(poly_final_orig)
+                        source = 'snap_grid'
+                        all_polygons.append(poly_final_orig)
+                        all_sources.append(source)
+                        all_panel_dicts.append(p)
+                        print(f"[PANEL_BUILD] block={block_name} row={row_idx} col={col_idx} source=snap_grid top={g_t['selected_cand']} bottom={g_b['selected_cand']} area_ratio={area_ratio:.3f} shift={center_shift:.2f} valid=true reason=top_{g_t['selected_cand']}_bottom_{g_b['selected_cand']}")
+                    else:
+                        poly_final_local = p.get('refined_polygon') or p.get('polygon')
+                        poly_final_orig = V42__transform_points_local_to_orig(poly_final_local, transform_info)
+                        poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                        drawn_count += 1
+                        drawn_block_polys.append(poly_final_orig)
+                        source = 'snap_grid_rejected_missing_or_invalid_edge'
+                        all_polygons.append(poly_final_orig)
+                        all_sources.append(source)
+                        all_panel_dicts.append(p)
+                        reason_str = '+'.join(fail_reasons)
+                        print(f"[PANEL_BUILD] block={block_name} row={row_idx} col={col_idx} source=snap_grid top={g_t['selected_cand']} bottom={g_b['selected_cand']} area_ratio={area_ratio:.3f} shift={center_shift:.2f} valid=false reason={reason_str}")
+                        print(f'[PANEL_FALLBACK] block={block_name} row={row_idx} col={col_idx} reason={reason_str}')
+                else:
+                    if bad_block_orientation:
+                        print(f'[GEOMETRY_PANEL_SUPPRESSED] block={block_name} row={row_idx} col={col_idx} reason=bad_block_orientation_no_snap_polygon action=no_yolo_geometry')
+                        continue
+                    g_t = fitted_horiz_lines[row_idx]
+                    g_b = fitted_horiz_lines[row_idx + 1]
+                    if is_large_grid or sb.get('is_grid', True):
+                        left_pts = boundaries.get('left_outer')
+                        right_pts = boundaries.get('right_outer')
+                        mid_pts = boundaries.get('middle_divider')
+                        if n_cols == 1:
+                            c_left = left_pts
+                            c_right = right_pts
+                            left_name = 'rail'
+                            right_name = 'rail'
+                        elif col_idx == 0:
+                            c_left = left_pts
+                            c_right = mid_pts
+                            left_name = 'rail'
+                            right_name = 'rail'
+                        else:
+                            c_left = mid_pts
+                            c_right = right_pts
+                            left_name = 'rail'
+                            right_name = 'rail'
+                    else:
+                        c_left = boundaries.get(f'left_col_{col_idx}')
+                        c_right = boundaries.get(f'right_col_{col_idx}')
+                        left_name = 'rail' if c_left is not None else 'yolo'
+                        right_name = 'rail' if c_right is not None else 'yolo'
+                    TL_yolo, TR_yolo, BR_yolo, BL_yolo = V42__sort_panel_corners(p['refined_polygon'])
+                    use_yolo_left = False
+                    if not is_large_grid and (not sb.get('is_grid', True)):
+                        if c_left is not None:
+                            rail_h = abs(c_left[-1][1] - c_left[0][1])
+                            if rail_h < 120:
+                                use_yolo_left = True
+                        else:
+                            use_yolo_left = True
+                    if use_yolo_left:
+                        left_line = [TL_yolo, BL_yolo]
+                        left_name = 'yolo'
+                    else:
+                        left_line = c_left
+                    use_yolo_right = False
+                    if not is_large_grid and (not sb.get('is_grid', True)):
+                        if c_right is not None:
+                            rail_h = abs(c_right[-1][1] - c_right[0][1])
+                            if rail_h < 120:
+                                use_yolo_right = True
+                        else:
+                            use_yolo_right = True
+                    if use_yolo_right:
+                        right_line = [TR_yolo, BR_yolo]
+                        right_name = 'yolo'
+                    else:
+                        right_line = c_right
+                    tl = V42__intersect_snap_horizontal_with_rail(g_t['m_row'], 0.0, g_t['c_row'], left_line)
+                    if tl is None and left_line is not None and (len(left_line) >= 2):
+                        tl = (V42__get_boundary_x_at_y(left_line, g_t['y_snap']), g_t['y_snap'])
+                    tr = V42__intersect_snap_horizontal_with_rail(g_t['m_row'], 0.0, g_t['c_row'], right_line)
+                    if tr is None and right_line is not None and (len(right_line) >= 2):
+                        tr = (V42__get_boundary_x_at_y(right_line, g_t['y_snap']), g_t['y_snap'])
+                    br = V42__intersect_snap_horizontal_with_rail(g_b['m_row'], 0.0, g_b['c_row'], right_line)
+                    if br is None and right_line is not None and (len(right_line) >= 2):
+                        br = (V42__get_boundary_x_at_y(right_line, g_b['y_snap']), g_b['y_snap'])
+                    bl = V42__intersect_snap_horizontal_with_rail(g_b['m_row'], 0.0, g_b['c_row'], left_line)
+                    if bl is None and left_line is not None and (len(left_line) >= 2):
+                        bl = (V42__get_boundary_x_at_y(left_line, g_b['y_snap']), g_b['y_snap'])
+                    if tl is None or tr is None or br is None or (bl is None):
+                        poly_final_local = p.get('refined_polygon') or p.get('polygon')
+                        poly_final_orig = V42__transform_points_local_to_orig(poly_final_local, transform_info)
+                        poly_yolo_np = np.array(poly_final_local, dtype=np.float32)
+                        area_ratio = 1.0
+                        center_shift = 0.0
+                        source = 'fallback_yolo'
+                        reason = 'intersection_failed'
+                        print(f'[GEOMETRY_SOURCE] {block_name} {row_idx} {col_idx} source={source} reason={reason} shift={center_shift:.2f} area_ratio={area_ratio:.2f} overlap=0.00')
+                    else:
+                        poly_proposal_local = [tl, tr, br, bl]
+                        poly_final_orig = V42__transform_points_local_to_orig(poly_proposal_local, transform_info)
+                        poly_yolo = p['refined_polygon']
+                        poly_yolo_np = np.array(poly_yolo, dtype=np.float32)
+                        poly_prop_np = np.array(poly_proposal_local, dtype=np.float32)
+                        area_prop = cv2.contourArea(poly_prop_np)
+                        area_yolo = cv2.contourArea(poly_yolo_np)
+                        area_ratio = area_prop / (area_yolo + 1e-06)
+                        cx_prop = np.mean(poly_prop_np[:, 0])
+                        cy_prop = np.mean(poly_prop_np[:, 1])
+                        cx_yolo = np.mean(poly_yolo_np[:, 0])
+                        cy_yolo = np.mean(poly_yolo_np[:, 1])
+                        center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                        source = 'snap_grid'
+                        t_src = g_t['selected_cand']
+                        b_src = g_b['selected_cand']
+                        reason = f'top_{t_src}_bottom_{b_src}'
+                        poly_prop_np_orig = np.array(poly_final_orig, dtype=np.float32)
+                        is_convex_v19 = cv2.isContourConvex(poly_prop_np.astype(np.int32))
+                        area_ok_v19 = 0.65 <= area_ratio <= 1.45
+                        shift_ok_v19 = center_shift <= max(12.0, 0.4 * math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2))
+                        if not (is_convex_v19 and area_ok_v19 and shift_ok_v19):
+                            poly_final_local = p.get('refined_polygon') or p.get('polygon')
+                            poly_final_orig = V42__transform_points_local_to_orig(poly_final_local, transform_info)
+                            source = 'validated_fallback'
+                            reason = f'snap_rejected_convex={str(is_convex_v19).lower()}_area={area_ratio:.2f}_shift={center_shift:.2f}'
+                        print(f'[GEOMETRY_SOURCE] {block_name} {row_idx} {col_idx} source={source} reason={reason} shift={center_shift:.2f} area_ratio={area_ratio:.2f} overlap=0.00')
+                poly_orig = np.array(poly_final_orig, dtype=np.int32)
+                drawn_count += 1
+                all_polygons.append(poly_final_orig)
+                all_sources.append(source)
+                all_panel_dicts.append(p)
+    panel_calc_entries = []
+    snap_reject_sources = {'fallback_yolo', 'validated_fallback', 'snap_grid_rejected_missing_or_invalid_edge', 'bbox_fallback'}
+    for idx, (poly_final_orig, src_name, panel) in enumerate(zip(all_polygons, all_sources, all_panel_dicts)):
+        final_polygon = np.array(poly_final_orig, dtype=np.float32)
+        inner_polygon, inset_source, inset_valid = V42__inset_quad_polygon(final_polygon, V42__INNER_PANEL_MARGIN_PX)
+        outer_area = float(cv2.contourArea(final_polygon))
+        calc_area = float(cv2.contourArea(inner_polygon))
+        area_ok = not (calc_area > outer_area or calc_area <= 0 or outer_area <= 0)
+        preliminary_valid = bool(V42__USE_INNER_PANEL_FOR_CALC and inset_valid and area_ok)
+        filter_reason = ''
+        src_str = str(src_name)
+        if not area_ok:
+            preliminary_valid = False
+            filter_reason = 'invalid_inner_area'
+        elif not inset_valid:
+            preliminary_valid = False
+            filter_reason = 'inner_inset_invalid'
+        if not preliminary_valid:
+            print(f'[V63_PANEL_FILTER_INNER_GEOMETRY] idx={idx} source={src_str} action=reject reason={filter_reason} outer={outer_area:.1f} calc={calc_area:.1f}')
+        panel_calc_entries.append({'idx': idx, 'panel': panel, 'src_name': src_str, 'outer_polygon': final_polygon, 'inner_polygon': inner_polygon if preliminary_valid else final_polygon, 'outer_area': outer_area, 'calc_area': calc_area if preliminary_valid else outer_area, 'inset_source': inset_source, 'calc_source': 'inner_from_final_polygon' if preliminary_valid else 'rejected_or_outer_fallback', 'preliminary_valid': preliminary_valid, 'valid': preliminary_valid, 'filter_reason': filter_reason, 'area_ratio_to_ref': 0.0, 'inner_area_reference_px': 0.0, 'inner_area_min_required_px': 0.0})
+
+    def _v63_entry_bbox(e):
+        pts = np.array(e['outer_polygon'], dtype=np.float32)
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        x1 = float(np.min(xs))
+        y1 = float(np.min(ys))
+        x2 = float(np.max(xs))
+        y2 = float(np.max(ys))
+        return (x1, y1, x2, y2)
+
+    def _v63_connected_components(entries):
+        n = len(entries)
+        if n == 0:
+            return []
+        boxes = [_v63_entry_bbox(e) for e in entries]
+        widths = [max(1.0, b[2] - b[0]) for b in boxes]
+        heights = [max(1.0, b[3] - b[1]) for b in boxes]
+        med_w = float(np.median(widths)) if widths else 1.0
+        med_h = float(np.median(heights)) if heights else 1.0
+        parent = list(range(n))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def union(a, b):
+            ra, rb = (find(a), find(b))
+            if ra != rb:
+                parent[rb] = ra
+        for i in range(n):
+            x1a, y1a, x2a, y2a = boxes[i]
+            wa = widths[i]
+            ha = heights[i]
+            for j in range(i + 1, n):
+                x1b, y1b, x2b, y2b = boxes[j]
+                wb = widths[j]
+                hb = heights[j]
+                x_overlap = min(x2a, x2b) - max(x1a, x1b)
+                y_overlap = min(y2a, y2b) - max(y1a, y1b)
+                x_gap = max(0.0, max(x1a, x1b) - min(x2a, x2b))
+                y_gap = max(0.0, max(y1a, y1b) - min(y2a, y2b))
+                same_column = x_overlap >= 0.35 * min(wa, wb) and y_gap <= 1.35 * med_h
+                adjacent_columns_same_row = y_overlap >= 0.25 * min(ha, hb) and x_gap <= 0.45 * med_w
+                same_row = y_overlap >= 0.35 * min(ha, hb) and x_gap <= 1.35 * med_w
+                if same_column or adjacent_columns_same_row or same_row:
+                    union(i, j)
+        groups = {}
+        for i, e in enumerate(entries):
+            groups.setdefault(find(i), []).append(e)
+        return list(groups.values())
+    valid_for_ref = [e for e in panel_calc_entries if e['preliminary_valid'] and e['calc_area'] > 0]
+    if valid_for_ref:
+        groups = _v63_connected_components(valid_for_ref)
+        print(f'[V63_PANEL_AREA_FILTER_COMPONENTS] image={V42__IMAGE_STEM} n_valid_pre={len(valid_for_ref)} n_components={len(groups)} top_ratio=0.50 threshold=0.800')
+        for gid, group in enumerate(groups):
+            if len(group) < 6:
+                group_ref = float(np.mean([e['calc_area'] for e in group])) if group else 0.0
+                for e in group:
+                    e['inner_area_reference_px'] = group_ref
+                    e['inner_area_min_required_px'] = 0.0
+                    e['area_ratio_to_ref'] = float(e['calc_area'] / group_ref) if group_ref > 0 else 0.0
+                    print(f"[V63_PANEL_AREA_FILTER] component={gid} idx={e['idx']} action=keep_small_component n={len(group)} area={e['calc_area']:.1f} ref={group_ref:.1f}")
+                continue
+            valid_sorted = sorted(group, key=lambda e: e['calc_area'], reverse=True)
+            n_reference = max(1, int(math.ceil(0.5 * len(valid_sorted))))
+            reference_group = valid_sorted[:n_reference]
+            reference_area = float(np.mean([e['calc_area'] for e in reference_group]))
+            min_required_area = 0.8 * reference_area
+            print(f'[V63_PANEL_AREA_FILTER_REFERENCE] image={V42__IMAGE_STEM} component={gid} n_valid_pre={len(group)} n_reference={n_reference} top_ratio=0.50 reference_area={reference_area:.1f} min_required_80pct={min_required_area:.1f}')
+            for e in group:
+                e['inner_area_reference_px'] = reference_area
+                e['inner_area_min_required_px'] = min_required_area
+                e['area_ratio_to_ref'] = float(e['calc_area'] / reference_area) if reference_area > 0 else 0.0
+                if e['calc_area'] < min_required_area:
+                    e['valid'] = False
+                    e['filter_reason'] = 'inner_area_below_80pct_of_component_top50_mean'
+                    print(f"[V63_PANEL_AREA_FILTER] component={gid} idx={e['idx']} action=reject area={e['calc_area']:.1f} ref={reference_area:.1f} ratio={e['area_ratio_to_ref']:.3f} threshold=0.800")
+                else:
+                    print(f"[V63_PANEL_AREA_FILTER] component={gid} idx={e['idx']} action=keep area={e['calc_area']:.1f} ref={reference_area:.1f} ratio={e['area_ratio_to_ref']:.3f} threshold=0.800")
+    else:
+        print(f'[V63_PANEL_AREA_FILTER_REFERENCE] image={V42__IMAGE_STEM} n_valid_pre=0 action=skip_area_filter')
+    outer_total = 0.0
+    calc_total = 0.0
+    valid_count = 0
+    rejected_count = 0
+    rows_csv = []
+    debug_img = None
+    if V42__DRAW_INNER_PANEL_DEBUG:
+        debug_img = img.copy()
+    for e in panel_calc_entries:
+        idx = e['idx']
+        panel = e['panel']
+        valid_final = bool(e['valid'])
+        if valid_final:
+            valid_count += 1
+            outer_total += e['outer_area']
+            calc_total += e['calc_area']
+            panel['outer_polygon'] = e['outer_polygon']
+            panel['calc_polygon'] = e['inner_polygon']
+            panel['inner_polygon'] = e['inner_polygon']
+            panel['calc_source'] = 'inner_from_final_polygon'
+            panel['valid'] = True
+            panel['filter_reason'] = ''
+            if V42__DRAW_INNER_PANEL_DEBUG and debug_img is not None:
+                outer_int = np.array(e['outer_polygon'], dtype=np.int32)
+                inner_int = np.array(e['inner_polygon'], dtype=np.int32)
+                cv2.polylines(debug_img, [outer_int], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+                cv2.polylines(debug_img, [inner_int], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        else:
+            rejected_count += 1
+            panel['valid'] = False
+            panel['filter_reason'] = e['filter_reason']
+            panel['outer_polygon'] = e['outer_polygon']
+            panel['calc_polygon'] = e['inner_polygon']
+            panel['inner_polygon'] = e['inner_polygon']
+            panel['calc_source'] = 'rejected'
+        ratio = e['calc_area'] / e['outer_area'] if e['outer_area'] > 0 else 0.0
+        print(f"[PANEL_CALC_POLYGON] idx={idx} outer_area={e['outer_area']:.1f} calc_area={e['calc_area']:.1f} ratio={ratio:.4f} margin={V42__INNER_PANEL_MARGIN_PX} source={e['inset_source']} valid={str(valid_final).lower()} filter_reason={e['filter_reason']}")
+        rows_csv.append({'image': V42__IMAGE_STEM, 'idx': idx, 'source': e['src_name'], 'outer_area': f"{e['outer_area']:.1f}", 'calc_area': f"{e['calc_area']:.1f}", 'ratio': f'{ratio:.4f}', 'margin_px': V42__INNER_PANEL_MARGIN_PX, 'calc_source': panel.get('calc_source', 'unknown'), 'valid': str(valid_final).lower(), 'filter_reason': e['filter_reason'], 'area_ratio_to_ref': f"{e['area_ratio_to_ref']:.4f}", 'inner_area_reference_px': f"{e['inner_area_reference_px']:.1f}", 'inner_area_min_required_px': f"{e['inner_area_min_required_px']:.1f}"})
+    ratio_total = calc_total / outer_total if outer_total > 0 else 0.0
+    print(f'[PANEL_CALC_POLYGON_SUMMARY] image={V42__IMAGE_STEM} n_total={len(panel_calc_entries)} n_valid={valid_count} n_rejected={rejected_count} outer_total={outer_total:.1f} calc_total={calc_total:.1f} ratio={ratio_total:.4f} margin={V42__INNER_PANEL_MARGIN_PX}')
+    out_dir = Path(V42__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if V42__DRAW_INNER_PANEL_DEBUG and debug_img is not None:
+        cv2.imwrite(str(out_dir / f'debug_{V42__IMAGE_STEM}_calc_inner_polygon.JPG'), debug_img)
+    csv_path = out_dir / f'panel_calc_polygon_{V42__IMAGE_STEM}.csv'
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=['image', 'idx', 'source', 'outer_area', 'calc_area', 'ratio', 'margin_px', 'calc_source', 'valid', 'filter_reason', 'area_ratio_to_ref', 'inner_area_reference_px', 'inner_area_min_required_px'])
+        writer.writeheader()
+        writer.writerows(rows_csv)
+    return valid_count
+
+def V42__refine_single_edge_local(rotated_gray, p1, p2, is_horizontal, win, cov_threshold, limit, res_threshold=2.5, angle_threshold=4.0):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length == 0:
+        return (p1, p2, [])
+    if is_horizontal:
+        tx = dx / length
+        ty = dy / length
+        nx = -ty
+        ny = tx
+    else:
+        tx = dx / length
+        ty = dy / length
+        nx = ty
+        ny = -tx
+    num_samples = max(20, min(80, int(length / 2)))
+    sample_xs = np.linspace(p1[0], p2[0], num_samples)
+    sample_ys = np.linspace(p1[1], p2[1], num_samples)
+    support_pts = []
+    for i in range(num_samples):
+        sx = sample_xs[i]
+        sy = sample_ys[i]
+        profile = []
+        for d in range(-win, win + 1):
+            px = sx + d * nx
+            py = sy + d * ny
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(rotated_gray[y_idx, x_idx])
+        if len(profile) < 3:
+            continue
+        min_idx = np.argmin(profile)
+        if 0 < min_idx < len(profile) - 1:
+            if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                left_peak = np.max(profile[:min_idx])
+                right_peak = np.max(profile[min_idx + 1:])
+                valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                    px_val = sx + (min_idx - win) * nx
+                    py_val = sy + (min_idx - win) * ny
+                    support_pts.append((px_val, py_val))
+    if len(support_pts) < 4:
+        return (p1, p2, [])
+    xs = np.array([pt[0] for pt in support_pts])
+    ys = np.array([pt[1] for pt in support_pts])
+    if is_horizontal:
+        m_ref = dy / (dx + 1e-06)
+        c_ref = p1[1] - m_ref * p1[0]
+        res = ys - (m_ref * xs + c_ref)
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        xs_clean = xs[keep]
+        ys_clean = ys[keep]
+        if len(xs_clean) < 4:
+            return (p1, p2, [])
+        try:
+            m_fit, c_fit = np.polyfit(xs_clean, ys_clean, 1)
+            res_fit = ys_clean - (m_fit * xs_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            xs_final = xs_clean[keep_fit]
+            ys_final = ys_clean[keep_fit]
+            if len(xs_final) >= 4:
+                m_fit, c_fit = np.polyfit(xs_final, ys_final, 1)
+                std_res = np.std(ys_final - (m_fit * xs_final + c_fit))
+                clean_pts = list(zip(xs_final, ys_final))
+            else:
+                return (p1, p2, [])
+        except Exception:
+            return (p1, p2, [])
+        bins = np.linspace(min(p1[0], p2[0]), max(p1[0], p2[0]), 9)
+        bin_indices = np.digitize(xs_final, bins) - 1
+        coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+        angle_fit = np.degrees(math.atan(m_fit))
+        angle_ref = np.degrees(math.atan(m_ref))
+        angle_diff = abs(angle_fit - angle_ref)
+        while angle_diff > 90:
+            angle_diff = abs(angle_diff - 180)
+    else:
+        m_ref = dx / (dy + 1e-06)
+        c_ref = p1[0] - m_ref * p1[1]
+        res = xs - (m_ref * ys + c_ref)
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        xs_clean = xs[keep]
+        ys_clean = ys[keep]
+        if len(ys_clean) < 4:
+            return (p1, p2, [])
+        try:
+            m_fit, c_fit = np.polyfit(ys_clean, xs_clean, 1)
+            res_fit = xs_clean - (m_fit * ys_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            xs_final = xs_clean[keep_fit]
+            ys_final = ys_clean[keep_fit]
+            if len(ys_final) >= 4:
+                m_fit, c_fit = np.polyfit(ys_final, xs_final, 1)
+                std_res = np.std(xs_final - (m_fit * ys_final + c_fit))
+                clean_pts = list(zip(xs_final, ys_final))
+            else:
+                return (p1, p2, [])
+        except Exception:
+            return (p1, p2, [])
+        bins = np.linspace(min(p1[1], p2[1]), max(p1[1], p2[1]), 9)
+        bin_indices = np.digitize(ys_final, bins) - 1
+        coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+        angle_fit = np.degrees(math.atan(1.0 / (m_fit + 1e-06)))
+        angle_ref = np.degrees(math.atan(1.0 / (m_ref + 1e-06)))
+        angle_diff = abs(angle_fit - angle_ref)
+        while angle_diff > 90:
+            angle_diff = abs(angle_diff - 180)
+    if coverage < cov_threshold or std_res > res_threshold or angle_diff > angle_threshold:
+        return (p1, p2, [])
+    if is_horizontal:
+        y1_new = m_fit * p1[0] + c_fit
+        y2_new = m_fit * p2[0] + c_fit
+        dy1 = np.clip(y1_new - p1[1], -limit, limit)
+        dy2 = np.clip(y2_new - p2[1], -limit, limit)
+        return ((p1[0], p1[1] + dy1), (p2[0], p2[1] + dy2), clean_pts)
+    else:
+        x1_new = m_fit * p1[1] + c_fit
+        x2_new = m_fit * p2[1] + c_fit
+        dx1 = np.clip(x1_new - p1[0], -limit, limit)
+        dx2 = np.clip(x2_new - p2[0], -limit, limit)
+        return ((p1[0] + dx1, p1[1]), (p2[0] + dx2, p2[1]), clean_pts)
+
+def V42__intersect_horizontal_line_with_two_points(m_h, c_h, A, B):
+    dx = B[0] - A[0]
+    dy = B[1] - A[1]
+    denom = m_h * dx - dy
+    if abs(denom) < 1e-06:
+        return A
+    x = (-A[0] * dy - (c_h - A[1]) * dx) / denom
+    y = m_h * x + c_h
+    return (x, y)
+
+def V42__refine_panel_edges_locally_with_yolo_prior(rotated_gray, poly, is_crop_left):
+    TL, TR, BR, BL = V42__sort_panel_corners(poly)
+    limit = 2.5 if is_crop_left else 3.0
+    cov_threshold = 0.25 if is_crop_left else 0.3
+    res_threshold = 2.5 if is_crop_left else 2.8
+    angle_threshold = 4.0 if is_crop_left else 5.0
+    p1_t, p2_t, clean_t = V42__refine_single_edge_local(rotated_gray, TL, TR, is_horizontal=True, win=4, cov_threshold=cov_threshold, limit=limit, res_threshold=res_threshold, angle_threshold=angle_threshold)
+    p1_b, p2_b, clean_b = V42__refine_single_edge_local(rotated_gray, BL, BR, is_horizontal=True, win=4, cov_threshold=cov_threshold, limit=limit, res_threshold=res_threshold, angle_threshold=angle_threshold)
+    support_pts_dict = {}
+    if clean_t:
+        support_pts_dict['top'] = clean_t
+    if clean_b:
+        support_pts_dict['bottom'] = clean_b
+    if clean_t:
+        m_top = (p2_t[1] - p1_t[1]) / (p2_t[0] - p1_t[0] + 1e-09)
+        c_top = p1_t[1] - m_top * p1_t[0]
+    else:
+        m_top = (TR[1] - TL[1]) / (TR[0] - TL[0] + 1e-09)
+        c_top = TL[1] - m_top * TL[0]
+    if clean_b:
+        m_bot = (p2_b[1] - p1_b[1]) / (p2_b[0] - p1_b[0] + 1e-09)
+        c_bot = p1_b[1] - m_bot * p1_b[0]
+    else:
+        m_bot = (BR[1] - BL[1]) / (BR[0] - BL[0] + 1e-09)
+        c_bot = BL[1] - m_bot * BL[0]
+    TL_new = V42__intersect_horizontal_line_with_two_points(m_top, c_top, TL, BL)
+    TR_new = V42__intersect_horizontal_line_with_two_points(m_top, c_top, TR, BR)
+    BL_new = V42__intersect_horizontal_line_with_two_points(m_bot, c_bot, TL, BL)
+    BR_new = V42__intersect_horizontal_line_with_two_points(m_bot, c_bot, TR, BR)
+    return ([TL_new, TR_new, BR_new, BL_new], support_pts_dict)
+
+def V42__refine_local_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig):
+    panels_result = []
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            anchors = V42__get_panel_hybrid_anchors(p['orig_ref'])
+            poly_init = p['refined_polygon']
+            poly_refined = V42__refine_oriented_polygon(rotated_gray, poly_init)
+            poly_prop = np.array(poly_refined, dtype=np.float32)
+            cx_prop = np.mean(poly_prop[:, 0])
+            cy_prop = np.mean(poly_prop[:, 1])
+            poly_init_np = np.array(poly_init, dtype=np.float32)
+            cx_orig = np.mean(poly_init_np[:, 0])
+            cy_orig = np.mean(poly_init_np[:, 1])
+            c_shift = math.sqrt((cx_prop - cx_orig) ** 2 + (cy_prop - cy_orig) ** 2)
+            tr_prop = poly_refined[1]
+            tl_prop = poly_refined[0]
+            angle_prop = np.degrees(math.atan2(tr_prop[1] - tl_prop[1], tr_prop[0] - tl_prop[0]))
+            while angle_prop > 90:
+                angle_prop -= 180
+            while angle_prop < -90:
+                angle_prop += 180
+            angle_orig = np.degrees(math.atan2(poly_init[1][1] - poly_init[0][1], poly_init[1][0] - poly_init[0][0]))
+            while angle_orig > 90:
+                angle_orig -= 180
+            while angle_orig < -90:
+                angle_orig += 180
+            angle_diff = abs(angle_prop - angle_orig)
+            while angle_diff > 90:
+                angle_diff = abs(angle_diff - 180)
+            inter_area = V42__get_polygon_intersection_area(poly_prop, poly_init_np)
+            area_prop = cv2.contourArea(poly_prop)
+            area_yolo = cv2.contourArea(poly_init_np)
+            union_area = area_prop + area_yolo - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            is_bad = c_shift > 8.0 or angle_diff > 5.0 or iou < 0.7
+            if is_bad:
+                poly_final = poly_init
+                quality = 'fallback'
+                source = 'yolo_anchor'
+            else:
+                poly_final = poly_refined
+                quality = 'pass'
+                source = 'refined_local'
+            panels_result.append({'col': col_idx, 'row': row_idx, 'polygon': poly_final, 'quality': quality, 'source': source, 'orig_p': p['orig_ref'], 'anchors': anchors})
+            TL, TR, BR, BL = V42__sort_panel_corners(poly_final)
+            for p1, p2 in [(TL, TR), (BL, BR), (TL, BL), (TR, BR)]:
+                sample_xs = np.linspace(p1[0], p2[0], 12)
+                sample_ys = np.linspace(p1[1], p2[1], 12)
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                length = math.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    nx = -dy / length
+                    ny = dx / length
+                    for i in range(12):
+                        sx = sample_xs[i]
+                        sy = sample_ys[i]
+                        profile = []
+                        for d in range(-3, 4):
+                            cx = int(round(sx + d * nx))
+                            cy = int(round(sy + d * ny))
+                            if 0 <= cx < rotated_gray.shape[1] and 0 <= cy < rotated_gray.shape[0]:
+                                profile.append(rotated_gray[cy, cx])
+                            else:
+                                profile.append(255)
+                        best_d = np.argmin(profile) - 3
+                        if profile[best_d + 3] < 140:
+                            pt_support_local = (int(round(sx + best_d * nx)), int(round(sy + best_d * ny)))
+                            pt_support_orig = transform_local_to_orig(pt_support_local[0], pt_support_local[1])
+                            cv2.circle(img_support, (int(round(pt_support_orig[0])), int(round(pt_support_orig[1]))), 1, (255, 0, 255), -1)
+    n_panels = len(panels_result)
+    fallback_indices = set()
+    for i in range(n_panels):
+        for j in range(i + 1, n_panels):
+            poly1 = np.array(panels_result[i]['polygon'], dtype=np.float32)
+            poly2 = np.array(panels_result[j]['polygon'], dtype=np.float32)
+            inter_area = V42__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            if iou > 0.05:
+                fallback_indices.add(i)
+                fallback_indices.add(j)
+    for idx in fallback_indices:
+        p_info = panels_result[idx]
+        col_idx = p_info['col']
+        row_idx = p_info['row']
+        p_info['polygon'] = b_local['columns'][col_idx][row_idx]['refined_polygon']
+        p_info['quality'] = 'fallback'
+        p_info['source'] = 'yolo_anchor'
+    return panels_result
+
+def V42__get_local_yolo_polygon_prior(p, transform_orig_to_local):
+    anchors = V42__get_panel_hybrid_anchors(p)
+    local_poly = [transform_orig_to_local(pt[0], pt[1]) for pt in anchors['poly_4pts']]
+    return local_poly
+
+def V42__refine_vertical_edge_local(rotated_gray, Q1, Q2, limit=4.0, res_threshold=2.5, angle_threshold=5.0):
+    dx = Q2[0] - Q1[0]
+    dy = Q2[1] - Q1[1]
+    length = math.sqrt(dx * dx + dy * dy)
+    if length == 0:
+        return []
+    tx = dx / length
+    ty = dy / length
+    nx = ty
+    ny = -tx
+    num_samples = max(20, min(80, int(length / 2)))
+    sample_xs = np.linspace(Q1[0], Q2[0], num_samples)
+    sample_ys = np.linspace(Q1[1], Q2[1], num_samples)
+    support_pts = []
+    win = 4
+    for i in range(num_samples):
+        sx = sample_xs[i]
+        sy = sample_ys[i]
+        profile = []
+        for d in range(-win, win + 1):
+            px = sx + d * nx
+            py = sy + d * ny
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(rotated_gray[y_idx, x_idx])
+        if len(profile) < 3:
+            continue
+        min_idx = np.argmin(profile)
+        if 0 < min_idx < len(profile) - 1:
+            if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                left_peak = np.max(profile[:min_idx])
+                right_peak = np.max(profile[min_idx + 1:])
+                valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                    px_val = sx + (min_idx - win) * nx
+                    py_val = sy + (min_idx - win) * ny
+                    support_pts.append((px_val, py_val))
+    return support_pts
+
+def V42__intersect_lines_uv(m_h, c_h, m_v, c_v):
+    denom = 1.0 - m_v * m_h
+    if abs(denom) < 1e-06:
+        return (c_v, c_h)
+    u = (m_v * c_h + c_v) / denom
+    v = m_h * u + c_h
+    return (u, v)
+
+def V42__check_block_overlaps(proposals):
+    n = len(proposals)
+    for i in range(n):
+        for j in range(i + 1, n):
+            poly1 = np.array(proposals[i], dtype=np.float32)
+            poly2 = np.array(proposals[j], dtype=np.float32)
+            inter_area = V42__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            if iou > 0.03:
+                return (True, i, j, iou)
+    return (False, -1, -1, 0.0)
+
+def V42__build_small_block_micro_grid_from_yolo_and_local_edges(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local):
+    N_c = len(b_local['columns'])
+    N_r = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 0
+    yolo_angles = []
+    for col in b_local['columns']:
+        for p in col:
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+            yolo_angles.append(np.degrees(math.atan2(TR[1] - TL[1], TR[0] - TL[0])))
+            yolo_angles.append(np.degrees(math.atan2(BR[1] - BL[1], BR[0] - BL[0])))
+    use_envelope_angle = False
+    if len(yolo_angles) > 1:
+        max_diff = max(yolo_angles) - min(yolo_angles)
+        if max_diff > 8.0:
+            use_envelope_angle = True
+    if use_envelope_angle:
+        all_yolo_pts = []
+        for col in b_local['columns']:
+            for p in col:
+                poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                all_yolo_pts.extend(poly_init)
+        rect = cv2.minAreaRect(np.array(all_yolo_pts, dtype=np.float32))
+        box = cv2.boxPoints(rect)
+        TL_env, TR_env, BR_env, BL_env = V42__sort_panel_corners(box)
+        theta_local_deg = np.degrees(math.atan2(TR_env[1] - TL_env[1], TR_env[0] - TL_env[0]))
+    else:
+        med_angle = np.median(yolo_angles) if yolo_angles else 0.0
+        clean_angles = [a for a in yolo_angles if abs(a - med_angle) <= 8.0]
+        theta_local_deg = np.mean(clean_angles) if clean_angles else med_angle
+    theta_local_rad = np.radians(theta_local_deg)
+    all_pts = []
+    for col in b_local['columns']:
+        for p in col:
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            all_pts.extend(poly_init)
+    xs = [pt[0] for pt in all_pts]
+    ys = [pt[1] for pt in all_pts]
+    x_c = np.mean(xs) if xs else 0.0
+    y_c = np.mean(ys) if ys else 0.0
+    cos_a = math.cos(-theta_local_rad)
+    sin_a = math.sin(-theta_local_rad)
+
+    def project_to_local(pt):
+        xr = pt[0] - x_c
+        yr = pt[1] - y_c
+        u = xr * cos_a - yr * sin_a
+        v = xr * sin_a + yr * cos_a
+        return (u, v)
+
+    def project_to_rotated(u, v):
+        xr = u * cos_a + v * sin_a
+        yr = -u * sin_a + v * cos_a
+        return (xr + x_c, yr + y_c)
+    panel_centers_uv = []
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+            cx = (TL[0] + TR[0] + BR[0] + BL[0]) / 4.0
+            cy = (TL[1] + TR[1] + BR[1] + BL[1]) / 4.0
+            cu, cv = project_to_local((cx, cy))
+            panel_centers_uv.append({'col_idx': col_idx, 'row_idx': row_idx, 'u': cu, 'v': cv, 'panel': p})
+    panel_centers_uv.sort(key=lambda item: item['v'])
+    rows = []
+    for item in panel_centers_uv:
+        if not rows:
+            rows.append([item])
+        else:
+            mean_v = np.mean([x['v'] for x in rows[-1]])
+            if item['v'] - mean_v > 20.0:
+                rows.append([item])
+            else:
+                rows[-1].append(item)
+    for r in rows:
+        r.sort(key=lambda item: item['u'])
+    rows.sort(key=lambda r: np.mean([item['v'] for item in r]))
+    N_r = len(rows)
+    N_c = max((len(r) for r in rows)) if rows else 0
+    grid_map = {}
+    for r_idx, r in enumerate(rows):
+        for c_idx, item in enumerate(r):
+            grid_map[c_idx, r_idx] = item
+    xs_roi = [pt[0] for pt in all_pts]
+    ys_roi = [pt[1] for pt in all_pts]
+    rx1 = max(0, int(np.floor(min(xs_roi) - 4)))
+    ry1 = max(0, int(np.floor(min(ys_roi) - 4)))
+    rx2 = min(rotated_gray.shape[1] - 1, int(np.ceil(max(xs_roi) + 4)))
+    ry2 = min(rotated_gray.shape[0] - 1, int(np.ceil(max(ys_roi) + 4)))
+    roi_img = rotated_gray[ry1:ry2 + 1, rx1:rx2 + 1]
+    thresh_val = float(np.percentile(roi_img, 58))
+    local_mask = (roi_img >= thresh_val).astype(np.uint8) * 255
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    local_mask_closed = cv2.morphologyEx(local_mask, cv2.MORPH_CLOSE, kernel_close)
+    local_mask_opened = cv2.morphologyEx(local_mask_closed, cv2.MORPH_OPEN, kernel_open)
+    mask_opened = np.zeros_like(rotated_gray)
+    mask_opened[ry1:ry2 + 1, rx1:rx2 + 1] = local_mask_opened
+    yolo_mask = np.zeros_like(rotated_gray)
+    for col in b_local['columns']:
+        for p in col:
+            p_rot = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            cv2.fillPoly(yolo_mask, [np.array(p_rot, dtype=np.int32)], 255)
+    contours, _ = cv2.findContours(mask_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid_contours = []
+    total_mask_area = 0.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area >= 150.0:
+            c_box = cv2.boundingRect(c)
+            cw, ch = (c_box[2], c_box[3])
+            aspect = cw / float(ch) if ch > 0 else 0.0
+            if ch >= 12 and aspect <= 4.5:
+                c_mask = np.zeros_like(rotated_gray)
+                cv2.drawContours(c_mask, [c], -1, 255, -1)
+                overlap = cv2.bitwise_and(yolo_mask, c_mask)
+                if np.any(overlap):
+                    valid_contours.append(c)
+                    total_mask_area += area
+    contour_ok = False
+    U_left_fg = U_right_fg = V_top_fg = V_bottom_fg = None
+    if len(valid_contours) > 0 and total_mask_area >= 200.0:
+        contour_ok = True
+        all_contour_pts = np.concatenate(valid_contours, axis=0)
+        pts_uv = [project_to_local((pt[0][0], pt[0][1])) for pt in all_contour_pts]
+        us_fg = [pt[0] for pt in pts_uv]
+        vs_fg = [pt[1] for pt in pts_uv]
+        U_left_fg = min(us_fg)
+        U_right_fg = max(us_fg)
+        V_top_fg = min(vs_fg)
+        V_bottom_fg = max(vs_fg)
+    rect_str = f'({U_left_fg:.1f},{V_top_fg:.1f},{U_right_fg:.1f},{V_bottom_fg:.1f})' if contour_ok else 'None'
+    print(f'[SMALL_MASK] {block_name} area={total_mask_area:.1f} contour_ok={contour_ok} rect={rect_str}')
+    img_mask_vis = cv2.cvtColor(rotated_gray, cv2.COLOR_GRAY2BGR)
+    overlay = np.zeros_like(img_mask_vis)
+    overlay[mask_opened > 0] = (0, 255, 0)
+    img_mask_vis = cv2.addWeighted(img_mask_vis, 0.7, overlay, 0.3, 0)
+    for c_idx in range(N_c):
+        for r_idx in range(N_r):
+            if (c_idx, r_idx) in grid_map:
+                p_item = grid_map[c_idx, r_idx]
+                poly_init = V42__get_local_yolo_polygon_prior(p_item['panel']['orig_ref'], transform_orig_to_local)
+                cv2.polylines(img_mask_vis, [np.array(poly_init, dtype=np.int32)], True, (255, 0, 0), V42__VISUAL_PANEL_THICKNESS)
+    if len(valid_contours) > 0:
+        cv2.drawContours(img_mask_vis, valid_contours, -1, (0, 255, 255), 1)
+        corners_local = [(U_left_fg, V_top_fg), (U_right_fg, V_top_fg), (U_right_fg, V_bottom_fg), (U_left_fg, V_bottom_fg)]
+        corners_rot = [project_to_rotated(u, v) for u, v in corners_local]
+        cv2.polylines(img_mask_vis, [np.array(corners_rot, dtype=np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS)
+    out_dir = Path(V42__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    yolo_lefts = []
+    yolo_rights = []
+    yolo_tops = []
+    yolo_bottoms = []
+    for c_idx in range(N_c):
+        for r_idx in range(N_r):
+            if (c_idx, r_idx) in grid_map:
+                item = grid_map[c_idx, r_idx]
+                poly_init = V42__get_local_yolo_polygon_prior(item['panel']['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+                yolo_lefts.extend([project_to_local(TL)[0], project_to_local(BL)[0]])
+                yolo_rights.extend([project_to_local(TR)[0], project_to_local(BR)[0]])
+                yolo_tops.extend([project_to_local(TL)[1], project_to_local(TR)[1]])
+                yolo_bottoms.extend([project_to_local(BL)[1], project_to_local(BR)[1]])
+    U_left_yolo = min(yolo_lefts) if yolo_lefts else 0.0
+    U_right_yolo = max(yolo_rights) if yolo_rights else 0.0
+    V_top_yolo = min(yolo_tops) if yolo_tops else 0.0
+    V_bottom_yolo = max(yolo_bottoms) if yolo_bottoms else 0.0
+    if contour_ok:
+        U_left_yolo = max(U_left_yolo, U_left_fg)
+        U_right_yolo = min(U_right_yolo, U_right_fg)
+        V_top_yolo = max(V_top_yolo, V_top_fg)
+        V_bottom_yolo = min(V_bottom_yolo, V_bottom_fg)
+        U_left_prior = U_left_fg
+        U_right_prior = U_right_fg
+        V_top_prior = V_top_fg
+        V_bottom_prior = V_bottom_fg
+        prior_source = 'foreground'
+    else:
+        U_left_prior = U_left_yolo
+        U_right_prior = U_right_yolo
+        V_top_prior = V_top_yolo
+        V_bottom_prior = V_bottom_yolo
+        prior_source = 'yolo_fallback'
+
+    def find_horizontal_valley_pts(u_start, u_end, v_prior, win=3):
+        num_samples = max(20, min(80, int((u_end - u_start) / 2)))
+        u_samples = np.linspace(u_start, u_end, num_samples)
+        pts = []
+        for u_val in u_samples:
+            profile = []
+            for d in range(-win, win + 1):
+                v_val = v_prior + d
+                img_x, img_y = project_to_rotated(u_val, v_val)
+                x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(img_x))))
+                y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(img_y))))
+                profile.append(rotated_gray[y_idx, x_idx])
+            if len(profile) < 3:
+                continue
+            min_idx = np.argmin(profile)
+            if 0 < min_idx < len(profile) - 1:
+                if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                    left_peak = np.max(profile[:min_idx])
+                    right_peak = np.max(profile[min_idx + 1:])
+                    valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                    if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                        px_val = u_val
+                        py_val = v_prior + (min_idx - win)
+                        pts.append((px_val, py_val))
+        return pts
+
+    def find_vertical_valley_pts(v_start, v_end, u_prior, win=3):
+        num_samples = max(20, min(80, int((v_end - v_start) / 2)))
+        v_samples = np.linspace(v_start, v_end, num_samples)
+        pts = []
+        for v_val in v_samples:
+            profile = []
+            for d in range(-win, win + 1):
+                u_val = u_prior + d
+                img_x, img_y = project_to_rotated(u_val, v_val)
+                x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(img_x))))
+                y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(img_y))))
+                profile.append(rotated_gray[y_idx, x_idx])
+            if len(profile) < 3:
+                continue
+            min_idx = np.argmin(profile)
+            if 0 < min_idx < len(profile) - 1:
+                if profile[min_idx] < profile[min_idx - 1] and profile[min_idx] < profile[min_idx + 1]:
+                    left_peak = np.max(profile[:min_idx])
+                    right_peak = np.max(profile[min_idx + 1:])
+                    valley_depth = min(left_peak, right_peak) - profile[min_idx]
+                    if (valley_depth >= 6 or profile[min_idx] <= np.median(profile) - 4) and profile[min_idx] < 160:
+                        px_val = u_prior + (min_idx - win)
+                        py_val = v_val
+                        pts.append((px_val, py_val))
+        return pts
+
+    def clean_and_fit_horizontal(pts, u_start, u_end, v_prior, limit=3.0, shift_limit=3.0):
+        if len(pts) < 4:
+            return None
+        us = np.array([pt[0] for pt in pts])
+        vs = np.array([pt[1] for pt in pts])
+        res = vs - v_prior
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        us_clean = us[keep]
+        vs_clean = vs[keep]
+        if len(us_clean) < 4:
+            return None
+        try:
+            m_fit, c_fit = np.polyfit(us_clean, vs_clean, 1)
+            res_fit = vs_clean - (m_fit * us_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            us_final = us_clean[keep_fit]
+            vs_final = vs_clean[keep_fit]
+            if len(us_final) < 4:
+                return None
+            m_fit, c_fit = np.polyfit(us_final, vs_final, 1)
+            std_res = np.std(vs_final - (m_fit * us_final + c_fit))
+            bins = np.linspace(u_start, u_end, 9)
+            bin_indices = np.digitize(us_final, bins) - 1
+            coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+            angle_diff = abs(np.degrees(math.atan(m_fit)))
+            u_mid = (u_start + u_end) / 2.0
+            shift = m_fit * u_mid + c_fit - v_prior
+            if coverage >= 0.3 and std_res <= 2.8 and (angle_diff <= 5.0) and (abs(shift) <= shift_limit):
+                return {'m': float(m_fit), 'c': float(c_fit), 'pts': list(zip(us_final, vs_final)), 'shift': shift, 'coverage': coverage, 'residual': std_res, 'source': 'support'}
+        except Exception:
+            pass
+        return None
+
+    def clean_and_fit_vertical(pts, v_start, v_end, u_prior, limit=3.0, shift_limit=3.0):
+        if len(pts) < 4:
+            return None
+        us = np.array([pt[0] for pt in pts])
+        vs = np.array([pt[1] for pt in pts])
+        res = us - u_prior
+        med_res = np.median(res)
+        devs = np.abs(res - med_res)
+        mad = np.median(devs)
+        keep = devs <= max(2.0, 2.5 * mad)
+        us_clean = us[keep]
+        vs_clean = vs[keep]
+        if len(vs_clean) < 4:
+            return None
+        try:
+            m_fit, c_fit = np.polyfit(vs_clean, us_clean, 1)
+            res_fit = us_clean - (m_fit * vs_clean + c_fit)
+            keep_fit = np.abs(res_fit) <= 2.0
+            us_final = us_clean[keep_fit]
+            vs_final = vs_clean[keep_fit]
+            if len(vs_final) < 4:
+                return None
+            m_fit, c_fit = np.polyfit(vs_final, us_final, 1)
+            std_res = np.std(us_final - (m_fit * vs_final + c_fit))
+            bins = np.linspace(v_start, v_end, 9)
+            bin_indices = np.digitize(vs_final, bins) - 1
+            coverage = len(np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])) / 8.0
+            angle_diff = abs(np.degrees(math.atan(m_fit)))
+            v_mid = (v_start + v_end) / 2.0
+            shift = m_fit * v_mid + c_fit - u_prior
+            if coverage >= 0.4 and std_res <= 3.0 and (angle_diff <= 6.0) and (abs(shift) <= shift_limit):
+                return {'m': float(m_fit), 'c': float(c_fit), 'pts': list(zip(us_final, vs_final)), 'shift': shift, 'coverage': coverage, 'residual': std_res, 'source': 'support'}
+        except Exception:
+            pass
+        return None
+    left_pts = find_vertical_valley_pts(V_top_prior, V_bottom_prior, U_left_prior, win=3)
+    left_fit = clean_and_fit_vertical(left_pts, V_top_prior, V_bottom_prior, U_left_prior, limit=3.0, shift_limit=3.0)
+    right_pts = find_vertical_valley_pts(V_top_prior, V_bottom_prior, U_right_prior, win=3)
+    right_fit = clean_and_fit_vertical(right_pts, V_top_prior, V_bottom_prior, U_right_prior, limit=3.0, shift_limit=3.0)
+    v_mid = (V_top_prior + V_bottom_prior) / 2.0
+    u_start = left_fit['m'] * v_mid + left_fit['c'] if left_fit else U_left_prior
+    u_end = right_fit['m'] * v_mid + right_fit['c'] if right_fit else U_right_prior
+    u_start_contract = u_start + 2.0
+    u_end_contract = u_end - 2.0
+    top_pts = find_horizontal_valley_pts(u_start_contract, u_end_contract, V_top_prior, win=3)
+    top_fit = clean_and_fit_horizontal(top_pts, u_start_contract, u_end_contract, V_top_prior, limit=3.0, shift_limit=3.0)
+    bottom_pts = find_horizontal_valley_pts(u_start_contract, u_end_contract, V_bottom_prior, win=3)
+    bottom_fit = clean_and_fit_horizontal(bottom_pts, u_start_contract, u_end_contract, V_bottom_prior, limit=3.0, shift_limit=3.0)
+    U_boundaries = {}
+    U_boundaries[0] = left_fit if left_fit else {'m': 0.0, 'c': U_left_prior, 'source': prior_source}
+    U_boundaries[N_c] = right_fit if right_fit else {'m': 0.0, 'c': U_right_prior, 'source': prior_source}
+    V_boundaries = {}
+    V_boundaries[0] = top_fit if top_fit else {'m': 0.0, 'c': V_top_prior, 'source': prior_source}
+    V_boundaries[N_r] = bottom_fit if bottom_fit else {'m': 0.0, 'c': V_bottom_prior, 'source': prior_source}
+    for fit_res in [left_fit, right_fit, top_fit, bottom_fit]:
+        if fit_res and 'pts' in fit_res:
+            for pt_uv in fit_res['pts']:
+                pt_rot = project_to_rotated(pt_uv[0], pt_uv[1])
+                pt_orig = transform_local_to_orig(pt_rot[0], pt_rot[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+    for c in range(1, N_c):
+        ratio = c / N_c
+        m_l, c_l = (U_boundaries[0]['m'], U_boundaries[0]['c'])
+        m_r, c_r = (U_boundaries[N_c]['m'], U_boundaries[N_c]['c'])
+        m_mid = m_l * (1 - ratio) + m_r * ratio
+        c_mid = c_l * (1 - ratio) + c_r * ratio
+        u_mid_prior = m_mid * v_mid + c_mid
+        mid_col_pts = find_vertical_valley_pts(V_top_prior, V_bottom_prior, u_mid_prior, win=3)
+        mid_col_fit = clean_and_fit_vertical(mid_col_pts, V_top_prior, V_bottom_prior, u_mid_prior, limit=3.0, shift_limit=3.0)
+        if mid_col_fit:
+            U_boundaries[c] = mid_col_fit
+            for pt_uv in mid_col_fit['pts']:
+                pt_rot = project_to_rotated(pt_uv[0], pt_uv[1])
+                pt_orig = transform_local_to_orig(pt_rot[0], pt_rot[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        else:
+            U_boundaries[c] = {'m': m_mid, 'c': c_mid, 'source': 'envelope_midpoint'}
+    for r in range(1, N_r):
+        ratio = r / N_r
+        m_t, c_t = (V_boundaries[0]['m'], V_boundaries[0]['c'])
+        m_b, c_b = (V_boundaries[N_r]['m'], V_boundaries[N_r]['c'])
+        m_mid = m_t * (1 - ratio) + m_b * ratio
+        c_mid = c_t * (1 - ratio) + c_b * ratio
+        u_mid_eval = (u_start + u_end) / 2.0
+        v_mid_prior = m_mid * u_mid_eval + c_mid
+        mid_row_pts = find_horizontal_valley_pts(u_start_contract, u_end_contract, v_mid_prior, win=3)
+        mid_row_fit = clean_and_fit_horizontal(mid_row_pts, u_start_contract, u_end_contract, v_mid_prior, limit=3.0, shift_limit=3.0)
+        if mid_row_fit:
+            V_boundaries[r] = mid_row_fit
+            for pt_uv in mid_row_fit['pts']:
+                pt_rot = project_to_rotated(pt_uv[0], pt_uv[1])
+                pt_orig = transform_local_to_orig(pt_rot[0], pt_rot[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        else:
+            V_boundaries[r] = {'m': m_mid, 'c': c_mid, 'source': 'envelope_midpoint'}
+
+    def check_middle_column_boundaries():
+        v_test = [V_top_prior, (V_top_prior + V_bottom_prior) / 2.0, V_bottom_prior]
+        for c in range(1, N_c):
+            m_curr, c_curr = (U_boundaries[c]['m'], U_boundaries[c]['c'])
+            m_prev, c_prev = (U_boundaries[c - 1]['m'], U_boundaries[c - 1]['c'])
+            m_next, c_next = (U_boundaries[c + 1]['m'], U_boundaries[c + 1]['c'])
+            is_ok = True
+            for vt in v_test:
+                u_curr = m_curr * vt + c_curr
+                u_prev = m_prev * vt + c_prev
+                u_next = m_next * vt + c_next
+                if u_curr - u_prev < 15.0 or u_next - u_curr < 15.0:
+                    is_ok = False
+                    break
+            if not is_ok:
+                ratio = c / N_c
+                m_l, c_l = (U_boundaries[0]['m'], U_boundaries[0]['c'])
+                m_r, c_r = (U_boundaries[N_c]['m'], U_boundaries[N_c]['c'])
+                U_boundaries[c] = {'m': m_l * (1 - ratio) + m_r * ratio, 'c': c_l * (1 - ratio) + c_r * ratio, 'source': 'envelope_midpoint'}
+
+    def check_middle_row_boundaries():
+        u_test = [u_start, (u_start + u_end) / 2.0, u_end]
+        for r in range(1, N_r):
+            m_curr, c_curr = (V_boundaries[r]['m'], V_boundaries[r]['c'])
+            m_prev, c_prev = (V_boundaries[r - 1]['m'], V_boundaries[r - 1]['c'])
+            m_next, c_next = (V_boundaries[r + 1]['m'], V_boundaries[r + 1]['c'])
+            is_ok = True
+            for ut in u_test:
+                v_curr = m_curr * ut + c_curr
+                v_prev = m_prev * ut + c_prev
+                v_next = m_next * ut + c_next
+                if v_curr - v_prev < 15.0 or v_next - v_curr < 15.0:
+                    is_ok = False
+                    break
+            if not is_ok:
+                ratio = r / N_r
+                m_t, c_t = (V_boundaries[0]['m'], V_boundaries[0]['c'])
+                m_b, c_b = (V_boundaries[N_r]['m'], V_boundaries[N_r]['c'])
+                V_boundaries[r] = {'m': m_t * (1 - ratio) + m_b * ratio, 'c': c_t * (1 - ratio) + c_b * ratio, 'source': 'envelope_midpoint'}
+    check_middle_column_boundaries()
+    check_middle_row_boundaries()
+
+    def build_proposals_dict(h_bounds, v_bounds):
+        props = {}
+        for r_idx in range(N_r):
+            for c_idx in range(N_c):
+                tl = V42__intersect_lines_uv(h_bounds[r_idx]['m'], h_bounds[r_idx]['c'], v_bounds[c_idx]['m'], v_bounds[c_idx]['c'])
+                tr = V42__intersect_lines_uv(h_bounds[r_idx]['m'], h_bounds[r_idx]['c'], v_bounds[c_idx + 1]['m'], v_bounds[c_idx + 1]['c'])
+                br = V42__intersect_lines_uv(h_bounds[r_idx + 1]['m'], h_bounds[r_idx + 1]['c'], v_bounds[c_idx + 1]['m'], v_bounds[c_idx + 1]['c'])
+                bl = V42__intersect_lines_uv(h_bounds[r_idx + 1]['m'], h_bounds[r_idx + 1]['c'], v_bounds[c_idx]['m'], v_bounds[c_idx]['c'])
+                props[c_idx, r_idx] = [project_to_rotated(tl[0], tl[1]), project_to_rotated(tr[0], tr[1]), project_to_rotated(br[0], br[1]), project_to_rotated(bl[0], bl[1])]
+        return props
+    proposals = build_proposals_dict(V_boundaries, U_boundaries)
+    panel_keys = list(proposals.keys())
+    panel_list = [proposals[k] for k in panel_keys]
+    has_overlap, _, _, _ = V42__check_block_overlaps(panel_list)
+    if has_overlap:
+        for c in range(1, N_c):
+            ratio = c / N_c
+            m_l, c_l = (U_boundaries[0]['m'], U_boundaries[0]['c'])
+            m_r, c_r = (U_boundaries[N_c]['m'], U_boundaries[N_c]['c'])
+            U_boundaries[c] = {'m': m_l * (1 - ratio) + m_r * ratio, 'c': c_l * (1 - ratio) + c_r * ratio, 'source': 'envelope_midpoint'}
+        for r in range(1, N_r):
+            ratio = r / N_r
+            m_t, c_t = (V_boundaries[0]['m'], V_boundaries[0]['c'])
+            m_b, c_b = (V_boundaries[N_r]['m'], V_boundaries[N_r]['c'])
+            V_boundaries[r] = {'m': m_t * (1 - ratio) + m_b * ratio, 'c': c_t * (1 - ratio) + c_b * ratio, 'source': 'envelope_midpoint'}
+        proposals = build_proposals_dict(V_boundaries, U_boundaries)
+        panel_list = [proposals[k] for k in panel_keys]
+        has_overlap, _, _, _ = V42__check_block_overlaps(panel_list)
+    if has_overlap:
+        U_boundaries[0] = {'m': 0.0, 'c': U_left_prior, 'source': prior_source}
+        U_boundaries[N_c] = {'m': 0.0, 'c': U_right_prior, 'source': prior_source}
+        V_boundaries[0] = {'m': 0.0, 'c': V_top_prior, 'source': prior_source}
+        V_boundaries[N_r] = {'m': 0.0, 'c': V_bottom_prior, 'source': prior_source}
+        for c in range(1, N_c):
+            ratio = c / N_c
+            U_boundaries[c] = {'m': 0.0, 'c': U_left_prior * (1 - ratio) + U_right_prior * ratio, 'source': 'envelope_midpoint'}
+        for r in range(1, N_r):
+            ratio = r / N_r
+            V_boundaries[r] = {'m': 0.0, 'c': V_top_prior * (1 - ratio) + V_bottom_prior * ratio, 'source': 'envelope_midpoint'}
+        proposals = build_proposals_dict(V_boundaries, U_boundaries)
+        panel_list = [proposals[k] for k in panel_keys]
+        has_overlap, _, _, _ = V42__check_block_overlaps(panel_list)
+    fallback_panels = set()
+    if has_overlap:
+        for i in range(len(panel_list)):
+            for j in range(i + 1, len(panel_list)):
+                poly1 = np.array(panel_list[i], dtype=np.float32)
+                poly2 = np.array(panel_list[j], dtype=np.float32)
+                inter_area = V42__get_polygon_intersection_area(poly1, poly2)
+                area1 = cv2.contourArea(poly1)
+                area2 = cv2.contourArea(poly2)
+                union_area = area1 + area2 - inter_area
+                iou = inter_area / union_area if union_area > 0 else 0.0
+                if iou > 0.03:
+                    fallback_panels.add(panel_keys[i])
+                    fallback_panels.add(panel_keys[j])
+
+    def format_boundary_c(b):
+        return f"{b['m'] * v_mid + b['c']:.1f}"
+
+    def format_horizontal_c(b):
+        return f"{b['m'] * ((u_start + u_end) / 2.0) + b['c']:.1f}"
+    left_str = format_boundary_c(U_boundaries[0])
+    right_str = format_boundary_c(U_boundaries[N_c])
+    mid_u_str = format_boundary_c(U_boundaries[1]) if N_c == 2 else 'None'
+    top_str = format_horizontal_c(V_boundaries[0])
+    bottom_str = format_horizontal_c(V_boundaries[N_r])
+    mid_v_str = format_horizontal_c(V_boundaries[1]) if N_r == 2 else 'None'
+    print(f'[SMALL_ENVELOPE] {block_name} source={prior_source} U=({left_str},{mid_u_str},{right_str}) V=({top_str},{mid_v_str},{bottom_str})')
+    prop_widths = []
+    prop_heights = []
+    for key, poly in proposals.items():
+        TL_p, TR_p, BR_p, BL_p = V42__sort_panel_corners(poly)
+        w = (math.sqrt((TR_p[0] - TL_p[0]) ** 2 + (TR_p[1] - TL_p[1]) ** 2) + math.sqrt((BR_p[0] - BL_p[0]) ** 2 + (BR_p[1] - BL_p[1]) ** 2)) / 2.0
+        h = (math.sqrt((BL_p[0] - TL_p[0]) ** 2 + (BL_p[1] - TL_p[1]) ** 2) + math.sqrt((BR_p[0] - TR_p[0]) ** 2 + (BR_p[1] - TR_p[1]) ** 2)) / 2.0
+        prop_widths.append(w)
+        prop_heights.append(h)
+    median_width = np.median(prop_widths) if prop_widths else 1.0
+    median_height = np.median(prop_heights) if prop_heights else 1.0
+    max_overlap_iou = 0.0
+    for i in range(len(panel_list)):
+        for j in range(i + 1, len(panel_list)):
+            poly1 = np.array(panel_list[i], dtype=np.float32)
+            poly2 = np.array(panel_list[j], dtype=np.float32)
+            inter_area = V42__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            iou = inter_area / union_area if union_area > 0 else 0.0
+            if iou > max_overlap_iou:
+                max_overlap_iou = iou
+    panels_result = []
+    for c_idx in range(N_c):
+        for r_idx in range(N_r):
+            if (c_idx, r_idx) not in grid_map:
+                continue
+            item = grid_map[c_idx, r_idx]
+            p = item['panel']
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            anchors = V42__get_panel_hybrid_anchors(p['orig_ref'])
+            key = (c_idx, r_idx)
+            if key in fallback_panels:
+                rect = cv2.minAreaRect(np.array(poly_init, dtype=np.float32))
+                box = cv2.boxPoints(rect)
+                poly_final = [tuple(pt) for pt in V42__sort_panel_corners(box)]
+                source = 'fallback_yolo'
+                reason = 'overlap_fallback'
+                center_shift = 0.0
+                area_ratio = 1.0
+            else:
+                poly_proposal = proposals[key]
+                TL_yolo, TR_yolo, BR_yolo, BL_yolo = V42__sort_panel_corners(poly_init)
+                panel_height = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                TL_new, TR_new, BR_new, BL_new = V42__sort_panel_corners(poly_proposal)
+                is_convex = cv2.isContourConvex(np.array(poly_proposal, dtype=np.int32))
+                area_prop = cv2.contourArea(np.array(poly_proposal, dtype=np.float32))
+                area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+                area_ratio = area_prop / (area_yolo + 1e-06)
+                cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+                cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+                cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+                cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+                center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                angle_prop = np.degrees(math.atan2(TR_new[1] - TL_new[1], TR_new[0] - TL_new[0]))
+                angle_yolo = np.degrees(math.atan2(TR_yolo[1] - TL_yolo[1], TR_yolo[0] - TL_yolo[0]))
+                diff_angle = abs(angle_prop - angle_yolo)
+                while diff_angle > 90:
+                    diff_angle = abs(diff_angle - 180)
+                w_prop = math.sqrt((TR_new[0] - TL_new[0]) ** 2 + (TR_new[1] - TL_new[1]) ** 2)
+                h_prop = math.sqrt((BL_new[0] - TL_new[0]) ** 2 + (BL_new[1] - TL_new[1]) ** 2)
+                aspect_prop = w_prop / (h_prop + 1e-06)
+                w_yolo = math.sqrt((TR_yolo[0] - TL_yolo[0]) ** 2 + (TR_yolo[1] - TL_yolo[1]) ** 2)
+                h_yolo = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                aspect_yolo = w_yolo / (h_yolo + 1e-06)
+                aspect_ratio_dev = aspect_prop / (aspect_yolo + 1e-06)
+                aspect_ok = 0.65 <= aspect_ratio_dev <= 1.35
+                crossing_ok = True
+                for other_key, other_poly in proposals.items():
+                    if other_key == key:
+                        continue
+                    for pt in poly_proposal:
+                        if cv2.pointPolygonTest(np.array(other_poly, dtype=np.float32), (pt[0], pt[1]), False) > 0:
+                            crossing_ok = False
+                            break
+                    if not crossing_ok:
+                        break
+                size_ok = w_prop >= 0.6 * median_width and h_prop >= 0.6 * median_height
+                has_foreground = U_boundaries[c_idx]['source'] == 'foreground' or U_boundaries[c_idx + 1]['source'] == 'foreground' or V_boundaries[r_idx]['source'] == 'foreground' or (V_boundaries[r_idx + 1]['source'] == 'foreground')
+                has_snap = U_boundaries[c_idx]['source'] == 'support' or U_boundaries[c_idx + 1]['source'] == 'support' or V_boundaries[r_idx]['source'] == 'support' or (V_boundaries[r_idx + 1]['source'] == 'support')
+                has_evidence = has_foreground or has_snap
+                source = 'foreground_grid' if has_evidence else 'midpoint_grid'
+                is_foreground_env = has_foreground or prior_source == 'foreground'
+                max_shift = 0.3 * panel_height if is_foreground_env else 0.25 * panel_height
+                is_valid = is_convex and 0.8 <= area_ratio <= 1.2 and (center_shift <= max_shift) and (diff_angle <= 4.0) and aspect_ok and crossing_ok and size_ok and has_evidence
+                if is_valid:
+                    poly_final = poly_proposal
+                    reason = 'valid_refine'
+                    if is_foreground_env and center_shift > 0.25 * panel_height:
+                        print(f'[INFO] {block_name} {r_idx} {c_idx} allowed center shift {center_shift:.2f} px (> 0.25 * height) via foreground_grid source.')
+                else:
+                    rect = cv2.minAreaRect(np.array(poly_init, dtype=np.float32))
+                    box = cv2.boxPoints(rect)
+                    poly_final = [tuple(pt) for pt in V42__sort_panel_corners(box)]
+                    source = 'fallback_yolo'
+                    reason = ''
+                    if not is_convex:
+                        reason += 'not_convex '
+                    if not 0.8 <= area_ratio <= 1.2:
+                        reason += f'area_ratio_{area_ratio:.2f} '
+                    if center_shift > max_shift:
+                        reason += f'shift_{center_shift:.1f} '
+                    if diff_angle > 4.0:
+                        reason += f'angle_{diff_angle:.1f} '
+                    if not aspect_ok:
+                        reason += f'aspect_dev_{aspect_ratio_dev:.2f} '
+                    if not crossing_ok:
+                        reason += 'crossing '
+                    if not size_ok:
+                        reason += f'size_w={w_prop:.1f}/h={h_prop:.1f}_vs_med={median_width:.1f}/{median_height:.1f} '
+                    if not has_evidence:
+                        reason += 'no_evidence '
+                    reason = reason.strip()
+            panels_result.append({'col': c_idx, 'row': r_idx, 'polygon': poly_final, 'quality': 'fallback' if source == 'fallback_yolo' else 'pass', 'source': source, 'reason': reason, 'shift': center_shift, 'area_ratio': area_ratio, 'overlap': max_overlap_iou, 'orig_p': p['orig_ref'], 'anchors': anchors})
+            print(f'[SMALL_PANEL] {block_name} {r_idx} {c_idx} source={source} area_ratio={area_ratio:.2f} center_shift={center_shift:.2f} reason={reason}')
+    return panels_result
+
+def V42__find_vertical_support_points(rotated_gray, m_yolo, c_yolo, y_min, y_max, name, block_name, transform_local_to_orig, is_lower_small_block=False):
+    win = 10
+    support_pts = []
+    sample_ys = np.linspace(y_min, y_max, 50)
+    for y_val in sample_ys:
+        x_est = m_yolo * y_val + c_yolo
+        profile = []
+        for d in range(-win, win + 1):
+            px = x_est + d
+            py = y_val
+            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+            profile.append(float(rotated_gray[y_idx, x_idx]))
+        if len(profile) < 5:
+            continue
+        valleys = []
+        for i in range(2, len(profile) - 2):
+            if profile[i] < profile[i - 1] and profile[i] < profile[i + 1]:
+                left_peak = max(profile[:i])
+                right_peak = max(profile[i + 1:])
+                contrast = min(left_peak, right_peak) - profile[i]
+                if profile[i] < 135 or contrast >= 8:
+                    if name == 'left' and max(profile[i + 1:]) < 130:
+                        continue
+                    if name == 'right' and max(profile[:i]) < 130:
+                        continue
+                    if name == 'middle' and (max(profile[:i]) < 130 or max(profile[i + 1:]) < 130):
+                        continue
+                    valleys.append((abs(i - win), i, 'valley'))
+        edges = []
+        gradients = [profile[i + 1] - profile[i] for i in range(len(profile) - 1)]
+        if name == 'left':
+            for i in range(len(gradients)):
+                if gradients[i] >= 15:
+                    panel_side = profile[i + 1:i + 4] if i + 4 <= len(profile) else profile[i + 1:]
+                    if len(panel_side) >= 2 and sum((1 for v in panel_side if v >= 130)) >= 2:
+                        edges.append((abs(i - win), i, 'edge'))
+        elif name == 'right':
+            for i in range(len(gradients)):
+                if gradients[i] <= -15:
+                    panel_side = profile[max(0, i - 2):i + 1]
+                    if len(panel_side) >= 2 and sum((1 for v in panel_side if v >= 130)) >= 2:
+                        edges.append((abs(i - win), i, 'edge'))
+        candidates = valleys + edges
+        if candidates:
+            if is_lower_small_block and name in ('left', 'right'):
+                candidates.sort(key=lambda x: (x[2] != 'edge', x[0]))
+            else:
+                candidates.sort(key=lambda x: x[0])
+            best_idx = candidates[0][1]
+            px_val = x_est + (best_idx - win)
+            orig_x, orig_y = transform_local_to_orig(px_val, y_val)
+            if orig_x >= 0:
+                support_pts.append((px_val, y_val))
+    return support_pts
+
+def V42__refine_small_block_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local):
+    global V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG
+    row_count = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 0
+    is_small_block = V42__is_generic_small_block(row_count, len(b_local['panels']), len(b_local['columns']))
+    if not is_small_block:
+        return V42__build_small_block_micro_grid_from_yolo_and_local_edges(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local)
+    is_lower_small_block = is_small_block and len(b_local['columns']) <= 2 and (row_count <= 2) and (len(b_local['panels']) <= 4)
+    has_real_lower_grid = False
+    if is_lower_small_block:
+        print(f'[LOWER_ROLLBACK] block={block_name} mode=shared_quad_grid_old')
+        n_cols = len(b_local['columns'])
+        n_rows = row_count
+        is_single_row_small_block = V42__is_single_row_two_col_block(n_rows, n_cols, len(b_local['panels']))
+        grid_panels = {}
+        for col_idx, col in enumerate(b_local['columns']):
+            for row_idx, p in enumerate(col):
+                grid_panels[row_idx, col_idx] = p
+        quads_dict = {}
+        quads_source = {}
+        quads_area = {}
+        quads_angle = {}
+        yolo_x_all = []
+        yolo_y_all = []
+        for p in b_local['panels']:
+            poly_local = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            for pt in poly_local:
+                yolo_x_all.append(pt[0])
+                yolo_y_all.append(pt[1])
+        U_left_yolo = float(min(yolo_x_all)) if yolo_x_all else 0.0
+        U_right_yolo = float(max(yolo_x_all)) if yolo_x_all else 0.0
+        V_top_yolo = float(min(yolo_y_all)) if yolo_y_all else 0.0
+        V_bottom_yolo = float(max(yolo_y_all)) if yolo_y_all else 0.0
+        for (row, col), p in grid_panels.items():
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            x_coords = [pt[0] for pt in poly_init]
+            y_coords = [pt[1] for pt in poly_init]
+            x1, y1, x2, y2 = (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
+            roi_x1 = max(0, int(round(x1 - 4)))
+            roi_y1 = max(0, int(round(y1 - 4)))
+            roi_x2 = min(rotated_gray.shape[1], int(round(x2 + 4)))
+            roi_y2 = min(rotated_gray.shape[0], int(round(y2 + 4)))
+            yolo_mask = np.zeros(rotated_gray.shape, dtype=np.uint8)
+            poly_np = np.array(poly_init, dtype=np.int32)
+            cv2.fillPoly(yolo_mask, [poly_np], 255)
+            dilated_yolo_mask = cv2.dilate(yolo_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
+            roi_mask = dilated_yolo_mask[roi_y1:roi_y2, roi_x1:roi_x2]
+            roi_gray = rotated_gray[roi_y1:roi_y2, roi_x1:roi_x2]
+            roi_pixels_inside = roi_gray[roi_mask > 0]
+            if len(roi_pixels_inside) > 0:
+                thresh = float(np.percentile(roi_pixels_inside, 50))
+            else:
+                thresh = 135.0
+            fg = np.zeros_like(roi_gray, dtype=np.uint8)
+            fg[roi_gray >= thresh] = 255
+            fg = cv2.bitwise_and(fg, roi_mask)
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+            fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, kernel_close)
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, kernel_open)
+            contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            best_cnt = None
+            max_area = 0.0
+            for cnt in contours:
+                cnt_local = cnt.copy()
+                cnt_local[:, :, 0] += roi_x1
+                cnt_local[:, :, 1] += roi_y1
+                cnt_mask = np.zeros(rotated_gray.shape, dtype=np.uint8)
+                cv2.drawContours(cnt_mask, [cnt_local], -1, 255, -1)
+                if np.sum(cv2.bitwise_and(cnt_mask, yolo_mask)) == 0:
+                    continue
+                area_val = cv2.contourArea(cnt)
+                if area_val < 100:
+                    continue
+                if area_val > max_area:
+                    max_area = area_val
+                    best_cnt = cnt_local
+            quad_fitted = False
+            quad = []
+            rect_angle = 0.0
+            if best_cnt is not None:
+                rect = cv2.minAreaRect(best_cnt)
+                box = cv2.boxPoints(rect)
+                candidate_quad = [tuple(pt) for pt in V42__sort_panel_corners(box)]
+                rect_angle = rect[2]
+                is_convex = cv2.isContourConvex(np.array(candidate_quad, dtype=np.float32).astype(np.int32))
+                area_prop = cv2.contourArea(np.array(candidate_quad, dtype=np.float32))
+                area_ratio = area_prop / (cv2.contourArea(poly_np.astype(np.float32)) + 1e-06)
+                if is_convex and 0.6 <= area_ratio <= 1.4:
+                    quad = candidate_quad
+                    quad_fitted = True
+            if quad_fitted:
+                quads_dict[row, col] = quad
+                quads_source[row, col] = 'lower_panel_foreground_quad'
+                quads_area[row, col] = max_area
+                quads_angle[row, col] = rect_angle
+                if V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG is not None:
+                    cnt_orig = [transform_local_to_orig(pt[0][0], pt[0][1]) for pt in best_cnt]
+                    cv2.polylines(V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, [np.array(cnt_orig, dtype=np.int32)], True, (0, 255, 0), V42__VISUAL_PANEL_THICKNESS)
+                    quad_orig = [transform_local_to_orig(pt[0], pt[1]) for pt in quad]
+                    cv2.polylines(V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, [np.array(quad_orig, dtype=np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS)
+            else:
+                quad = [tuple(pt) for pt in V42__sort_panel_corners(poly_init)]
+                quads_dict[row, col] = quad
+                quads_source[row, col] = 'lower_panel_yolo_fallback'
+                quads_area[row, col] = cv2.contourArea(poly_np.astype(np.float32))
+                quads_angle[row, col] = 0.0
+            src_str = 'foreground' if quads_source[row, col] == 'lower_panel_foreground_quad' else 'yolo_fallback'
+            print(f'[LOWER_PANEL_QUAD] block={block_name} row={row} col={col} source={src_str} area={quads_area[row, col]:.1f} angle={quads_angle[row, col]:.1f}')
+
+        def fit_vertical_line(p1, p2):
+            if abs(p2[1] - p1[1]) > 1e-05:
+                m = (p2[0] - p1[0]) / (p2[1] - p1[1])
+                c = p1[0] - m * p1[1]
+            else:
+                m = 0.0
+                c = p1[0]
+            return (m, c)
+
+        def fit_horizontal_line(p1, p2):
+            if abs(p2[0] - p1[0]) > 1e-05:
+                m = (p2[1] - p1[1]) / (p2[0] - p1[0])
+                c = p1[1] - m * p1[0]
+            else:
+                m = 0.0
+                c = p1[1]
+            return (m, c)
+
+        def clip_scalar(val, min_val, max_val):
+            return max(min_val, min(max_val, val))
+        left_edges = {}
+        right_edges = {}
+        top_edges = {}
+        bottom_edges = {}
+        for row, col in grid_panels.keys():
+            quad = quads_dict[row, col]
+            TL, TR, BR, BL = quad
+            left_edges[row, col] = fit_vertical_line(TL, BL)
+            right_edges[row, col] = fit_vertical_line(TR, BR)
+            top_edges[row, col] = fit_horizontal_line(TL, TR)
+            bottom_edges[row, col] = fit_horizontal_line(BL, BR)
+        yolo_left_edges = {}
+        yolo_right_edges = {}
+        yolo_top_edges = {}
+        yolo_bottom_edges = {}
+        for row, col in grid_panels.keys():
+            poly_init = V42__get_local_yolo_polygon_prior(grid_panels[row, col]['orig_ref'], transform_orig_to_local)
+            TL_y, TR_y, BR_y, BL_y = V42__sort_panel_corners(poly_init)
+            yolo_left_edges[row, col] = fit_vertical_line(TL_y, BL_y)
+            yolo_right_edges[row, col] = fit_vertical_line(TR_y, BR_y)
+            yolo_top_edges[row, col] = fit_horizontal_line(TL_y, TR_y)
+            yolo_bottom_edges[row, col] = fit_horizontal_line(BL_y, BR_y)
+        rail_vertical = []
+        rail_vertical_source = []
+        y_mid = (V_top_yolo + V_bottom_yolo) / 2.0
+        x_mid = (U_left_yolo + U_right_yolo) / 2.0
+        if is_single_row_small_block:
+            print(f'[SINGLE_ROW_ROUTE] block={block_name} active=true')
+            yolo_L0 = yolo_left_edges[0, 0][0] * y_mid + yolo_left_edges[0, 0][1]
+            yolo_R0 = yolo_right_edges[0, 0][0] * y_mid + yolo_right_edges[0, 0][1]
+            yolo_L1 = yolo_left_edges[0, 1][0] * y_mid + yolo_left_edges[0, 1][1]
+            yolo_R1 = yolo_right_edges[0, 1][0] * y_mid + yolo_right_edges[0, 1][1]
+            print(f'[BLOCK7_YOLO_EDGES] L0={yolo_L0:.3f} R0={yolo_R0:.3f} L1={yolo_L1:.3f} R1={yolo_R1:.3f}')
+            fg_L0 = left_edges[0, 0][0] * y_mid + left_edges[0, 0][1] if quads_source[0, 0] == 'lower_panel_foreground_quad' else None
+            fg_R0 = right_edges[0, 0][0] * y_mid + right_edges[0, 0][1] if quads_source[0, 0] == 'lower_panel_foreground_quad' else None
+            fg_L1 = left_edges[0, 1][0] * y_mid + left_edges[0, 1][1] if quads_source[0, 1] == 'lower_panel_foreground_quad' else None
+            fg_R1 = right_edges[0, 1][0] * y_mid + right_edges[0, 1][1] if quads_source[0, 1] == 'lower_panel_foreground_quad' else None
+            fg_L0_str = f'{fg_L0:.3f}' if fg_L0 is not None else 'None'
+            fg_R0_str = f'{fg_R0:.3f}' if fg_R0 is not None else 'None'
+            fg_L1_str = f'{fg_L1:.3f}' if fg_L1 is not None else 'None'
+            fg_R1_str = f'{fg_R1:.3f}' if fg_R1 is not None else 'None'
+            print(f'[BLOCK7_FG_EDGES] L0={fg_L0_str} R0={fg_R0_str} L1={fg_L1_str} R1={fg_R1_str}')
+            base0 = yolo_L0
+            if fg_L0 is not None:
+                val0 = base0 + clip_scalar(fg_L0 - base0, -3.0, 3.0)
+                source_left = 'foreground_left'
+            else:
+                val0 = base0
+                source_left = 'yolo_left'
+            delta0 = val0 - base0
+            fg_val0_str = f'{fg_L0:.3f}' if fg_L0 is not None else 'None'
+            print(f'[BLOCK7_RAIL_RECALC] index=0 base={base0:.3f} fg={fg_val0_str} delta={delta0:.3f} value={val0:.3f}')
+            m_left = left_edges[0, 0][0] if fg_L0 is not None else yolo_left_edges[0, 0][0]
+            c_left_new = val0 - m_left * y_mid
+            yolo_mid = 0.5 * (yolo_R0 + yolo_L1)
+            diff = abs(right_edges[0, 0][0] * y_mid + right_edges[0, 0][1] - (left_edges[0, 1][0] * y_mid + left_edges[0, 1][1]))
+            if fg_R0 is not None and fg_L1 is not None:
+                fg_mid = 0.5 * (fg_R0 + fg_L1)
+                val1 = yolo_mid + clip_scalar(fg_mid - yolo_mid, -4.0, 4.0)
+                source_mid = 'foreground_average'
+                fg_mid_str = f'{fg_mid:.3f}'
+                m_mid_rail = (right_edges[0, 0][0] + left_edges[0, 1][0]) / 2.0
+            elif fg_R0 is not None or fg_L1 is not None:
+                fg_edge = fg_R0 if fg_R0 is not None else fg_L1
+                val1 = yolo_mid + clip_scalar(fg_edge - yolo_mid, -3.0, 3.0)
+                source_mid = 'foreground_average'
+                fg_mid_str = f'{fg_edge:.3f}'
+                m_mid_rail = right_edges[0, 0][0] if fg_R0 is not None else left_edges[0, 1][0]
+            else:
+                val1 = yolo_mid
+                source_mid = 'yolo_midpoint'
+                fg_mid_str = 'None'
+                m_mid_rail = (yolo_right_edges[0, 0][0] + yolo_left_edges[0, 1][0]) / 2.0
+            delta1 = val1 - yolo_mid
+            print(f'[BLOCK7_RAIL_RECALC] index=1 base={yolo_mid:.3f} fg_mid={fg_mid_str} delta={delta1:.3f} value={val1:.3f}')
+            c_mid_new = val1 - m_mid_rail * y_mid
+            base2 = yolo_R1
+            if fg_R1 is not None:
+                val2 = base2 + clip_scalar(fg_R1 - base2, -4.0, 4.0)
+                source_right = 'foreground_right'
+            else:
+                val2 = base2
+                source_right = 'yolo_right'
+            delta2 = val2 - base2
+            fg_val2_str = f'{fg_R1:.3f}' if fg_R1 is not None else 'None'
+            print(f'[BLOCK7_RAIL_RECALC] index=2 base={base2:.3f} fg={fg_val2_str} delta={delta2:.3f} value={val2:.3f}')
+            m_right = right_edges[0, 1][0] if fg_R1 is not None else yolo_right_edges[0, 1][0]
+            c_right_new = val2 - m_right * y_mid
+            if not val0 < val1 < val2:
+                val1 = 0.5 * (val0 + val2)
+                c_mid_new = val1 - m_mid_rail * y_mid
+                delta1 = val1 - yolo_mid
+                print(f'[BLOCK7_RAIL_RECALC_ORDER_RESET] index=1 value_reset={val1:.3f} delta={delta1:.3f}')
+            rail_vertical.append((m_left, c_left_new))
+            rail_vertical_source.append(source_left)
+            rail_vertical.append((m_mid_rail, c_mid_new))
+            rail_vertical_source.append(source_mid)
+            rail_vertical.append((m_right, c_right_new))
+            rail_vertical_source.append(source_right)
+            clamp_left = 'outer_2px' if abs(delta0) >= 2.0 else 'none'
+            clamp_right = 'outer_4px' if abs(delta2) >= 4.0 else 'none'
+            print(f'[BLOCK7_LEFT_RAIL] source={source_left} clamp={clamp_left} value={val0:.3f}')
+            print(f'[BLOCK7_MIDDLE_RAIL] source={source_mid} diff={diff:.3f} value={val1:.3f}')
+            print(f'[BLOCK7_RIGHT_RAIL] source={source_right} clamp={clamp_right} value={val2:.3f}')
+        else:
+            for c_rail in range(n_cols + 1):
+                ms = []
+                cs = []
+                is_fallback = False
+                if c_rail == 0:
+                    for row in range(n_rows):
+                        m, c = left_edges[row, 0]
+                        ms.append(m)
+                        cs.append(c)
+                        if quads_source[row, 0] == 'lower_panel_yolo_fallback':
+                            is_fallback = True
+                    source = 'fallback' if is_fallback else 'single_edge' if n_rows == 1 else 'shared_average'
+                elif c_rail == n_cols:
+                    for row in range(n_rows):
+                        m, c = right_edges[row, n_cols - 1]
+                        ms.append(m)
+                        cs.append(c)
+                        if quads_source[row, n_cols - 1] == 'lower_panel_yolo_fallback':
+                            is_fallback = True
+                    source = 'fallback' if is_fallback else 'single_edge' if n_rows == 1 else 'shared_average'
+                else:
+                    for row in range(n_rows):
+                        m_r, c_r = right_edges[row, c_rail - 1]
+                        m_l, c_l = left_edges[row, c_rail]
+                        ms.extend([m_r, m_l])
+                        cs.extend([c_r, c_l])
+                        if quads_source[row, c_rail - 1] == 'lower_panel_yolo_fallback' or quads_source[row, c_rail] == 'lower_panel_yolo_fallback':
+                            is_fallback = True
+                    source = 'fallback' if is_fallback else 'shared_average'
+                m_val = float(np.mean(ms)) if ms else 0.0
+                c_val = float(np.mean(cs)) if cs else 0.0
+                rail_vertical.append((m_val, c_val))
+                rail_vertical_source.append(source)
+                val_at_center = m_val * y_mid + c_val
+                print(f'[LOWER_SHARED_EDGE] block={block_name} type=vertical index={c_rail} source={source} value={val_at_center:.3f}')
+        bound_horizontal = []
+        bound_horizontal_source = []
+        for r_bound in range(n_rows + 1):
+            ms = []
+            cs = []
+            is_fallback = False
+            if r_bound == 0:
+                for col in range(n_cols):
+                    m, c = top_edges[0, col]
+                    ms.append(m)
+                    cs.append(c)
+                    if quads_source[0, col] == 'lower_panel_yolo_fallback':
+                        is_fallback = True
+                source = 'fallback' if is_fallback else 'single_edge' if n_cols == 1 else 'shared_average'
+            elif r_bound == n_rows:
+                for col in range(n_cols):
+                    m, c = bottom_edges[n_rows - 1, col]
+                    ms.append(m)
+                    cs.append(c)
+                    if quads_source[n_rows - 1, col] == 'lower_panel_yolo_fallback':
+                        is_fallback = True
+                source = 'fallback' if is_fallback else 'single_edge' if n_cols == 1 else 'shared_average'
+            else:
+                for col in range(n_cols):
+                    m_b, c_b = bottom_edges[r_bound - 1, col]
+                    m_t, c_t = top_edges[r_bound, col]
+                    ms.extend([m_b, m_t])
+                    cs.extend([c_b, c_t])
+                    if quads_source[r_bound - 1, col] == 'lower_panel_yolo_fallback' or quads_source[r_bound, col] == 'lower_panel_yolo_fallback':
+                        is_fallback = True
+                source = 'fallback' if is_fallback else 'shared_average'
+            m_val = float(np.mean(ms)) if ms else 0.0
+            c_val = float(np.mean(cs)) if cs else 0.0
+            bound_horizontal.append((m_val, c_val))
+            bound_horizontal_source.append(source)
+            val_at_center = m_val * x_mid + c_val
+            print(f'[LOWER_SHARED_EDGE] block={block_name} type=horizontal index={r_bound} source={source} value={val_at_center:.3f}')
+        if is_single_row_small_block:
+            m0, c0 = rail_vertical[0]
+            m1, c1 = rail_vertical[1]
+            m2, c2 = rail_vertical[2]
+            angle0 = np.degrees(math.atan(m0))
+            angle1 = np.degrees(math.atan(m1))
+            angle2 = np.degrees(math.atan(m2))
+            m_med = float(np.median([m0, m1, m2]))
+            angle_med = np.degrees(math.atan(m_med))
+            if abs(angle0 - angle_med) > 2.5:
+                m_new = m_med
+                ctr_old = m0 * y_mid + c0
+                c_new = ctr_old - m_med * y_mid
+                rail_vertical[0] = (m_new, c_new)
+                print(f'[BLOCK7_RAIL_REG] index=0 old_angle={angle0:.3f} new_angle={angle_med:.3f} center_shift=0.000')
+            if abs(angle2 - angle_med) > 2.5:
+                m_new = m_med
+                ctr_old = m2 * y_mid + c2
+                c_new = ctr_old - m_med * y_mid
+                rail_vertical[2] = (m_new, c_new)
+                print(f'[BLOCK7_RAIL_REG] index=2 old_angle={angle2:.3f} new_angle={angle_med:.3f} center_shift=0.000')
+            ctr_old1 = m1 * y_mid + c1
+            m_tent = m_med if abs(angle1 - angle_med) > 2.5 else m1
+            c_tent = ctr_old1 - m_tent * y_mid
+            left_m, left_c = rail_vertical[0]
+            right_m, right_c = rail_vertical[2]
+            y_top = bound_horizontal[0][0] * x_mid + bound_horizontal[0][1]
+            y_bot = bound_horizontal[n_rows][0] * x_mid + bound_horizontal[n_rows][1]
+            x_left_top = left_m * y_top + left_c
+            x_right_top = right_m * y_top + right_c
+            x_tent_top = m_tent * y_top + c_tent
+            x_tent_top_clamped = clip_scalar(x_tent_top, x_left_top, x_right_top)
+            x_left_bot = left_m * y_bot + left_c
+            x_right_bot = right_m * y_bot + right_c
+            x_tent_bot = m_tent * y_bot + c_tent
+            x_tent_bot_clamped = clip_scalar(x_tent_bot, x_left_bot, x_right_bot)
+            m_refit = (x_tent_bot_clamped - x_tent_top_clamped) / (y_bot - y_top)
+            c_refit = x_tent_top_clamped - m_refit * y_top
+            ctr_new = m_refit * y_mid + c_refit
+            shift = ctr_new - ctr_old1
+            if abs(shift) > 2.0:
+                ctr_new = ctr_old1 + np.sign(shift) * 2.0
+                c_refit = ctr_new - m_refit * y_mid
+            rail_vertical[1] = (m_refit, c_refit)
+            if abs(angle1 - angle_med) > 2.5 or abs(m_refit - m1) > 1e-05 or abs(ctr_new - ctr_old1) > 1e-05:
+                new_angle = np.degrees(math.atan(m_refit))
+                ctr_shift_val = abs(ctr_new - ctr_old1)
+                print(f'[BLOCK7_RAIL_REG] index=1 old_angle={angle1:.3f} new_angle={new_angle:.3f} center_shift={ctr_shift_val:.3f}')
+            v0_after = rail_vertical[0][0] * y_mid + rail_vertical[0][1]
+            v1_after = rail_vertical[1][0] * y_mid + rail_vertical[1][1]
+            v2_after = rail_vertical[2][0] * y_mid + rail_vertical[2][1]
+            print(f'[BLOCK7_RAIL_AFTER] v0={v0_after:.3f} v1={v1_after:.3f} v2={v2_after:.3f}')
+        else:
+            slopes_v = [m for m, c in rail_vertical]
+            angles_v = [np.degrees(math.atan(m)) for m in slopes_v]
+            max_diff_v = max(angles_v) - min(angles_v) if angles_v else 0.0
+            if max_diff_v > 3.0:
+                trustworthy_v = []
+                for i in range(n_cols + 1):
+                    contrib = []
+                    if i > 0:
+                        contrib.extend([(row, i - 1) for row in range(n_rows)])
+                    if i < n_cols:
+                        contrib.extend([(row, i) for row in range(n_rows)])
+                    all_fg = all((quads_source[cell] == 'lower_panel_foreground_quad' for cell in contrib))
+                    if all_fg:
+                        trustworthy_v.append(rail_vertical[i][0])
+                m_med = float(np.median(trustworthy_v)) if trustworthy_v else float(np.median(slopes_v))
+                for i in range(n_cols + 1):
+                    m_old, c_old = rail_vertical[i]
+                    x_center = m_old * y_mid + c_old
+                    c_new = x_center - m_med * y_mid
+                    rail_vertical[i] = (m_med, c_new)
+        slopes_h = [m for m, c in bound_horizontal]
+        angles_h = [np.degrees(math.atan(m)) for m in slopes_h]
+        max_diff_h = max(angles_h) - min(angles_h) if angles_h else 0.0
+        if max_diff_h > 3.0:
+            trustworthy_h = []
+            for i in range(n_rows + 1):
+                contrib = []
+                if i > 0:
+                    contrib.extend([(i - 1, col) for col in range(n_cols)])
+                if i < n_rows:
+                    contrib.extend([(i, col) for col in range(n_cols)])
+                all_fg = all((quads_source[cell] == 'lower_panel_foreground_quad' for cell in contrib))
+                if all_fg:
+                    trustworthy_h.append(bound_horizontal[i][0])
+            m_med = float(np.median(trustworthy_h)) if trustworthy_h else float(np.median(slopes_h))
+            for i in range(n_rows + 1):
+                m_old, c_old = bound_horizontal[i]
+                y_center = m_old * x_mid + c_old
+                c_new = y_center - m_med * x_mid
+                bound_horizontal[i] = (m_med, c_new)
+        if not is_single_row_small_block:
+            for c_rail in range(n_cols + 1):
+                m, c = rail_vertical[c_rail]
+                val = m * y_mid + c
+                if c_rail == 0:
+                    yolo_val = np.mean([yolo_left_edges[r, 0][0] * y_mid + yolo_left_edges[r, 0][1] for r in range(n_rows)])
+                    val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                    clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+                elif c_rail == n_cols:
+                    yolo_val = np.mean([yolo_right_edges[r, n_cols - 1][0] * y_mid + yolo_right_edges[r, n_cols - 1][1] for r in range(n_rows)])
+                    val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                    clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+                else:
+                    col_L = c_rail - 1
+                    col_R = c_rail
+                    yolo_L_val = np.mean([yolo_right_edges[r, col_L][0] * y_mid + yolo_right_edges[r, col_L][1] for r in range(n_rows)])
+                    yolo_R_val = np.mean([yolo_left_edges[r, col_R][0] * y_mid + yolo_left_edges[r, col_R][1] for r in range(n_rows)])
+                    yolo_mid_val = (yolo_L_val + yolo_R_val) / 2.0
+                    val_clamped = clip_scalar(val, yolo_mid_val - 3.0, yolo_mid_val + 3.0)
+                    clamp_log = 'middle_3px' if abs(val_clamped - val) > 1e-05 else 'none'
+                c_new = val_clamped - m * y_mid
+                rail_vertical[c_rail] = (m, c_new)
+                print(f'[LOWER_SHARED_EDGE_RESTORE] block={block_name} type=vertical index={c_rail} value={val_clamped:.3f} clamp={clamp_log}')
+        for r_bound in range(n_rows + 1):
+            m, c = bound_horizontal[r_bound]
+            val = m * x_mid + c
+            if r_bound == 0:
+                yolo_val = np.mean([yolo_top_edges[0, col][0] * x_mid + yolo_top_edges[0, col][1] for col in range(n_cols)])
+                val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+            elif r_bound == n_rows:
+                yolo_val = np.mean([yolo_bottom_edges[n_rows - 1, col][0] * x_mid + yolo_bottom_edges[n_rows - 1, col][1] for col in range(n_cols)])
+                val_clamped = clip_scalar(val, yolo_val - 2.0, yolo_val + 2.0)
+                clamp_log = 'outer_2px' if abs(val_clamped - val) > 1e-05 else 'none'
+            else:
+                row_T = r_bound - 1
+                row_B = r_bound
+                yolo_T_val = np.mean([yolo_bottom_edges[row_T, col][0] * x_mid + yolo_bottom_edges[row_T, col][1] for col in range(n_cols)])
+                yolo_B_val = np.mean([yolo_top_edges[row_B, col][0] * x_mid + yolo_top_edges[row_B, col][1] for col in range(n_cols)])
+                yolo_mid_val = (yolo_T_val + yolo_B_val) / 2.0
+                val_clamped = clip_scalar(val, yolo_mid_val - 3.0, yolo_mid_val + 3.0)
+                clamp_log = 'middle_3px' if abs(val_clamped - val) > 1e-05 else 'none'
+            c_new = val_clamped - m * x_mid
+            bound_horizontal[r_bound] = (m, c_new)
+            print(f'[LOWER_SHARED_EDGE_RESTORE] block={block_name} type=horizontal index={r_bound} value={val_clamped:.3f} clamp={clamp_log}')
+
+        def intersect_lines(v_line, h_line):
+            m_v, c_v = v_line
+            m_h, c_h = h_line
+            denom = 1.0 - m_v * m_h
+            if abs(denom) > 1e-05:
+                x = (m_v * c_h + c_v) / denom
+                y = m_h * x + c_h
+            else:
+                x = c_v
+                y = m_h * x + c_h
+            return (x, y)
+        proposals = {}
+        for row in range(n_rows):
+            for col in range(n_cols):
+                left_rail = rail_vertical[col]
+                right_rail = rail_vertical[col + 1]
+                top_bound = bound_horizontal[row]
+                bot_bound = bound_horizontal[row + 1]
+                TL = intersect_lines(left_rail, top_bound)
+                TR = intersect_lines(right_rail, top_bound)
+                BR = intersect_lines(right_rail, bot_bound)
+                BL = intersect_lines(left_rail, bot_bound)
+                proposals[row, col] = [TL, TR, BR, BL]
+        final_polys = {}
+        final_sources = {}
+        final_reasons = {}
+
+        def get_iou(p1, p2):
+            poly1 = np.array(p1, dtype=np.float32)
+            poly2 = np.array(p2, dtype=np.float32)
+            inter_area = V42__get_polygon_intersection_area(poly1, poly2)
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+            union_area = area1 + area2 - inter_area
+            return inter_area / union_area if union_area > 0.0 else 0.0
+        for (row, col), p in grid_panels.items():
+            poly_prop = proposals[row, col]
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            is_valid_proposal = True
+            reason_prop = 'valid_refine'
+            is_convex = cv2.isContourConvex(np.array(poly_prop, dtype=np.float32).astype(np.int32))
+            if not is_convex:
+                is_valid_proposal = False
+                reason_prop = 'not_convex'
+            if is_valid_proposal:
+                area_prop = cv2.contourArea(np.array(poly_prop, dtype=np.float32))
+                area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+                area_ratio = area_prop / (area_yolo + 1e-06)
+                if not 0.7 <= area_ratio <= 1.35:
+                    is_valid_proposal = False
+                    reason_prop = f'area_ratio_{area_ratio:.2f}'
+            if is_valid_proposal:
+                TL_new, TR_new, BR_new, BL_new = V42__sort_panel_corners(poly_prop)
+                cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+                cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+                TL_yolo, TR_yolo, BR_yolo, BL_yolo = V42__sort_panel_corners(poly_init)
+                cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+                cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+                center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                panel_height = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                if center_shift > max(8.0, 0.35 * panel_height):
+                    is_valid_proposal = False
+                    reason_prop = f'center_shift_{center_shift:.2f}'
+            if is_valid_proposal:
+                for (other_row, other_col), other_poly in proposals.items():
+                    if (row, col) != (other_row, other_col):
+                        iou = get_iou(poly_prop, other_poly)
+                        if iou > 0.03:
+                            is_valid_proposal = False
+                            reason_prop = f'overlap_iou_{iou:.3f}'
+                            break
+            if is_valid_proposal:
+                final_polys[row, col] = poly_prop
+                final_sources[row, col] = 'shared_quad_grid'
+                final_reasons[row, col] = 'valid_refine'
+            else:
+                quad = quads_dict[row, col]
+                is_valid_quad = False
+                reason_quad = 'foreground_quad_failed'
+                if quads_source[row, col] == 'lower_panel_foreground_quad':
+                    is_convex_q = cv2.isContourConvex(np.array(quad, dtype=np.float32).astype(np.int32))
+                    area_prop_q = cv2.contourArea(np.array(quad, dtype=np.float32))
+                    area_ratio_q = area_prop_q / (area_yolo + 1e-06)
+                    TL_q, TR_q, BR_q, BL_q = V42__sort_panel_corners(quad)
+                    cx_q = (TL_q[0] + TR_q[0] + BR_q[0] + BL_q[0]) / 4.0
+                    cy_q = (TL_q[1] + TR_q[1] + BR_q[1] + BL_q[1]) / 4.0
+                    center_shift_q = math.sqrt((cx_q - cx_yolo) ** 2 + (cy_q - cy_yolo) ** 2)
+                    if is_convex_q and 0.7 <= area_ratio_q <= 1.35 and (center_shift_q <= max(8.0, 0.35 * panel_height)):
+                        is_valid_quad = True
+                        reason_quad = 'valid_quad_fallback'
+                if is_valid_quad:
+                    final_polys[row, col] = quad
+                    final_sources[row, col] = 'foreground_fallback'
+                    final_reasons[row, col] = f'proposal_failed:{reason_prop}'
+                else:
+                    final_polys[row, col] = poly_init
+                    final_sources[row, col] = 'lower_panel_yolo_fallback'
+                    final_reasons[row, col] = f'proposal_failed:{reason_prop};quad_failed:{reason_quad}'
+        for row, col in grid_panels.keys():
+            print(f'[LOWER_PANEL_FINAL] block={block_name} row={row} col={col} source={final_sources[row, col]} reason={final_reasons[row, col]}')
+            print(f'[SMALL_PANEL_BUILD] block={block_name} row={row} col={col} source={final_sources[row, col]} reason={final_reasons[row, col]}')
+        for c_rail in range(n_cols + 1):
+            m, c = rail_vertical[c_rail]
+            P_top = intersect_lines((m, c), bound_horizontal[0])
+            P_bot = intersect_lines((m, c), bound_horizontal[n_rows])
+            P_top_orig = transform_local_to_orig(P_top[0], P_top[1])
+            P_bot_orig = transform_local_to_orig(P_bot[0], P_bot[1])
+            pts_np = np.array([P_top_orig, P_bot_orig], dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img_snap, [pts_np], False, (180, 0, 0), V42__VISUAL_PANEL_THICKNESS)
+            cv2.polylines(img_support, [pts_np], False, (180, 0, 0), V42__VISUAL_PANEL_THICKNESS)
+            if is_single_row_small_block:
+                val_c = m * y_mid + c
+                print(f'[BLOCK7_DRAW_RAIL] index={c_rail} value={val_c:.3f} source={rail_vertical_source[c_rail]}')
+        for r_bound in range(n_rows + 1):
+            m, c = bound_horizontal[r_bound]
+            P_left = intersect_lines(rail_vertical[0], (m, c))
+            P_right = intersect_lines(rail_vertical[n_cols], (m, c))
+            P_left_orig = transform_local_to_orig(P_left[0], P_left[1])
+            P_right_orig = transform_local_to_orig(P_right[0], P_right[1])
+            cv2.line(img_snap, (int(round(P_left_orig[0])), int(round(P_left_orig[1]))), (int(round(P_right_orig[0])), int(round(P_right_orig[1]))), (255, 0, 255), 1)
+            cv2.line(img_support, (int(round(P_left_orig[0])), int(round(P_left_orig[1]))), (int(round(P_right_orig[0])), int(round(P_right_orig[1]))), (255, 0, 255), 1)
+        panels_result = []
+        for (row, col), p in grid_panels.items():
+            poly_final = final_polys[row, col]
+            source = final_sources[row, col]
+            reason = final_reasons[row, col]
+            max_overlap_iou = 0.0
+            for (other_row, other_col), other_poly in final_polys.items():
+                if (row, col) != (other_row, other_col):
+                    iou = get_iou(poly_final, other_poly)
+                    if iou > max_overlap_iou:
+                        max_overlap_iou = iou
+            TL_new, TR_new, BR_new, BL_new = V42__sort_panel_corners(poly_final)
+            cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+            cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+            poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+            TL_yolo, TR_yolo, BR_yolo, BL_yolo = V42__sort_panel_corners(poly_init)
+            cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+            cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+            center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+            area_prop = cv2.contourArea(np.array(poly_final, dtype=np.float32))
+            area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+            area_ratio = area_prop / (area_yolo + 1e-06)
+            anchors = V42__get_panel_hybrid_anchors(p['orig_ref'])
+            panels_result.append({'col': col, 'row': row, 'polygon': poly_final, 'quality': 'fallback' if source == 'lower_panel_yolo_fallback' else 'pass', 'source': source, 'reason': reason, 'shift': center_shift, 'area_ratio': area_ratio, 'overlap': max_overlap_iou, 'orig_p': p['orig_ref'], 'anchors': anchors})
+        return panels_result
+    has_real_lower_grid = False
+    n_cols = len(b_local['columns'])
+    n_rows = row_count
+    grid_panels = {}
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            grid_panels[row_idx, col_idx] = p
+    y_min_local = min((p['bbox'][1] for p in b_local['panels']))
+    y_max_local = max((p['bbox'][3] for p in b_local['panels']))
+    boundaries = {}
+    rail_sources = {}
+    if n_cols == 2:
+        rail_names = ['left', 'middle', 'right']
+    else:
+        rail_names = ['left', 'right']
+    rail_yolo_pts = {name: [] for name in rail_names}
+    for col_idx in range(n_cols):
+        for row_idx in range(n_rows):
+            if (row_idx, col_idx) in grid_panels:
+                p = grid_panels[row_idx, col_idx]
+                poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+                if n_cols == 2:
+                    if col_idx == 0:
+                        rail_yolo_pts['left'].extend([TL, BL])
+                        rail_yolo_pts['middle'].extend([TR, BR])
+                    else:
+                        rail_yolo_pts['middle'].extend([TL, BL])
+                        rail_yolo_pts['right'].extend([TR, BR])
+                else:
+                    rail_yolo_pts['left'].extend([TL, BL])
+                    rail_yolo_pts['right'].extend([TR, BR])
+    direct_fits = {}
+    rail_support_pts_scanned = {}
+    for name in rail_names:
+        pts = rail_yolo_pts[name]
+        ys = [pt[1] for pt in pts]
+        xs = [pt[0] for pt in pts]
+        m_yolo, c_yolo = np.polyfit(ys, xs, 1)
+        rail_support_pts = V42__find_vertical_support_points(rotated_gray, m_yolo, c_yolo, y_min_local, y_max_local, name, block_name, transform_local_to_orig, is_lower_small_block)
+        rail_support_pts_scanned[name] = rail_support_pts
+        if len(rail_support_pts) >= 5:
+            xs_s = np.array([pt[0] for pt in rail_support_pts])
+            ys_s = np.array([pt[1] for pt in rail_support_pts])
+            res = xs_s - (m_yolo * ys_s + c_yolo)
+            med_res = np.median(res)
+            devs = np.abs(res - med_res)
+            mad = np.median(devs)
+            keep = devs <= max(2.0, 2.5 * mad)
+            xs_clean = xs_s[keep]
+            ys_clean = ys_s[keep]
+            if len(xs_clean) >= 5:
+                m_fit, c_fit = np.polyfit(ys_clean, xs_clean, 1)
+                std_res = np.std(xs_clean - (m_fit * ys_clean + c_fit))
+                angle_diff = abs(np.degrees(math.atan(m_fit) - math.atan(m_yolo)))
+                if std_res <= 2.5 and angle_diff <= 6.0:
+                    direct_fits[name] = {'m': m_fit, 'c': c_fit, 'xs_clean': xs_clean, 'ys_clean': ys_clean, 'std_res': std_res, 'coverage': len(xs_clean) / 50.0}
+                    V42__GLOBAL_SMALL_RAIL_SLOPES.append(m_fit)
+    for name in rail_names:
+        pts = rail_yolo_pts[name]
+        ys = [pt[1] for pt in pts]
+        xs = [pt[0] for pt in pts]
+        m_yolo, c_yolo = np.polyfit(ys, xs, 1)
+        n_pts = 0
+        coverage = 0.0
+        residual_std = 0.0
+        if name in direct_fits:
+            m_final = direct_fits[name]['m']
+            c_final = direct_fits[name]['c']
+            n_pts = len(direct_fits[name]['xs_clean'])
+            coverage = direct_fits[name]['coverage']
+            residual_std = direct_fits[name]['std_res']
+            if block_name == 'block_1' and name == 'left':
+                source = 'left_crop_foreground_edge'
+            elif is_lower_small_block:
+                source = 'vertical_support_line' if name == 'middle' else 'foreground_edge_line'
+            else:
+                source = 'direct_support'
+        else:
+            borrowed_m = None
+            source_borrow = 'borrowed_slope_with_local_anchor'
+            if name == 'left':
+                search_order = ['right', 'middle']
+            elif name == 'right':
+                search_order = ['left', 'middle']
+            else:
+                search_order = ['left', 'right']
+            for other_name in search_order:
+                if other_name in direct_fits:
+                    borrowed_m = direct_fits[other_name]['m']
+                    break
+            if borrowed_m is None and V42__GLOBAL_SMALL_RAIL_SLOPES:
+                borrowed_m = np.median(V42__GLOBAL_SMALL_RAIL_SLOPES)
+            if borrowed_m is None:
+                bx_min_curr = min((p['bbox'][0] for p in b_local['panels']))
+                bx_max_curr = max((p['bbox'][2] for p in b_local['panels']))
+                by_min_curr = min((p['bbox'][1] for p in b_local['panels']))
+                by_max_curr = max((p['bbox'][3] for p in b_local['panels']))
+                curr_center_x = (bx_min_curr + bx_max_curr) / 2.0
+                curr_center_y = (by_min_curr + by_max_curr) / 2.0
+                nearest_large = None
+                min_dist = float('inf')
+                for info in V42__GLOBAL_LARGE_BLOCK_INFOS:
+                    dist = math.sqrt((info['center_x'] - curr_center_x) ** 2 + (info['center_y'] - curr_center_y) ** 2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_large = info
+                if nearest_large is not None:
+                    m_orig = np.median(nearest_large['slopes'])
+                    Q_1 = transform_orig_to_local(0.0, 0.0)
+                    Q_2 = transform_orig_to_local(m_orig * 100.0, 100.0)
+                    dx_loc = Q_2[0] - Q_1[0]
+                    dy_loc = Q_2[1] - Q_1[1]
+                    if abs(dy_loc) > 1e-05:
+                        borrowed_m = dx_loc / dy_loc
+                        if is_lower_small_block:
+                            source_borrow = 'neighbor_inherit_with_local_anchor'
+                    else:
+                        borrowed_m = 0.0
+            if borrowed_m is not None:
+                m_final = borrowed_m
+                c_candidate = np.median(xs) - borrowed_m * np.median(ys)
+                local_supports = rail_support_pts_scanned.get(name, [])
+                if len(local_supports) >= 2:
+                    res = [pt[0] - (borrowed_m * pt[1] + c_candidate) for pt in local_supports]
+                    c_candidate += np.median(res)
+                c_final = c_candidate
+                source = source_borrow
+            else:
+                m_final = m_yolo
+                c_final = c_yolo
+                source = 'pure_yolo'
+        if block_name == 'block_1' and name == 'left':
+            y1 = y_min_local
+            x1 = m_final * y1 + c_final
+            x_orig_1 = transform_local_to_orig(x1, y1)[0]
+            y2 = y_max_local
+            x2 = m_final * y2 + c_final
+            x_orig_2 = transform_local_to_orig(x2, y2)[0]
+            min_x_orig = min(x_orig_1, x_orig_2)
+            if min_x_orig < 0.0:
+                Minv_0_0 = transform_local_to_orig(1.0, 0.0)[0] - transform_local_to_orig(0.0, 0.0)[0]
+                delta_c = -min_x_orig / Minv_0_0
+                c_final += delta_c
+            source = 'left_crop_image_boundary'
+        rail_pts = [(m_final * y + c_final, y) for y in np.linspace(y_min_local, y_max_local, 11)]
+        boundaries[name + '_boundary'] = rail_pts
+        rail_sources[name] = source
+        if is_lower_small_block:
+            if name in ('left', 'right'):
+                rail_draw_ok = source in ('foreground_edge_line',) and n_pts >= 5 and (residual_std <= 1.5) and (name in direct_fits and abs(np.degrees(math.atan(direct_fits[name]['m'])) - np.degrees(math.atan(m_yolo))) <= 3.0)
+                rail_draw_reason = 'ok' if rail_draw_ok else f'n={n_pts}<5 or res={residual_std:.2f}>1.5 or angle>3'
+            else:
+                rail_draw_ok = source in ('vertical_support_line', 'foreground_edge_line', 'borrowed_slope_with_local_anchor')
+                rail_draw_reason = 'ok' if rail_draw_ok else f'source={source}'
+            is_valid_rail = rail_draw_ok
+        else:
+            is_valid_rail = source in ('direct_support', 'foreground_edge', 'left_crop_foreground_edge', 'vertical_support_line', 'borrowed_slope_with_local_anchor', 'neighbor_inherit_with_local_anchor')
+            rail_draw_reason = 'ok' if is_valid_rail else f'source={source}'
+        if is_lower_small_block:
+            print(f"[SMALL_RAIL_DRAW] block={block_name} rail={name} source={source} draw={('true' if is_valid_rail else 'false')} reason={rail_draw_reason}")
+        else:
+            print(f"[SMALL_RAIL] block={block_name} rail={name} source={source} n={n_pts} coverage={coverage:.3f} residual={residual_std:.3f} draw={('true' if is_valid_rail else 'false')}")
+        if block_name == 'block_1' and name == 'left':
+            x_top = rail_pts[0][0]
+            x_bottom = rail_pts[-1][0]
+            print(f'[LEFT_EDGE_RAIL] block={block_name} source={source} x_top={x_top:.3f} x_bottom={x_bottom:.3f}')
+        if is_valid_rail:
+            rail_pts_orig = [transform_local_to_orig(pt[0], pt[1]) for pt in rail_pts]
+            pts_np = np.array(rail_pts_orig, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img_snap, [pts_np], False, (180, 0, 0), V42__VISUAL_PANEL_THICKNESS)
+    lines_dict = {}
+    support_pts_scanned = {}
+    support_stats = {}
+    priors_dict = {}
+    for r in range(n_rows + 1):
+        for col_idx in range(n_cols):
+            if r == 0:
+                p = grid_panels[0, col_idx]
+                poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+                P1, P2 = (TL, TR)
+            elif r == n_rows:
+                p = grid_panels[n_rows - 1, col_idx]
+                poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+                TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+                P1, P2 = (BL, BR)
+            else:
+                p_prev = grid_panels[r - 1, col_idx]
+                p_curr = grid_panels[r, col_idx]
+                poly_prev = V42__get_local_yolo_polygon_prior(p_prev['orig_ref'], transform_orig_to_local)
+                poly_curr = V42__get_local_yolo_polygon_prior(p_curr['orig_ref'], transform_orig_to_local)
+                TL_prev, TR_prev, BR_prev, BL_prev = V42__sort_panel_corners(poly_prev)
+                TL_curr, TR_curr, BR_curr, BL_curr = V42__sort_panel_corners(poly_curr)
+                P1 = ((BL_prev[0] + TL_curr[0]) / 2.0, (BL_prev[1] + TL_curr[1]) / 2.0)
+                P2 = ((BR_prev[0] + TR_curr[0]) / 2.0, (BR_prev[1] + TR_curr[1]) / 2.0)
+            m_prior, c_prior = np.polyfit([P1[0], P2[0]], [P1[1], P2[1]], 1)
+            P_mid = ((P1[0] + P2[0]) / 2.0, (P1[1] + P2[1]) / 2.0)
+            priors_dict[r, col_idx] = {'m': m_prior, 'c': c_prior, 'P_mid': P_mid}
+    prior_pitches = []
+    for col_idx in range(n_cols):
+        for r in range(n_rows):
+            y_r = priors_dict[r, col_idx]['P_mid'][1]
+            y_r1 = priors_dict[r + 1, col_idx]['P_mid'][1]
+            prior_pitches.append(abs(y_r1 - y_r))
+    median_pitch = np.median(prior_pitches) if prior_pitches else 40.0
+
+    def enforce_line_constraints(r, col_idx, m_val, c_val, src_name):
+        P_mid = priors_dict[r, col_idx]['P_mid']
+        m_prior = priors_dict[r, col_idx]['m']
+        c_prior = priors_dict[r, col_idx]['c']
+        y_center = m_val * P_mid[0] + c_val
+        shift = y_center - P_mid[1]
+        if is_lower_small_block:
+            max_shift = min(3.0, 0.18 * median_pitch)
+        else:
+            max_shift = min(4.0, 0.18 * median_pitch)
+        was_clamped = False
+        if abs(shift) > max_shift:
+            clamped_shift = max(-max_shift, min(max_shift, shift))
+            y_center = P_mid[1] + clamped_shift
+            was_clamped = True
+        pitch_ok = True
+        if r > 0 and (r - 1, col_idx) in lines_dict:
+            y_prev = lines_dict[r - 1, col_idx]['support_line_m'] * P_mid[0] + lines_dict[r - 1, col_idx]['support_line_c']
+            pitch_val = y_center - y_prev
+            min_p = 0.75 * median_pitch
+            max_p = 1.25 * median_pitch
+            if not min_p <= pitch_val <= max_p:
+                pitch_ok = False
+                clamped_pitch = max(min_p, min(max_p, pitch_val))
+                y_center = y_prev + clamped_pitch
+                was_clamped = True
+        offsets = []
+        if r > 0 and (r - 1, col_idx) in lines_dict:
+            info_prev = lines_dict[r - 1, col_idx]
+            if info_prev['source'] in ('small_support_points_line', 'small_borrow_neighbor_line', 'small_neighbor_inherit', 'small_pitch_clamped_support'):
+                y_center_prev = info_prev['support_line_m'] * priors_dict[r - 1, col_idx]['P_mid'][0] + info_prev['support_line_c']
+                dy_prev = y_center_prev - priors_dict[r - 1, col_idx]['P_mid'][1]
+                offsets.append(dy_prev)
+        if offsets:
+            dy_neighbor_median = np.median(offsets)
+            dy_curr = y_center - P_mid[1]
+            if abs(dy_curr - dy_neighbor_median) > 2.0:
+                dy_clamped = max(dy_neighbor_median - 2.0, min(dy_neighbor_median + 2.0, dy_curr))
+                y_center = P_mid[1] + dy_clamped
+                was_clamped = True
+        c_final = y_center - m_val * P_mid[0]
+        final_src = 'small_pitch_clamped_support' if was_clamped else src_name
+        return (m_val, c_final, final_src, pitch_ok)
+
+    def detect_horizontal_boundary_points(mode, r, col_idx):
+        m_prior = priors_dict[r, col_idx]['m']
+        c_prior = priors_dict[r, col_idx]['c']
+        P_mid = priors_dict[r, col_idx]['P_mid']
+        P1 = (P_mid[0] - 20, m_prior * (P_mid[0] - 20) + c_prior)
+        left_rail = boundaries['left_boundary'] if col_idx == 0 else boundaries['middle_boundary']
+        right_rail = boundaries['middle_boundary'] if col_idx == 0 and n_cols == 2 else boundaries['right_boundary']
+        xL_pt = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+        xL = xL_pt[0] if xL_pt is not None else V42__get_boundary_x_at_y(left_rail, P1[1])
+        xR_pt = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+        xR = xR_pt[0] if xR_pt is not None else V42__get_boundary_x_at_y(right_rail, P1[1])
+        sample_xs = np.arange(int(round(xL)) + 2, int(round(xR)) - 2)
+        if len(sample_xs) < 10:
+            sample_xs = np.linspace(xL + 2, xR - 2, 20)
+        pts_scanned = []
+        raw = 0
+        kept = 0
+        rejected_ground = 0
+        for sx in sample_xs:
+            if sx < xL + 4 or sx > xR - 4:
+                rejected_ground += 1
+                continue
+            y_prior = m_prior * sx + c_prior
+            best_cand_y = None
+            best_dy = None
+            best_score = 999999.0
+            raw += 1
+            for dy in range(-7, 8):
+                y = y_prior + dy
+                y_idx = int(round(y))
+                x_idx = int(round(sx))
+                if not (5 <= y_idx < rotated_gray.shape[0] - 5 and 0 <= x_idx < rotated_gray.shape[1]):
+                    continue
+                center_val = float(rotated_gray[y_idx, x_idx])
+                band_above = [float(rotated_gray[int(round(y - k)), x_idx]) for k in (2, 3, 4, 5)]
+                band_below = [float(rotated_gray[int(round(y + k)), x_idx]) for k in (2, 3, 4, 5)]
+                above_warm_count = sum((1 for v in band_above if v >= 135))
+                below_warm_count = sum((1 for v in band_below if v >= 135))
+                median_above = float(np.median(band_above))
+                median_below = float(np.median(band_below))
+                local_dark = center_val <= min(median_above, median_below) - 8
+                dark_abs = center_val <= 145
+                accepted = False
+                score = 999999.0
+                if mode == 'inner_valley':
+                    if above_warm_count >= 2 and below_warm_count >= 2 and (local_dark or dark_abs) and (abs(dy) <= 5):
+                        accepted = True
+                        score = center_val - 0.25 * (median_above + median_below) + 2.0 * abs(dy)
+                elif mode == 'top_outer_edge':
+                    if below_warm_count >= 3 and (center_val <= median_below - 6 or dark_abs) and (abs(dy) <= 4) and (dy >= -4):
+                        accepted = True
+                        if above_warm_count >= 2:
+                            score = center_val - 0.25 * (median_above + median_below) + 2.0 * abs(dy)
+                        else:
+                            score = center_val - 0.5 * median_below + 2.0 * abs(dy)
+                elif mode == 'bottom_outer_edge':
+                    if above_warm_count >= 3 and (center_val <= median_above - 6 or dark_abs) and (abs(dy) <= 4) and (dy <= 4):
+                        accepted = True
+                        if below_warm_count >= 2:
+                            score = center_val - 0.25 * (median_above + median_below) + 2.0 * abs(dy)
+                        else:
+                            score = center_val - 0.5 * median_above + 2.0 * abs(dy)
+                if accepted:
+                    if score < best_score:
+                        best_score = score
+                        best_cand_y = y
+                        best_dy = dy
+            if best_cand_y is not None:
+                kept += 1
+                pts_scanned.append((sx, best_cand_y))
+                if V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG is not None:
+                    cx_orig, cy_orig = transform_local_to_orig(sx, best_cand_y)
+                    cv2.circle(V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, (int(round(cx_orig)), int(round(cy_orig))), 2, (255, 255, 0), -1)
+        print(f"[LOWER_DARK_GROOVE] block={block_name} r={r} col={col_idx} raw={raw} kept={kept} mode={mode} accepted={('true' if kept >= 5 else 'false')}")
+        stats = {'sample_n': len(sample_xs), 'raw_pts': raw, 'kept_pts': kept, 'rejected_ground': rejected_ground, 'rejected_shift': raw - kept, 'rejected_warmth': 0, 'rejected_dark': 0, 'rejected_samples': []}
+        return (pts_scanned, stats)
+    if False:
+        for r in (0, 1):
+            for col_idx in range(n_cols):
+                m_prior = priors_dict[r, col_idx]['m']
+                c_prior = priors_dict[r, col_idx]['c']
+                P_mid = priors_dict[r, col_idx]['P_mid']
+                left_rail = boundaries['left_boundary'] if col_idx == 0 else boundaries['middle_boundary']
+                right_rail = boundaries['middle_boundary'] if col_idx == 0 and n_cols == 2 else boundaries['right_boundary']
+                P1 = (P_mid[0] - 20, m_prior * (P_mid[0] - 20) + c_prior)
+                xL_pt = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+                xL = xL_pt[0] if xL_pt is not None else V42__get_boundary_x_at_y(left_rail, P1[1])
+                xR_pt = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+                xR = xR_pt[0] if xR_pt is not None else V42__get_boundary_x_at_y(right_rail, P1[1])
+                mode = 'top_outer_edge' if r == 0 else 'bottom_outer_edge'
+                pts_scanned, stats = detect_horizontal_boundary_points(mode, r, col_idx)
+                support_pts_scanned[r, col_idx] = pts_scanned
+                support_stats[r, col_idx] = stats
+                accepted_fit = False
+                reason_fit = 'too_few_raw_pts'
+                m_fit2, c_fit2 = (m_prior, c_prior)
+                xs_clean = np.array([])
+                ys_clean = np.array([])
+                coverage = 0.0
+                residual_std = 0.0
+                angle_diff = 0.0
+                center_shift = 0.0
+                n_clean = 0
+                kept = stats['kept_pts']
+                if kept >= 5:
+                    xs_h = np.array([pt[0] for pt in pts_scanned])
+                    ys_h = np.array([pt[1] for pt in pts_scanned])
+                    try:
+                        m_fit1, c_fit1 = np.polyfit(xs_h, ys_h, 1)
+                        res = ys_h - (m_fit1 * xs_h + c_fit1)
+                        med_res = np.median(res)
+                        devs = np.abs(res - med_res)
+                        mad = np.median(devs)
+                        threshold = max(1.5, 2.5 * mad)
+                        keep = devs <= threshold
+                        xs_clean = xs_h[keep]
+                        ys_clean = ys_h[keep]
+                        n_clean = len(xs_clean)
+                        if n_clean >= 5:
+                            m_fit2, c_fit2 = np.polyfit(xs_clean, ys_clean, 1)
+                            res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                            residual_std = float(np.std(res_fit2))
+                            bins = np.linspace(xL, xR, 9)
+                            bin_indices = np.digitize(xs_clean, bins) - 1
+                            unique_bins = np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])
+                            coverage = float(len(unique_bins) / 8.0)
+                            angle_fit = np.degrees(math.atan(m_fit2))
+                            angle_prior = np.degrees(math.atan(m_prior))
+                            angle_diff = abs(angle_fit - angle_prior)
+                            while angle_diff > 90:
+                                angle_diff = abs(angle_diff - 180)
+                            center_shift = float(m_fit2 * P_mid[0] + c_fit2 - P_mid[1])
+                            if coverage < 0.25:
+                                reason_fit = f'coverage_{coverage:.3f}<0.25'
+                            elif residual_std > 2.0:
+                                reason_fit = f'residual_std_{residual_std:.3f}>2.0'
+                            elif angle_diff > 5.0:
+                                reason_fit = f'angle_diff_{angle_diff:.3f}>5.0'
+                            elif abs(center_shift) > 6.0:
+                                reason_fit = f'center_shift_{center_shift:.3f}>6.0'
+                            else:
+                                accepted_fit = True
+                                reason_fit = 'valid_fit'
+                        else:
+                            reason_fit = f'n_clean_{n_clean}<5'
+                    except Exception as e:
+                        reason_fit = f'fit_error_{str(e)}'
+                print(f"[LOWER_DARK_FIT] block={block_name} r={r} col={col_idx} source={('small_lower_dark_groove_line' if accepted_fit else 'single_row_outer_edge_borrow')} n_clean={n_clean} coverage={coverage:.3f} residual={residual_std:.3f} angle={angle_diff:.3f} shift={center_shift:.3f} accepted={('true' if accepted_fit else 'false')} reason={reason_fit}")
+                if accepted_fit:
+                    lines_dict[r, col_idx] = {'support_line_m': float(m_fit2), 'support_line_c': float(c_fit2), 'source': 'small_lower_dark_groove_line', 'clean_pts': [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)], 'coverage': coverage, 'residual': residual_std, 'angle_diff': angle_diff, 'n_pts': n_clean, 'center_shift': center_shift, 'pitch_ok': True}
+        for r in (0, 1):
+            for col_idx in range(n_cols):
+                if (r, col_idx) not in lines_dict:
+                    r_other = 1 - r
+                    m_fallback = priors_dict[r, col_idx]['m']
+                    if (r_other, col_idx) in lines_dict and lines_dict[r_other, col_idx]['source'] == 'small_lower_dark_groove_line':
+                        m_fallback = lines_dict[r_other, col_idx]['support_line_m']
+                    c_fallback = priors_dict[r, col_idx]['P_mid'][1] - m_fallback * priors_dict[r, col_idx]['P_mid'][0]
+                    lines_dict[r, col_idx] = {'support_line_m': float(m_fallback), 'support_line_c': float(c_fallback), 'source': 'single_row_outer_edge_borrow', 'clean_pts': support_pts_scanned[r, col_idx], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': len(support_pts_scanned[r, col_idx]), 'center_shift': 0.0, 'pitch_ok': True}
+    else:
+        win = 4
+        for r in range(n_rows + 1):
+            for col_idx in range(n_cols):
+                m_prior = priors_dict[r, col_idx]['m']
+                c_prior = priors_dict[r, col_idx]['c']
+                P_mid = priors_dict[r, col_idx]['P_mid']
+                P1 = (P_mid[0] - 20, m_prior * (P_mid[0] - 20) + c_prior)
+                left_rail = boundaries['left_boundary'] if col_idx == 0 else boundaries['middle_boundary']
+                right_rail = boundaries['middle_boundary'] if col_idx == 0 and n_cols == 2 else boundaries['right_boundary']
+                xL_pt = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+                xL = xL_pt[0] if xL_pt is not None else V42__get_boundary_x_at_y(left_rail, P1[1])
+                xR_pt = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+                xR = xR_pt[0] if xR_pt is not None else V42__get_boundary_x_at_y(right_rail, P1[1])
+                sample_xs = np.arange(int(round(xL)) + 2, int(round(xR)) - 2)
+                if len(sample_xs) < 10:
+                    sample_xs = np.linspace(xL + 2, xR - 2, 20)
+                length_p = math.sqrt(1.0 + m_prior ** 2)
+                nx = -m_prior / length_p
+                ny = 1.0 / length_p
+                pts_scanned = []
+                raw = 0
+                kept = 0
+                rejected_ground = 0
+                rejected_shift = 0
+                rejected_warmth = 0
+                rejected_dark = 0
+                rejected_samples = []
+                if is_lower_small_block:
+                    if r == 0:
+                        mode = 'top_outer_edge'
+                    elif r == n_rows:
+                        mode = 'bottom_outer_edge'
+                    else:
+                        mode = 'inner_valley'
+                    print(f'[LOWER_BOUNDARY_MODE] block={block_name} r={r} col={col_idx} mode={mode}')
+                    pts_scanned, stats = detect_horizontal_boundary_points(mode, r, col_idx)
+                    raw = stats['raw_pts']
+                    kept = stats['kept_pts']
+                    rejected_ground = stats['rejected_ground']
+                    rejected_shift = stats['rejected_shift']
+                    rejected_warmth = stats['rejected_warmth']
+                    rejected_dark = stats['rejected_dark']
+                    rejected_samples = stats['rejected_samples']
+                    support_pts_scanned[r, col_idx] = pts_scanned
+                    support_stats[r, col_idx] = stats
+                    print(f'[SMALL_SUPPORT_FILTER] block={block_name} r={r} col={col_idx} raw={raw} kept={kept} rejected_ground={rejected_ground} rejected_shift={rejected_shift}')
+                else:
+                    mode = 'standard'
+                    for sx in sample_xs:
+                        sy_est = m_prior * sx + c_prior
+                        profile = []
+                        for d in range(-win, win + 1):
+                            px = sx + d * nx
+                            py = sy_est + d * ny
+                            x_idx = max(0, min(rotated_gray.shape[1] - 1, int(round(px))))
+                            y_idx = max(0, min(rotated_gray.shape[0] - 1, int(round(py))))
+                            profile.append(rotated_gray[y_idx, x_idx])
+                        if len(profile) < 3:
+                            continue
+                        candidates = []
+                        for idx in range(1, len(profile) - 1):
+                            if profile[idx] < profile[idx - 1] and profile[idx] < profile[idx + 1]:
+                                left_peak = np.max(profile[:idx])
+                                right_peak = np.max(profile[idx + 1:])
+                                contrast = min(left_peak, right_peak) - profile[idx]
+                                if (profile[idx] < 135 or contrast >= 8) and profile[idx] < 155:
+                                    dist = abs(idx - win)
+                                    candidates.append((dist, idx, 'valley'))
+                        if r == 0:
+                            _prof_i16 = np.array(profile, dtype=np.int16)
+                            gradients = [int(_prof_i16[i + 1]) - int(_prof_i16[i]) for i in range(len(_prof_i16) - 1)]
+                            max_grad_idx = np.argmax(gradients)
+                            if gradients[max_grad_idx] >= 12:
+                                candidates.append((abs(max_grad_idx - win), max_grad_idx, 'edge'))
+                        elif r == n_rows:
+                            _prof_i16 = np.array(profile, dtype=np.int16)
+                            gradients = [int(_prof_i16[i + 1]) - int(_prof_i16[i]) for i in range(len(_prof_i16) - 1)]
+                            min_grad_idx = np.argmin(gradients)
+                            if gradients[min_grad_idx] <= -12:
+                                candidates.append((abs(min_grad_idx - win), min_grad_idx, 'edge'))
+                        if candidates:
+                            raw += 1
+                            candidates.sort(key=lambda item: item[0])
+                            best_dist, best_idx, c_type = candidates[0]
+                            if (r == 0 or r == n_rows) and best_dist > 4:
+                                rejected_shift += 1
+                                continue
+                            px_val = sx + (best_idx - win) * nx
+                            py_val = sy_est + (best_idx - win) * ny
+                            pts_scanned.append((px_val, py_val))
+                            kept += 1
+                    support_pts_scanned[r, col_idx] = pts_scanned
+                if is_lower_small_block:
+                    support_stats[r, col_idx] = {'sample_n': len(sample_xs), 'raw_pts': raw, 'kept_pts': kept, 'rejected_ground': rejected_ground, 'rejected_shift': rejected_shift, 'rejected_warmth': rejected_warmth, 'rejected_dark': rejected_dark, 'rejected_samples': rejected_samples}
+                    print(f'[SMALL_SUPPORT_FILTER] block={block_name} r={r} col={col_idx} raw={raw} kept={kept} rejected_ground={rejected_ground} rejected_shift={rejected_shift}')
+                if is_lower_small_block:
+                    n_raw = len(pts_scanned)
+                    accepted = False
+                    reason = 'too_few_raw_pts'
+                    m_fit2 = m_prior
+                    c_fit2 = c_prior
+                    xs_clean = np.array([])
+                    ys_clean = np.array([])
+                    coverage = 0.0
+                    residual_std = 0.0
+                    angle_diff = 0.0
+                    center_shift = 0.0
+                    n_clean = 0
+                    if n_raw >= 5:
+                        xs_h = np.array([pt[0] for pt in pts_scanned])
+                        ys_h = np.array([pt[1] for pt in pts_scanned])
+                        try:
+                            m_fit1, c_fit1 = np.polyfit(xs_h, ys_h, 1)
+                            res = ys_h - (m_fit1 * xs_h + c_fit1)
+                            med_res = np.median(res)
+                            devs = np.abs(res - med_res)
+                            mad = np.median(devs)
+                            threshold = max(1.5, 2.5 * mad)
+                            keep = devs <= threshold
+                            xs_clean = xs_h[keep]
+                            ys_clean = ys_h[keep]
+                            n_clean = len(xs_clean)
+                            if n_clean >= 5:
+                                m_fit2, c_fit2 = np.polyfit(xs_clean, ys_clean, 1)
+                                res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                                residual_std = float(np.std(res_fit2))
+                                bins = np.linspace(xL, xR, 9)
+                                bin_indices = np.digitize(xs_clean, bins) - 1
+                                unique_bins = np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])
+                                coverage = float(len(unique_bins) / 8.0)
+                                angle_fit = np.degrees(math.atan(m_fit2))
+                                angle_prior = np.degrees(math.atan(m_prior))
+                                angle_diff = abs(angle_fit - angle_prior)
+                                while angle_diff > 90:
+                                    angle_diff = abs(angle_diff - 180)
+                                center_shift = float(m_fit2 * P_mid[0] + c_fit2 - P_mid[1])
+                                if coverage < 0.25:
+                                    reason = f'coverage_{coverage:.3f}<0.25'
+                                elif residual_std > 2.0:
+                                    reason = f'residual_std_{residual_std:.3f}>2.0'
+                                elif angle_diff > 5.0:
+                                    reason = f'angle_diff_{angle_diff:.3f}>5.0'
+                                elif abs(center_shift) > 6.0:
+                                    reason = f'center_shift_{center_shift:.3f}>6.0'
+                                else:
+                                    accepted = True
+                                    reason = 'valid_fit'
+                            else:
+                                reason = f'n_clean_{n_clean}<5'
+                        except Exception as e:
+                            reason = f'fit_error_{str(e)}'
+                    print(f"[LOWER_DARK_FIT] block={block_name} r={r} col={col_idx} source={('small_lower_dark_groove_line' if accepted else 'failed')} n_clean={n_clean} coverage={coverage:.3f} residual={residual_std:.3f} angle={angle_diff:.3f} shift={center_shift:.3f} accepted={('true' if accepted else 'false')} reason={reason}")
+                    if accepted:
+                        lines_dict[r, col_idx] = {'support_line_m': float(m_fit2), 'support_line_c': float(c_fit2), 'source': 'small_lower_dark_groove_line', 'clean_pts': [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)], 'coverage': coverage, 'residual': residual_std, 'angle_diff': angle_diff, 'n_pts': n_clean, 'center_shift': center_shift, 'pitch_ok': True}
+                else:
+                    n_min_pts = max(5, int(round(0.35 * len(sample_xs))))
+                    fit_ok = len(pts_scanned) >= n_min_pts
+                    if fit_ok:
+                        xs_h = np.array([pt[0] for pt in pts_scanned])
+                        ys_h = np.array([pt[1] for pt in pts_scanned])
+                        m_fit, c_fit = np.polyfit(xs_h, ys_h, 1)
+                        res = ys_h - (m_fit * xs_h + c_fit)
+                        med_res = np.median(res)
+                        devs = np.abs(res - med_res)
+                        mad = np.median(devs)
+                        keep = devs <= max(1.5, 2.0 * mad)
+                        xs_clean = xs_h[keep]
+                        ys_clean = ys_h[keep]
+                        fit_ok_2 = len(xs_clean) >= n_min_pts
+                        if fit_ok_2:
+                            m_fit2, c_fit2 = np.polyfit(xs_clean, ys_clean, 1)
+                            res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                            residual_std = np.std(res_fit2)
+                            bins = np.linspace(xL, xR, 9)
+                            bin_indices = np.digitize(xs_clean, bins) - 1
+                            unique_bins = np.unique(bin_indices[(bin_indices >= 0) & (bin_indices < 8)])
+                            coverage = len(unique_bins) / 8.0
+                            angle_fit = np.degrees(math.atan(m_fit2))
+                            angle_prior = np.degrees(math.atan(m_prior))
+                            angle_diff = abs(angle_fit - angle_prior)
+                            while angle_diff > 90:
+                                angle_diff = abs(angle_diff - 180)
+                            source_fit = 'small_support_points_line'
+                            _angle_clamp = 2.5
+                            if angle_diff > _angle_clamp:
+                                m_fit2 = m_prior
+                                c_fit2 = float(np.median(ys_clean - m_prior * xs_clean))
+                                res_fit2 = ys_clean - (m_fit2 * xs_clean + c_fit2)
+                                residual_std = np.std(res_fit2)
+                                angle_diff = 0.0
+                                source_fit = 'small_pitch_clamped_support'
+                            accept = coverage >= 0.3 and residual_std <= 2.0 and (angle_diff <= 2.5)
+                            if accept:
+                                m_final, c_final, source, pitch_ok = enforce_line_constraints(r, col_idx, m_fit2, c_fit2, source_fit)
+                                center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                                lines_dict[r, col_idx] = {'support_line_m': float(m_final), 'support_line_c': float(c_final), 'source': source, 'clean_pts': [(float(x), float(y)) for x, y in zip(xs_clean, ys_clean)], 'coverage': coverage, 'residual': residual_std, 'angle_diff': angle_diff, 'n_pts': len(xs_clean), 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                                _clamp_str = 'yes' if source == 'small_pitch_clamped_support' else 'no'
+                                print(f'[SMALL_LINE_REG] block={block_name} r={r} col={col_idx} source={source} n={len(xs_clean)} cov={coverage:.3f} res={residual_std:.3f} angle={angle_diff:.3f} clamp={_clamp_str}')
+        if n_cols == 2:
+            for r in range(n_rows + 1):
+                if (r, 0) in lines_dict and (r, 1) not in lines_dict:
+                    m_borrow = lines_dict[r, 0]['support_line_m']
+                    P_mid = priors_dict[r, 1]['P_mid']
+                    c_borrow = P_mid[1] - m_borrow * P_mid[0]
+                    n_support = len(support_pts_scanned[r, 1])
+                    delta = 0.0
+                    if n_support >= 3:
+                        xs_s = np.array([pt[0] for pt in support_pts_scanned[r, 1]])
+                        ys_s = np.array([pt[1] for pt in support_pts_scanned[r, 1]])
+                        res = ys_s - (m_borrow * xs_s + c_borrow)
+                        delta = float(np.median(res))
+                        delta = max(-1.25, min(1.25, delta))
+                        c_borrow += delta
+                    m_final, c_final, source, pitch_ok = enforce_line_constraints(r, 1, m_borrow, c_borrow, 'small_borrow_neighbor_line')
+                    center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                    lines_dict[r, 1] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': source, 'clean_pts': support_pts_scanned[r, 1] if n_support >= 3 else [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                    print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col=1 source={source} n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+                elif (r, 1) in lines_dict and (r, 0) not in lines_dict:
+                    m_borrow = lines_dict[r, 1]['support_line_m']
+                    P_mid = priors_dict[r, 0]['P_mid']
+                    c_borrow = P_mid[1] - m_borrow * P_mid[0]
+                    n_support = len(support_pts_scanned[r, 0])
+                    delta = 0.0
+                    if n_support >= 3:
+                        xs_s = np.array([pt[0] for pt in support_pts_scanned[r, 0]])
+                        ys_s = np.array([pt[1] for pt in support_pts_scanned[r, 0]])
+                        res = ys_s - (m_borrow * xs_s + c_borrow)
+                        delta = float(np.median(res))
+                        delta = max(-1.25, min(1.25, delta))
+                        c_borrow += delta
+                    m_final, c_final, source, pitch_ok = enforce_line_constraints(r, 0, m_borrow, c_borrow, 'small_borrow_neighbor_line')
+                    center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                    lines_dict[r, 0] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': source, 'clean_pts': support_pts_scanned[r, 0] if n_support >= 3 else [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                    print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col=0 source={source} n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+        for r in range(n_rows + 1):
+            for col_idx in range(n_cols):
+                if (r, col_idx) not in lines_dict:
+                    inherited = False
+                    for dr in [-1, 1, -2, 2, -3, 3]:
+                        neighbor_r = r + dr
+                        if 0 <= neighbor_r <= n_rows:
+                            found_m = None
+                            found_from_r = neighbor_r
+                            for c_cand in range(n_cols):
+                                if (neighbor_r, c_cand) in lines_dict:
+                                    info = lines_dict[neighbor_r, c_cand]
+                                    if info['source'] in ('small_support_points_line', 'small_borrow_neighbor_line', 'small_pitch_clamped_support'):
+                                        found_m = info['support_line_m']
+                                        break
+                            if found_m is not None:
+                                P_mid = priors_dict[r, col_idx]['P_mid']
+                                c_inherit = P_mid[1] - found_m * P_mid[0]
+                                n_support = len(support_pts_scanned[r, col_idx])
+                                delta = 0.0
+                                if n_support >= 3:
+                                    xs_s = np.array([pt[0] for pt in support_pts_scanned[r, col_idx]])
+                                    ys_s = np.array([pt[1] for pt in support_pts_scanned[r, col_idx]])
+                                    res = ys_s - (found_m * xs_s + c_inherit)
+                                    delta = float(np.median(res))
+                                    delta = max(-1.25, min(1.25, delta))
+                                    c_inherit += delta
+                                m_final, c_final, source, pitch_ok = enforce_line_constraints(r, col_idx, found_m, c_inherit, 'small_neighbor_inherit')
+                                center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                                lines_dict[r, col_idx] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': source, 'clean_pts': support_pts_scanned[r, col_idx] if n_support >= 3 else [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                                print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source={source} n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+                                inherited = True
+                                break
+                    if not inherited:
+                        m_fallback = priors_dict[r, col_idx]['m']
+                        c_candidate = priors_dict[r, col_idx]['c']
+                        P_mid = priors_dict[r, col_idx]['P_mid']
+                        n_support = len(support_pts_scanned[r, col_idx])
+                        if n_support >= 3:
+                            xs_s = np.array([pt[0] for pt in support_pts_scanned[r, col_idx]])
+                            ys_s = np.array([pt[1] for pt in support_pts_scanned[r, col_idx]])
+                            c_candidate = float(np.median(ys_s - m_fallback * xs_s))
+                        m_final, c_final, source, pitch_ok = enforce_line_constraints(r, col_idx, m_fallback, c_candidate, 'small_pitch_clamped_support')
+                        center_shift = abs(m_final * P_mid[0] + c_final - P_mid[1])
+                        lines_dict[r, col_idx] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': 'small_pitch_clamped_support', 'clean_pts': support_pts_scanned[r, col_idx], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': n_support, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                        print(f'[SMALL_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source=small_pitch_clamped_support n={n_support} coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+        if is_lower_small_block:
+            for col_idx in range(n_cols):
+                r0_weak = True
+                if (0, col_idx) in lines_dict:
+                    g0 = lines_dict[0, col_idx]
+                    if g0['source'] in ('small_support_points_line', 'small_borrow_neighbor_line') and g0.get('n_pts', 0) >= 3:
+                        r0_weak = False
+                if r0_weak:
+                    if (1, col_idx) in lines_dict:
+                        g1 = lines_dict[1, col_idx]
+                        if g1['source'] in ('small_support_points_line', 'small_borrow_neighbor_line'):
+                            m_extrap = g1['support_line_m']
+                            P_mid_0 = priors_dict[0, col_idx]['P_mid']
+                            c_extrap = g1['support_line_c'] - median_pitch
+                            m_final, c_final, source, pitch_ok = enforce_line_constraints(0, col_idx, m_extrap, c_extrap, 'small_pitch_clamped_support')
+                            center_shift = abs(m_final * P_mid_0[0] + c_final - P_mid_0[1])
+                            lines_dict[0, col_idx] = {'support_line_m': m_final, 'support_line_c': c_final, 'source': 'small_pitch_clamped_support', 'clean_pts': [], 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'n_pts': 0, 'center_shift': center_shift, 'pitch_ok': pitch_ok}
+                            print(f'[SMALL_SUPPORT_LINE] block={block_name} r=0 col={col_idx} source=small_pitch_clamped_support n=0 coverage=0.000 residual=0.000 angle_diff=0.000 center_shift={center_shift:.3f} pitch_ok={pitch_ok}')
+        if is_lower_small_block and n_rows > 1:
+            real_slopes = [lines_dict[r, ci]['support_line_m'] for r in range(n_rows + 1) for ci in range(n_cols) if (r, ci) in lines_dict and lines_dict[r, ci]['source'] == 'small_support_points_line']
+            if len(real_slopes) >= 2:
+                med_slope_block = float(np.median(real_slopes))
+                for r in range(n_rows + 1):
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict:
+                            info = lines_dict[r, ci]
+                            if info['source'] == 'small_support_points_line':
+                                cur_angle = np.degrees(math.atan(info['support_line_m']))
+                                med_angle = np.degrees(math.atan(med_slope_block))
+                                if abs(cur_angle - med_angle) > 1.5:
+                                    P_mid = priors_dict[r, ci]['P_mid']
+                                    y_at_mid = info['support_line_m'] * P_mid[0] + info['support_line_c']
+                                    c_reg = y_at_mid - med_slope_block * P_mid[0]
+                                    lines_dict[r, ci]['support_line_m'] = med_slope_block
+                                    lines_dict[r, ci]['support_line_c'] = c_reg
+                                    lines_dict[r, ci]['source'] = 'small_regularized_support_line'
+        if is_lower_small_block and n_rows > 1:
+            _REAL = ('small_lower_dark_groove_line', 'small_lower_support_points_line', 'small_regularized_support_line')
+            _x_center_col = {}
+            for ci in range(n_cols):
+                _lr = boundaries['left_boundary'] if ci == 0 else boundaries['middle_boundary']
+                _rr = boundaries['middle_boundary'] if ci == 0 and n_cols == 2 else boundaries['right_boundary']
+                _ys = (y_min_local + y_max_local) / 2.0
+                _x_center_col[ci] = (V42__get_boundary_x_at_y(_lr, _ys) + V42__get_boundary_x_at_y(_rr, _ys)) / 2.0
+            if n_rows > 1:
+                _real_ms = []
+                for r in range(n_rows + 1):
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict and lines_dict[r, ci]['source'] in _REAL:
+                            _info = lines_dict[r, ci]
+                            if _info.get('n_pts', 0) >= 3:
+                                _real_ms.append(_info['support_line_m'])
+                if not _real_ms:
+                    m_block = priors_dict[0, 0]['m']
+                else:
+                    m_block = float(np.median(_real_ms))
+                _y_evidence = {}
+                for r in range(n_rows + 1):
+                    _y_evidence[r] = []
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict and lines_dict[r, ci]['source'] in _REAL:
+                            _info = lines_dict[r, ci]
+                            if _info.get('n_pts', 0) >= 3:
+                                _xc = _x_center_col[ci]
+                                _y_evidence[r].append(_info['support_line_m'] * _xc + _info['support_line_c'])
+                y_row = {}
+                for r in range(n_rows + 1):
+                    if _y_evidence[r]:
+                        y_row[r] = float(np.median(_y_evidence[r]))
+                _sorted_real_r = sorted(y_row.keys())
+                _pitches_real = [y_row[_sorted_real_r[i + 1]] - y_row[_sorted_real_r[i]] for i in range(len(_sorted_real_r) - 1) if y_row[_sorted_real_r[i + 1]] > y_row[_sorted_real_r[i]]]
+                _med_pitch = float(np.median(_pitches_real)) if _pitches_real else median_pitch
+                _n_real_rows = len(_pitches_real) + 1 if _pitches_real else 0
+                _real_evidence = sum((len(v) for v in _y_evidence.values()))
+                has_real_lower_grid = _n_real_rows >= 1 and _real_evidence >= 3
+                for r in range(n_rows + 1):
+                    if r not in y_row:
+                        for delta in range(1, n_rows + 2):
+                            if r - delta in y_row:
+                                y_row[r] = y_row[r - delta] + _med_pitch * delta
+                                break
+                            if r + delta in y_row:
+                                y_row[r] = y_row[r + delta] - _med_pitch * delta
+                                break
+                        else:
+                            y_row[r] = priors_dict[r, 0]['P_mid'][1]
+                for r in range(n_rows):
+                    _p = y_row[r + 1] - y_row[r]
+                    if not 0.75 * _med_pitch <= _p <= 1.25 * _med_pitch:
+                        y_row[r + 1] = y_row[r] + _med_pitch
+                grid_source = 'small_block_grid_line' if has_real_lower_grid else 'small_prior_grid_line'
+                for r in range(n_rows + 1):
+                    for ci in range(n_cols):
+                        _xc = _x_center_col[ci]
+                        c_grid = y_row[r] - m_block * _xc
+                        old_src = lines_dict[r, ci]['source'] if (r, ci) in lines_dict else 'missing'
+                        _npts = lines_dict[r, ci].get('n_pts', 0) if (r, ci) in lines_dict else 0
+                        if old_src != grid_source:
+                            print(f'[SMALL_RAW_SUPPRESSED] block={block_name} r={r} col={ci} old_source={old_src} reason=block_grid_line_only')
+                        stats = support_stats.get((r, ci), {'sample_n': 0, 'raw_pts': 0, 'kept_pts': 0, 'rejected_ground': 0, 'rejected_shift': 0, 'rejected_warmth': 0, 'rejected_dark': 0, 'rejected_samples': []})
+                        print(f"[LOWER_SUPPORT_STATS] block={block_name} r={r} col={ci} sample_n={stats['sample_n']} raw_pts={stats['raw_pts']} kept_pts={stats['kept_pts']} rejected_ground={stats['rejected_ground']} rejected_shift={stats['rejected_shift']} rejected_warmth={stats['rejected_warmth']} rejected_dark={stats['rejected_dark']} source={old_src}")
+                        _max_dist = 3 if r == 0 or r == n_rows else 5
+                        _warmth_thresh = 135
+                        print(f"[LOWER_SUPPORT_REASON] block={block_name} r={r} col={ci} kept={stats['kept_pts']} reject_shift={stats['rejected_shift']} reject_warmth={stats['rejected_warmth']} reject_ground={stats['rejected_ground']} max_dist={_max_dist} warmth_threshold={_warmth_thresh}")
+                        if stats['kept_pts'] == 0 and stats['raw_pts'] > 0:
+                            for sample in stats.get('rejected_samples', [])[:5]:
+                                print(f"[LOWER_REJECT_SAMPLE] block={block_name} r={r} col={ci} sx={sample['sx']:.3f} y={sample['y']:.3f} best_dist={sample['best_dist']} reason={sample['reason']} profile_min={sample['profile_min']} profile_left_warm={sample['profile_left_warm']} profile_right_warm={sample['profile_right_warm']}")
+                        lines_dict[r, ci] = {'support_line_m': float(m_block), 'support_line_c': float(c_grid), 'source': grid_source, 'n_pts': _npts, 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'clean_pts': [], 'center_shift': abs(y_row[r] - priors_dict[r, ci]['P_mid'][1]), 'pitch_ok': True}
+                _y_vals = [f'r{r}={y_row[r]:.1f}' for r in sorted(y_row)]
+                _has_grid_str = 'true' if has_real_lower_grid else 'false'
+                print(f"[LOWER_GRID] block={block_name} has_real_grid={_has_grid_str} n_real_rows={_n_real_rows} real_evidence={_real_evidence} y_boundaries=[{', '.join(_y_vals)}] median_pitch={_med_pitch:.2f} m_block={m_block:.6f}")
+            else:
+                _real_evidence = 0
+                for r in (0, 1):
+                    for ci in range(n_cols):
+                        if (r, ci) in lines_dict and lines_dict[r, ci]['source'] in _REAL:
+                            _real_evidence += 1
+                has_real_lower_grid = _real_evidence >= 1
+                for r in (0, 1):
+                    for ci in range(n_cols):
+                        stats = support_stats.get((r, ci), {'sample_n': 0, 'raw_pts': 0, 'kept_pts': 0, 'rejected_ground': 0, 'rejected_shift': 0, 'rejected_warmth': 0, 'rejected_dark': 0, 'rejected_samples': []})
+                        old_src = lines_dict[r, ci]['source'] if (r, ci) in lines_dict else 'missing'
+                        _npts = lines_dict[r, ci].get('n_pts', 0) if (r, ci) in lines_dict else 0
+                        if (r, ci) in lines_dict and old_src in _REAL:
+                            m_val = lines_dict[r, ci]['support_line_m']
+                            c_val = lines_dict[r, ci]['support_line_c']
+                            grid_source = 'small_block_grid_line'
+                        else:
+                            m_val = priors_dict[r, ci]['m']
+                            c_val = priors_dict[r, ci]['c']
+                            grid_source = 'small_prior_grid_line'
+                        lines_dict[r, ci] = {'support_line_m': float(m_val), 'support_line_c': float(c_val), 'source': grid_source, 'n_pts': _npts, 'coverage': 0.0, 'residual': 0.0, 'angle_diff': 0.0, 'clean_pts': [], 'center_shift': abs(m_val * priors_dict[r, ci]['P_mid'][0] + c_val - priors_dict[r, ci]['P_mid'][1]), 'pitch_ok': True}
+                        print(f"[LOWER_SUPPORT_STATS] block={block_name} r={r} col={ci} sample_n={stats['sample_n']} raw_pts={stats['raw_pts']} kept_pts={stats['kept_pts']} rejected_ground={stats['rejected_ground']} rejected_shift={stats['rejected_shift']} rejected_warmth={stats['rejected_warmth']} rejected_dark={stats['rejected_dark']} source={old_src}")
+                        _max_dist = 3 if r == 0 or r == n_rows else 5
+                        _warmth_thresh = 135
+                        print(f"[LOWER_SUPPORT_REASON] block={block_name} r={r} col={ci} kept={stats['kept_pts']} reject_shift={stats['rejected_shift']} reject_warmth={stats['rejected_warmth']} reject_ground={stats['rejected_ground']} max_dist={_max_dist} warmth_threshold={_warmth_thresh}")
+                        if stats['kept_pts'] == 0 and stats['raw_pts'] > 0:
+                            for sample in stats.get('rejected_samples', [])[:5]:
+                                print(f"[LOWER_REJECT_SAMPLE] block={block_name} r={r} col={ci} sx={sample['sx']:.3f} y={sample['y']:.3f} best_dist={sample['best_dist']} reason={sample['reason']} profile_min={sample['profile_min']} profile_left_warm={sample['profile_left_warm']} profile_right_warm={sample['profile_right_warm']}")
+                _y_vals = []
+                for r in (0, 1):
+                    y_center = lines_dict[r, 0]['support_line_m'] * priors_dict[r, 0]['P_mid'][0] + lines_dict[r, 0]['support_line_c']
+                    _y_vals.append(f'r{r}={y_center:.1f}')
+                _has_grid_str = 'true' if has_real_lower_grid else 'false'
+                _pitch_val = abs(lines_dict[1, 0]['support_line_c'] - lines_dict[0, 0]['support_line_c'])
+                print(f"[LOWER_GRID] block={block_name} has_real_grid={_has_grid_str} n_real_rows={(1 if has_real_lower_grid else 0)} real_evidence={_real_evidence} y_boundaries=[{', '.join(_y_vals)}] median_pitch={_pitch_val:.2f} m_block={lines_dict[0, 0]['support_line_m']:.6f}")
+    horiz_endpoints = {}
+    for r in range(n_rows + 1):
+        for col in range(n_cols):
+            info = lines_dict[r, col]
+            m = info['support_line_m']
+            c = info['support_line_c']
+            source = info['source']
+            left_rail = boundaries['left_boundary'] if col == 0 else boundaries['middle_boundary']
+            right_rail = boundaries['middle_boundary'] if col == 0 and n_cols == 2 else boundaries['right_boundary']
+            P_L = V42__intersect_line_y_eq_mx_c_with_polyline(m, c, left_rail)
+            if P_L is None:
+                y_ref = m * priors_dict[r, col]['P_mid'][0] + c
+                xL_val = V42__get_boundary_x_at_y(left_rail, y_ref)
+                P_L = (xL_val, y_ref)
+            P_R = V42__intersect_line_y_eq_mx_c_with_polyline(m, c, right_rail)
+            if P_R is None:
+                y_ref = m * priors_dict[r, col]['P_mid'][0] + c
+                xR_val = V42__get_boundary_x_at_y(right_rail, y_ref)
+                P_R = (xR_val, y_ref)
+            horiz_endpoints[r, col] = {'L': P_L, 'R': P_R}
+            if is_lower_small_block and V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG is not None:
+                m_prior = priors_dict[r, col]['m']
+                c_prior = priors_dict[r, col]['c']
+                P_mid_pr = priors_dict[r, col]['P_mid']
+                xL_pr = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, left_rail)
+                xL_val_pr = xL_pr[0] if xL_pr is not None else V42__get_boundary_x_at_y(left_rail, P_mid_pr[1])
+                xR_pr = V42__intersect_line_y_eq_mx_c_with_polyline(m_prior, c_prior, right_rail)
+                xR_val_pr = xR_pr[0] if xR_pr is not None else V42__get_boundary_x_at_y(right_rail, P_mid_pr[1])
+                P_L_pr_orig = transform_local_to_orig(xL_val_pr, m_prior * xL_val_pr + c_prior)
+                P_R_pr_orig = transform_local_to_orig(xR_val_pr, m_prior * xR_val_pr + c_prior)
+                cv2.line(V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, (int(round(P_L_pr_orig[0])), int(round(P_L_pr_orig[1]))), (int(round(P_R_pr_orig[0])), int(round(P_R_pr_orig[1]))), (180, 180, 180), 1, lineType=cv2.LINE_AA)
+                if source == 'small_block_grid_line':
+                    P_L_orig = transform_local_to_orig(P_L[0], P_L[1])
+                    P_R_orig = transform_local_to_orig(P_R[0], P_R[1])
+                    cv2.line(V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (255, 0, 255), 1, lineType=cv2.LINE_AA)
+            _draw_this_line = False
+            _draw_reason = 'source_not_drawable'
+            if is_lower_small_block:
+                _valid_magenta_sources = {'small_lower_dark_groove_line', 'small_lower_support_points_line', 'small_regularized_support_line'}
+                if source in _valid_magenta_sources:
+                    _draw_this_line = True
+                    _draw_reason = 'lower_support_line'
+                else:
+                    _draw_this_line = False
+                    _draw_reason = f'suppressed:{source}'
+                    if source == 'small_prior_grid_line':
+                        print(f'[LOWER_LINE_DRAW] block={block_name} r={r} col={col} source=small_prior_grid_line reason=suppressed_prior')
+                    else:
+                        print(f'[SMALL_RAW_SUPPRESSED] block={block_name} r={r} col={col} source={source} reason=use_clean_line_only')
+            else:
+                _no_draw_sources = {'pure_yolo', 'yolo', 'prior', 'fallback', 'small_yolo', 'small_prior'}
+                if source in ('small_support_points_line', 'small_regularized_support_line'):
+                    _draw_this_line = True
+                    _draw_reason = 'real_support'
+                elif source in ('small_borrow_neighbor_line', 'small_neighbor_inherit', 'small_pitch_clamped_support'):
+                    _n = info.get('n_pts', 0)
+                    if info.get('support_line_m') is not None and _n >= 3:
+                        _draw_this_line = True
+                        _draw_reason = f'borrowed_support_n={_n}'
+                    else:
+                        _draw_reason = f'support_too_weak_n={_n}'
+                elif source in _no_draw_sources:
+                    _draw_reason = f'blocked_source={source}'
+            if is_lower_small_block:
+                _cov = info.get('coverage', 0.0)
+                _res = info.get('residual', 0.0)
+                _ang = info.get('angle_diff', 0.0)
+                _n2 = info.get('n_pts', 0)
+                print(f"[SMALL_LINE_DECISION] block={block_name} r={r} col={col} source={source} n_pts={_n2} cov={_cov:.3f} res={_res:.3f} angle={_ang:.3f} draw={('true' if _draw_this_line else 'false')} reason={_draw_reason}")
+            if _draw_this_line:
+                print(f'[SMALL_DRAW_LINE] block={block_name} r={r} col={col} source={source} xL={P_L[0]:.3f} yL={P_L[1]:.3f} xR={P_R[0]:.3f} yR={P_R[1]:.3f}')
+                dx = P_R[0] - P_L[0]
+                dy = P_R[1] - P_L[1]
+                length = math.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    ux = dx / length
+                    uy = dy / length
+                    P_L_ext = (P_L[0] - 2.0 * ux, P_L[1] - 2.0 * uy)
+                    P_R_ext = (P_R[0] + 2.0 * ux, P_R[1] + 2.0 * uy)
+                else:
+                    P_L_ext = P_L
+                    P_R_ext = P_R
+                P_L_orig = transform_local_to_orig(P_L_ext[0], P_L_ext[1])
+                P_R_orig = transform_local_to_orig(P_R_ext[0], P_R_ext[1])
+                if is_lower_small_block and source == 'small_prior_grid_line':
+                    cv2.line(img_support, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (180, 180, 180), 1)
+                else:
+                    cv2.line(img_snap, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (255, 0, 255), 1)
+                    cv2.line(img_support, (int(round(P_L_orig[0])), int(round(P_L_orig[1]))), (int(round(P_R_orig[0])), int(round(P_R_orig[1]))), (255, 0, 255), 1)
+                if not (is_lower_small_block and source == 'small_prior_grid_line'):
+                    for pt in info.get('clean_pts', []):
+                        pt_orig = transform_local_to_orig(pt[0], pt[1])
+                        cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+    proposals = {}
+    for (row, col), p in grid_panels.items():
+        TL = horiz_endpoints[row, col]['L']
+        TR = horiz_endpoints[row, col]['R']
+        BR = horiz_endpoints[row + 1, col]['R']
+        BL = horiz_endpoints[row + 1, col]['L']
+        proposals[row, col] = [TL, TR, BR, BL]
+    final_polys = {}
+    final_sources = {}
+    final_reasons = {}
+    for (row, col), p in grid_panels.items():
+        poly_prop = proposals[row, col]
+        poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+        valid_rail_sources_geometry = ('direct_support', 'foreground_edge', 'foreground_edge_line', 'left_crop_foreground_edge', 'vertical_support_line', 'borrowed_slope_with_local_anchor', 'neighbor_inherit_with_local_anchor', 'left_crop_image_boundary', 'pure_yolo')
+        if is_lower_small_block:
+            valid_line_sources = ('small_block_grid_line', 'small_prior_grid_line')
+        else:
+            valid_line_sources = ('small_support_points_line', 'small_borrow_neighbor_line', 'small_neighbor_inherit', 'small_pitch_clamped_support', 'small_clean_support_line', 'small_regularized_support_line')
+        left_rail_name = 'left' if col == 0 else 'middle'
+        right_rail_name = 'middle' if col == 0 and n_cols == 2 else 'right'
+        left_src = rail_sources.get(left_rail_name, 'missing')
+        right_src = rail_sources.get(right_rail_name, 'missing')
+        top_src = lines_dict[row, col]['source'] if (row, col) in lines_dict else 'missing'
+        bot_src = lines_dict[row + 1, col]['source'] if (row + 1, col) in lines_dict else 'missing'
+        left_ok = left_src in valid_rail_sources_geometry
+        right_ok = right_src in valid_rail_sources_geometry
+        top_ok = top_src in valid_line_sources
+        bottom_ok = bot_src in valid_line_sources
+        if is_lower_small_block:
+            print(f'[LOWER_EDGE_CHECK] block={block_name} row={row} col={col} top_exists={(row, col) in lines_dict} top_source={top_src} valid_top={top_ok} bottom_exists={(row + 1, col) in lines_dict} bottom_source={bot_src} valid_bottom={bottom_ok} left_exists={left_rail_name in rail_sources} left_source={left_src} valid_left={left_ok} right_exists={right_rail_name in rail_sources} right_source={right_src} valid_right={right_ok}')
+        edges_ok = left_ok and right_ok and top_ok and bottom_ok
+        is_valid = True
+        reason = ''
+        if not edges_ok:
+            is_valid = False
+            if not top_ok:
+                reason = f'missing_top_line:{top_src}'
+            elif not bottom_ok:
+                reason = f'missing_bottom_line:{bot_src}'
+            elif not left_ok:
+                reason = f'missing_left_rail:{left_src}'
+            else:
+                reason = f'missing_right_rail:{right_src}'
+        else:
+            TL_new, TR_new, BR_new, BL_new = V42__sort_panel_corners(poly_prop)
+            w_prop = math.sqrt((TR_new[0] - TL_new[0]) ** 2 + (TR_new[1] - TL_new[1]) ** 2)
+            h_prop = math.sqrt((BL_new[0] - TL_new[0]) ** 2 + (BL_new[1] - TL_new[1]) ** 2)
+            if w_prop <= 0 or h_prop <= 0:
+                is_valid = False
+                reason = 'zero_size'
+            else:
+                is_convex = cv2.isContourConvex(np.array(poly_prop, dtype=np.float32).astype(np.int32))
+                area_prop = cv2.contourArea(np.array(poly_prop, dtype=np.float32))
+                area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+                area_ratio = area_prop / (area_yolo + 1e-06)
+                cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+                cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+                TL_yolo, TR_yolo, BR_yolo, BL_yolo = V42__sort_panel_corners(poly_init)
+                cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+                cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+                center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+                panel_height = math.sqrt((BL_yolo[0] - TL_yolo[0]) ** 2 + (BL_yolo[1] - TL_yolo[1]) ** 2)
+                if not is_convex:
+                    is_valid = False
+                    reason = 'not_convex'
+                elif is_lower_small_block and (not 0.65 <= area_ratio <= 1.35):
+                    is_valid = False
+                    reason = f'area_ratio_{area_ratio:.2f}'
+                elif not is_lower_small_block and (not 0.65 <= area_ratio <= 1.4):
+                    is_valid = False
+                    reason = f'area_ratio_{area_ratio:.2f}'
+                elif is_lower_small_block and center_shift > max(10.0, 0.4 * panel_height):
+                    is_valid = False
+                    reason = f'center_shift_{center_shift:.2f}'
+                elif not is_lower_small_block and center_shift > max(10.0, 0.45 * panel_height):
+                    is_valid = False
+                    reason = f'center_shift_{center_shift:.2f}'
+                if is_valid and is_lower_small_block:
+                    y_t = lines_dict[row, col]['support_line_m'] * priors_dict[row, col]['P_mid'][0] + lines_dict[row, col]['support_line_c']
+                    y_b = lines_dict[row + 1, col]['support_line_m'] * priors_dict[row + 1, col]['P_mid'][0] + lines_dict[row + 1, col]['support_line_c']
+                    if y_t >= y_b:
+                        is_valid = False
+                        reason = 'non_monotonic_pitch'
+                    y_mid = (y_min_local + y_max_local) / 2.0
+                    x_left = V42__get_boundary_x_at_y(boundaries['left_boundary'], y_mid)
+                    x_right = V42__get_boundary_x_at_y(boundaries['right_boundary'], y_mid)
+                    if n_cols == 2:
+                        x_middle = V42__get_boundary_x_at_y(boundaries['middle_boundary'], y_mid)
+                        if not x_left < x_middle < x_right:
+                            is_valid = False
+                            reason = 'invalid_rail_ordering'
+                    elif not x_left < x_right:
+                        is_valid = False
+                        reason = 'invalid_rail_ordering'
+        if is_valid:
+            final_polys[row, col] = poly_prop
+            if is_lower_small_block:
+                top_src = lines_dict[row, col]['source'] if (row, col) in lines_dict else 'missing'
+                bot_src = lines_dict[row + 1, col]['source'] if (row + 1, col) in lines_dict else 'missing'
+                if top_src == 'small_prior_grid_line' or bot_src == 'small_prior_grid_line':
+                    final_sources[row, col] = 'lower_prior_grid'
+                    final_reasons[row, col] = 'valid_prior_grid'
+                else:
+                    final_sources[row, col] = 'lower_micro_grid'
+                    final_reasons[row, col] = 'valid_refine'
+                print(f'[LOWER_PANEL_SOURCE] block={block_name} row={row} col={col} source={final_sources[row, col]} reason={final_reasons[row, col]} top_source={top_src} bottom_source={bot_src}')
+            else:
+                final_sources[row, col] = 'snap_grid'
+                final_reasons[row, col] = 'valid_refine'
+        else:
+            final_polys[row, col] = poly_init
+            final_sources[row, col] = 'fallback_yolo'
+            final_reasons[row, col] = reason if reason else 'boundary_failed'
+            if is_lower_small_block:
+                if n_rows == 1:
+                    print(f'[SINGLE_ROW_PANEL] block={block_name} row={row} col={col} source=fallback reason={reason}')
+                else:
+                    _area_r = 'n/a'
+                    _shift_r = 'n/a'
+                    try:
+                        _area_r = f'{cv2.contourArea(np.array(poly_prop, dtype=np.float32)) / (cv2.contourArea(np.array(poly_init, dtype=np.float32)) + 1e-06):.3f}'
+                        TL_fb, TR_fb, BR_fb, BL_fb = V42__sort_panel_corners(poly_prop)
+                        cx_fb = (TL_fb[0] + TR_fb[0] + BR_fb[0] + BL_fb[0]) / 4.0
+                        cy_fb = (TL_fb[1] + TR_fb[1] + BR_fb[1] + BL_fb[1]) / 4.0
+                        TLy, TRy, BRy, BLy = V42__sort_panel_corners(poly_init)
+                        cxy = (TLy[0] + TRy[0] + BRy[0] + BLy[0]) / 4.0
+                        cyy = (TLy[1] + TRy[1] + BRy[1] + BLy[1]) / 4.0
+                        _shift_r = f'{math.sqrt((cx_fb - cxy) ** 2 + (cy_fb - cyy) ** 2):.2f}'
+                    except Exception:
+                        pass
+                    print(f'[LOWER_PANEL_FALLBACK] block={block_name} row={row} col={col} reason={reason} area_ratio={_area_r} shift={_shift_r}')
+
+    def get_iou(p1, p2):
+        poly1 = np.array(p1, dtype=np.float32)
+        poly2 = np.array(p2, dtype=np.float32)
+        inter_area = V42__get_polygon_intersection_area(poly1, poly2)
+        area1 = cv2.contourArea(poly1)
+        area2 = cv2.contourArea(poly2)
+        union_area = area1 + area2 - inter_area
+        return inter_area / union_area if union_area > 0.0 else 0.0
+    for row1, col1 in grid_panels.keys():
+        if final_sources[row1, col1] == 'snap_grid':
+            for row2, col2 in grid_panels.keys():
+                if (row1, col1) != (row2, col2):
+                    iou = get_iou(final_polys[row1, col1], final_polys[row2, col2])
+                    if iou > 0.03:
+                        final_polys[row1, col1] = V42__get_local_yolo_polygon_prior(grid_panels[row1, col1]['orig_ref'], transform_orig_to_local)
+                        final_sources[row1, col1] = 'fallback_yolo'
+                        final_reasons[row1, col1] = 'overlap_fallback'
+                        break
+    for (row, col), p in grid_panels.items():
+        src = final_sources[row, col]
+        source_str = src if src in ('snap_grid', 'lower_micro_grid', 'lower_prior_grid', 'single_row_edge_grid') else 'fallback'
+        print(f'[SMALL_PANEL_BUILD] block={block_name} row={row} col={col} source={source_str} reason={final_reasons[row, col]}')
+    panels_result = []
+    for (row, col), p in grid_panels.items():
+        poly_final = final_polys[row, col]
+        source = final_sources[row, col]
+        reason = final_reasons[row, col]
+        max_overlap_iou = 0.0
+        for (other_row, other_col), other_poly in final_polys.items():
+            if (row, col) != (other_row, other_col):
+                iou = get_iou(poly_final, other_poly)
+                if iou > max_overlap_iou:
+                    max_overlap_iou = iou
+        TL_new, TR_new, BR_new, BL_new = V42__sort_panel_corners(poly_final)
+        cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+        cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+        poly_init = V42__get_local_yolo_polygon_prior(p['orig_ref'], transform_orig_to_local)
+        TL_yolo, TR_yolo, BR_yolo, BL_yolo = V42__sort_panel_corners(poly_init)
+        cx_yolo = (TL_yolo[0] + TR_yolo[0] + BR_yolo[0] + BL_yolo[0]) / 4.0
+        cy_yolo = (TL_yolo[1] + TR_yolo[1] + BR_yolo[1] + BL_yolo[1]) / 4.0
+        center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+        area_prop = cv2.contourArea(np.array(poly_final, dtype=np.float32))
+        area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+        area_ratio = area_prop / (area_yolo + 1e-06)
+        anchors = V42__get_panel_hybrid_anchors(p['orig_ref'])
+        panels_result.append({'col': col, 'row': row, 'polygon': poly_final, 'quality': 'fallback' if source == 'fallback_yolo' else 'pass', 'source': source, 'reason': reason, 'shift': center_shift, 'area_ratio': area_ratio, 'overlap': max_overlap_iou, 'orig_p': p['orig_ref'], 'anchors': anchors})
+    return panels_result
+
+def V42__refine_crop_left_panel_individually(rotated_gray, p_local, block_name, row_idx, row_count, img_support, img_snap, transform_info):
+    Minv = transform_info['rot_M_inv']
+    roi_x1 = transform_info['roi_x1']
+    roi_y1 = transform_info['roi_y1']
+    M = cv2.invertAffineTransform(Minv)
+
+    def transform_local_to_orig(x_local, y_local):
+        x_rel = Minv[0, 0] * float(x_local) + Minv[0, 1] * float(y_local) + Minv[0, 2]
+        y_rel = Minv[1, 0] * float(x_local) + Minv[1, 1] * float(y_local) + Minv[1, 2]
+        return (float(x_rel + roi_x1), float(y_rel + roi_y1))
+
+    def transform_orig_to_local(x, y):
+        x_rel = float(x) - roi_x1
+        y_rel = float(y) - roi_y1
+        x_local = M[0, 0] * x_rel + M[0, 1] * y_rel + M[0, 2]
+        y_local = M[1, 0] * x_rel + M[1, 1] * y_rel + M[1, 2]
+        return (float(x_local), float(y_local))
+    poly_init = V42__get_local_yolo_polygon_prior(p_local['orig_ref'], transform_orig_to_local)
+    poly_refined, support_pts_dict = V42__refine_panel_edges_locally_with_yolo_prior(rotated_gray, poly_init, is_crop_left=True)
+    for edge_key, clean_pts in support_pts_dict.items():
+        for pt in clean_pts:
+            pt_orig = transform_local_to_orig(pt[0], pt[1])
+            cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+    TL, TR, BR, BL = V42__sort_panel_corners(poly_init)
+    panel_height = math.sqrt((BL[0] - TL[0]) ** 2 + (BL[1] - TL[1]) ** 2)
+    TL_new, TR_new, BR_new, BL_new = V42__sort_panel_corners(poly_refined)
+    is_convex = cv2.isContourConvex(np.array(poly_refined, dtype=np.int32))
+    area_prop = cv2.contourArea(np.array(poly_refined, dtype=np.float32))
+    area_yolo = cv2.contourArea(np.array(poly_init, dtype=np.float32))
+    area_ratio = area_prop / (area_yolo + 1e-06)
+    cx_prop = (TL_new[0] + TR_new[0] + BR_new[0] + BL_new[0]) / 4.0
+    cy_prop = (TL_new[1] + TR_new[1] + BR_new[1] + BL_new[1]) / 4.0
+    cx_yolo = (TL[0] + TR[0] + BR[0] + BL[0]) / 4.0
+    cy_yolo = (TL[1] + TR[1] + BR[1] + BL[1]) / 4.0
+    center_shift = math.sqrt((cx_prop - cx_yolo) ** 2 + (cy_prop - cy_yolo) ** 2)
+    angle_prop = np.degrees(math.atan2(TR_new[1] - TL_new[1], TR_new[0] - TL_new[0]))
+    angle_yolo = np.degrees(math.atan2(TR[1] - TL[1], TR[0] - TL[0]))
+    diff_angle = abs(angle_prop - angle_yolo)
+    while diff_angle > 90:
+        diff_angle = abs(diff_angle - 180)
+    angle_prop_b = np.degrees(math.atan2(BR_new[1] - BL_new[1], BR_new[0] - BL_new[0]))
+    angle_yolo_b = np.degrees(math.atan2(BR[1] - BL[1], BR[0] - BL[0]))
+    diff_angle_b = abs(angle_prop_b - angle_yolo_b)
+    while diff_angle_b > 90:
+        diff_angle_b = abs(diff_angle_b - 180)
+    is_valid = is_convex and 0.85 <= area_ratio <= 1.15 and (center_shift <= 0.15 * panel_height) and (diff_angle <= 3.0) and (diff_angle_b <= 3.0) and (abs(angle_prop - angle_prop_b) <= 4.0)
+    if is_valid:
+        has_refinement = 'top' in support_pts_dict or 'bottom' in support_pts_dict
+        source = 'crop_left_top_bottom' if has_refinement else 'crop_left_yolo'
+        return (poly_refined, source, center_shift, area_ratio, 'valid_refine')
+    else:
+        return (poly_init, 'crop_left_yolo', center_shift, area_ratio, 'invalid_refine')
+
+def V42__build_small_block_from_yolo_edges_hybrid(block, block_name, gray, img_support, img_snap, img_hybrid_sources, img_lines, img_panels, img_panels_verified, img_quality, b_local, rotated_gray, transform_local_to_orig, transform_orig_to_local):
+    row_count = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 0
+    is_small_block = V42__is_generic_small_block(row_count, len(b_local['panels']), len(b_local['columns']))
+    if is_small_block:
+        panels_result = V42__refine_small_block_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig, transform_orig_to_local)
+        for col_idx, col in enumerate(b_local['columns']):
+            for row_idx, p in enumerate(col):
+                match_res = None
+                for pr in panels_result:
+                    if pr['col'] == col_idx and pr['row'] == row_idx:
+                        match_res = pr
+                        break
+                if match_res is not None:
+                    p['polygon'] = match_res['polygon']
+                    p['quality'] = match_res['quality']
+                    p['source'] = match_res['source']
+                    p['reason'] = match_res['reason']
+                    p['shift'] = match_res['shift']
+                    p['area_ratio'] = match_res['area_ratio']
+                    p['overlap'] = match_res['overlap']
+        return {'boundaries': {}, 'snapped_horiz_gaps': [], 'block_angle_deg': 0.0, 'is_grid': False}
+    panels_result = V42__refine_local_panels_individually(rotated_gray, b_local, block_name, img_support, img_snap, transform_local_to_orig)
+    y_min_local = min((p['bbox'][1] for p in b_local['panels']))
+    y_max_local = max((p['bbox'][3] for p in b_local['panels']))
+    n_cols = len(b_local['columns'])
+    row_count = max((len(col) for col in b_local['columns']))
+    MIN_SPLITTABLE_RAIL_LEN_PX = 120
+    MIN_ROWS_FOR_GRID_SPLIT = 4
+    MIN_RAIL_SUPPORT_RATIO = 0.55
+    MIN_VERTICAL_RAIL_GAP_PX = 12
+    pass_panels = [p for p in panels_result if p['quality'] == 'pass']
+    support_ratio = len(pass_panels) / len(panels_result) if panels_result else 0.0
+    rail_len = y_max_local - y_min_local
+    should_split = True
+    split_reason = 'row_count_ok'
+    if rail_len < MIN_SPLITTABLE_RAIL_LEN_PX:
+        should_split = False
+        split_reason = 'rail_len_under_threshold'
+    elif row_count < MIN_ROWS_FOR_GRID_SPLIT:
+        should_split = False
+        split_reason = 'row_count_under_threshold'
+    elif support_ratio < MIN_RAIL_SUPPORT_RATIO:
+        should_split = False
+        split_reason = 'support_ratio_under_threshold'
+    col0 = [p for p in panels_result if p['col'] == 0]
+    left_pts = [p['polygon'][0] for p in col0] + [p['polygon'][3] for p in col0]
+    if n_cols == 1:
+        right_pts = [p['polygon'][1] for p in col0] + [p['polygon'][2] for p in col0]
+        left_rail = V42__fit_consensus_vertical_boundary(left_pts, y_min_local, y_max_local, row_count)
+        right_rail = V42__fit_consensus_vertical_boundary(right_pts, y_min_local, y_max_local, row_count)
+        mid_rail = None
+    else:
+        col1 = [p for p in panels_result if p['col'] == 1]
+        mid_pts = [p['polygon'][1] for p in col0] + [p['polygon'][2] for p in col0] + [p['polygon'][0] for p in col1] + [p['polygon'][3] for p in col1]
+        right_pts = [p['polygon'][1] for p in col1] + [p['polygon'][2] for p in col1]
+        left_rail = V42__fit_consensus_vertical_boundary(left_pts, y_min_local, y_max_local, row_count)
+        mid_rail = V42__fit_consensus_vertical_boundary(mid_pts, y_min_local, y_max_local, row_count)
+        right_rail = V42__fit_consensus_vertical_boundary(right_pts, y_min_local, y_max_local, row_count)
+        if should_split:
+            gap_left_mid = abs(np.mean([pt[0] for pt in left_rail]) - np.mean([pt[0] for pt in mid_rail]))
+            gap_mid_right = abs(np.mean([pt[0] for pt in mid_rail]) - np.mean([pt[0] for pt in right_rail]))
+            if min(gap_left_mid, gap_mid_right) < MIN_VERTICAL_RAIL_GAP_PX:
+                should_split = False
+                split_reason = 'gap_too_small'
+    boundaries = {}
+    if should_split:
+        boundaries['left_outer'] = left_rail
+        boundaries['right_outer'] = right_rail
+        if mid_rail is not None:
+            boundaries['middle_divider'] = mid_rail
+    else:
+        left_rails = []
+        right_rails = []
+        for col_idx in range(n_cols):
+            col_panels = [p for p in panels_result if p['col'] == col_idx]
+            left_pts_c = [p['polygon'][0] for p in col_panels] + [p['polygon'][3] for p in col_panels]
+            right_pts_c = [p['polygon'][1] for p in col_panels] + [p['polygon'][2] for p in col_panels]
+            left_rails.append(V42__fit_consensus_vertical_boundary(left_pts_c, y_min_local, y_max_local, row_count))
+            right_rails.append(V42__fit_consensus_vertical_boundary(right_pts_c, y_min_local, y_max_local, row_count))
+        if n_cols == 2:
+            gap_mid = abs(np.mean([pt[0] for pt in right_rails[0]]) - np.mean([pt[0] for pt in left_rails[1]]))
+            if gap_mid < MIN_VERTICAL_RAIL_GAP_PX:
+                col0 = [p for p in panels_result if p['col'] == 0]
+                col1 = [p for p in panels_result if p['col'] == 1]
+                mid_pts = [p['polygon'][1] for p in col0] + [p['polygon'][2] for p in col0] + [p['polygon'][0] for p in col1] + [p['polygon'][3] for p in col1]
+                merged_mid = V42__fit_consensus_vertical_boundary(mid_pts, y_min_local, y_max_local, row_count)
+                boundaries['left_col_0'] = left_rails[0]
+                boundaries['right_col_0'] = merged_mid
+                boundaries['left_col_1'] = merged_mid
+                boundaries['right_col_1'] = right_rails[1]
+            else:
+                boundaries['left_col_0'] = left_rails[0]
+                boundaries['right_col_0'] = right_rails[0]
+                boundaries['left_col_1'] = left_rails[1]
+                boundaries['right_col_1'] = right_rails[1]
+        else:
+            boundaries['left_col_0'] = left_rails[0]
+            boundaries['right_col_0'] = right_rails[0]
+    action_str = 'split' if should_split else 'merge' if split_reason == 'gap_too_small' else 'single'
+    print(f'[RAIL_SPLIT] {block_name} left_outer {rail_len:.1f} {support_ratio:.2f} {row_count} action={action_str} reason={split_reason}')
+    if n_cols == 2:
+        mid_action = 'merge' if action_str == 'merge' or not should_split else 'split'
+        print(f'[RAIL_SPLIT] {block_name} middle_divider {rail_len:.1f} {support_ratio:.2f} {row_count} action={mid_action} reason={split_reason}')
+    print(f'[RAIL_SPLIT] {block_name} right_outer {rail_len:.1f} {support_ratio:.2f} {row_count} action={action_str} reason={split_reason}')
+    for col_idx, col in enumerate(b_local['columns']):
+        for row_idx, p in enumerate(col):
+            match_res = None
+            for pr in panels_result:
+                if pr['col'] == col_idx and pr['row'] == row_idx:
+                    match_res = pr
+                    break
+            if match_res is not None:
+                p['polygon'] = match_res['polygon']
+                p['quality'] = match_res['quality']
+                p['source'] = match_res['source']
+    snapped_horiz_gaps = []
+    x_min_roi_local = min((p['bbox'][0] for p in b_local['panels'])) - 10
+    x_max_roi_local = max((p['bbox'][2] for p in b_local['panels'])) + 10
+    for r in range(row_count + 1):
+        if r == 0:
+            row_0_panels = [p for p in panels_result if p['row'] == 0]
+            yolo_pts = [p['polygon'][0] for p in row_0_panels] + [p['polygon'][1] for p in row_0_panels]
+        elif r == row_count:
+            row_last_panels = [p['polygon'] for p in panels_result if p['row'] == row_count - 1]
+            yolo_pts = [p[3] for p in row_last_panels] + [p[2] for p in row_last_panels]
+        else:
+            row_prev = [p for p in panels_result if p['row'] == r - 1]
+            row_curr = [p for p in panels_result if p['row'] == r]
+            yolo_pts = [p['polygon'][3] for p in row_prev] + [p['polygon'][2] for p in row_prev] + [p['polygon'][0] for p in row_curr] + [p['polygon'][1] for p in row_curr]
+        xs_yolo = [pt[0] for pt in yolo_pts]
+        ys_yolo = [pt[1] for pt in yolo_pts]
+        m_yolo, c_yolo = np.polyfit(xs_yolo, ys_yolo, 1)
+        is_outer = r == 0 or r == row_count
+        m_fit, c_fit, clean_pts, coverage, std_res, support_valid, n_raw = V42__extract_support_points_for_horizontal_edge(rotated_gray, m_yolo, c_yolo, x_min_roi_local, x_max_roi_local, block_name, r, row_count, is_outer_edge=is_outer)
+        if support_valid:
+            m_row = m_fit
+            c_row = c_fit
+            selected_cand = 'support'
+            reason = 'valid_support'
+            for pt in clean_pts:
+                pt_orig = transform_local_to_orig(pt[0], pt[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        else:
+            m_row = m_yolo
+            c_row = c_yolo
+            selected_cand = 'yolo'
+            reason = 'fallback_yolo'
+        print(f'[SUPPORT_EDGE] {block_name} {r} raw={n_raw} clean={len(clean_pts)} coverage={coverage:.3f} residual={std_res:.3f} source={selected_cand} reason={reason}')
+        snapped_horiz_gaps.append({'y_snap': m_row * ((x_min_roi_local + x_max_roi_local) / 2.0) + c_row, 'selected_cand': selected_cand, 'm_row': m_row, 'c_row': c_row, 'm_yolo': m_yolo, 'c_yolo': c_yolo, 'support_pts': clean_pts, 'support_valid': support_valid, 'support_line_m': m_fit, 'support_line_c': c_fit, 'support_clean_pts': clean_pts, 'support_coverage': coverage, 'support_residual_std': std_res})
+    boundaries_orig = {bkey: [transform_local_to_orig(pt[0], pt[1]) for pt in boundaries[bkey]] for bkey in boundaries}
+    for bkey in boundaries_orig:
+        V42__draw_polyline(img_snap, boundaries_orig[bkey], (180, 0, 0), 2)
+    return {'boundaries': boundaries, 'snapped_horiz_gaps': snapped_horiz_gaps, 'block_angle_deg': 0.0, 'is_grid': should_split}
+
+def V42__run_current_image():
+    img_path = V42__extract_input_image()
+    img = cv2.imread(str(img_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {img_path}')
+    global V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG
+    V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG = None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray_clahe = clahe.apply(gray)
+    blur = cv2.GaussianBlur(gray_clahe, (5, 5), 0)
+    edges = cv2.Canny(blur, 40, 120, apertureSize=3)
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_x_abs = np.abs(sobel_x)
+    panels = V42__load_panels_from_logs()
+    x_blocks = V42__group_into_blocks(panels)
+    original_block_count = len(x_blocks)
+    blocks = []
+    block_split_meta = []
+    for xb in x_blocks:
+        sub_blocks, median_h, gaps_used = V42__split_block_by_y_gap(xb)
+        block_split_meta.append({'original_n_cols': len(xb['columns']), 'original_panel_count': len(xb['panels']), 'sub_block_count': len(sub_blocks), 'median_panel_height': median_h, 'gaps_used': gaps_used})
+        blocks.extend(sub_blocks)
+    split_block_count = len(blocks)
+    img_blocks = img.copy()
+    img_support = img.copy()
+    img_snap = img.copy()
+    img_panels_from_snap = img.copy()
+    snap_blocks = []
+    stats = []
+    global V42__GLOBAL_LARGE_BLOCK_INFOS
+    V42__GLOBAL_LARGE_BLOCK_INFOS = []
+    for temp_idx, temp_b in enumerate(blocks):
+        temp_cols = temp_b['columns']
+        temp_panels = temp_b['panels']
+        temp_row_count = max((len(col) for col in temp_cols)) if temp_cols else 0
+        is_small = V42__is_generic_small_block(temp_row_count, len(temp_panels), len(temp_cols))
+        if not is_small:
+            temp_bx_min = min((p['bbox'][0] for p in temp_panels))
+            temp_bx_max = max((p['bbox'][2] for p in temp_panels))
+            temp_by_min = min((p['bbox'][1] for p in temp_panels))
+            temp_by_max = max((p['bbox'][3] for p in temp_panels))
+            center_x = (temp_bx_min + temp_bx_max) / 2.0
+            center_y = (temp_by_min + temp_by_max) / 2.0
+            slopes = []
+            for col in temp_cols:
+                if len(col) >= 2:
+                    cxs = [(p['bbox'][0] + p['bbox'][2]) / 2.0 for p in col]
+                    cys = [(p['bbox'][1] + p['bbox'][3]) / 2.0 for p in col]
+                    try:
+                        slope, _ = np.polyfit(cys, cxs, 1)
+                        slopes.append(float(slope))
+                    except Exception:
+                        pass
+            if not slopes:
+                slopes = [0.0]
+            V42__GLOBAL_LARGE_BLOCK_INFOS.append({'block_name': f'block_{temp_idx + 1}', 'center_x': float(center_x), 'center_y': float(center_y), 'slopes': slopes})
+    for b_idx, b in enumerate(blocks):
+        block_name = f'block_{b_idx + 1}'
+        n_cols = len(b['columns'])
+        bx_min = min((p['bbox'][0] for p in b['panels']))
+        bx_max = max((p['bbox'][2] for p in b['panels']))
+        by_min = min((p['bbox'][1] for p in b['panels']))
+        by_max = max((p['bbox'][3] for p in b['panels']))
+        block_angles = []
+        for col in b['columns']:
+            if len(col) >= 2:
+                cxs = [(p['bbox'][0] + p['bbox'][2]) / 2.0 for p in col]
+                cys = [(p['bbox'][1] + p['bbox'][3]) / 2.0 for p in col]
+                try:
+                    slope, _ = np.polyfit(cys, cxs, 1)
+                    angle_rad = math.atan(slope)
+                    block_angles.append(angle_rad)
+                except Exception:
+                    pass
+        if block_angles:
+            rotation_rad = np.median(block_angles)
+        else:
+            rotation_rad = 0.0
+        rotation_deg = np.degrees(rotation_rad)
+        margin = 60
+        roi_x1 = max(0, int(bx_min - margin))
+        roi_y1 = max(0, int(by_min - margin))
+        roi_x2 = min(gray.shape[1], int(bx_max + margin))
+        roi_y2 = min(gray.shape[0], int(by_max + margin))
+        roi_w = roi_x2 - roi_x1
+        roi_h = roi_y2 - roi_y1
+        center_x = roi_w / 2.0
+        center_y = roi_h / 2.0
+        M = cv2.getRotationMatrix2D((center_x, center_y), -rotation_deg, 1.0)
+        Minv = cv2.invertAffineTransform(M)
+
+        def transform_orig_to_local(x, y):
+            x_rel = float(x) - roi_x1
+            y_rel = float(y) - roi_y1
+            x_local = M[0, 0] * x_rel + M[0, 1] * y_rel + M[0, 2]
+            y_local = M[1, 0] * x_rel + M[1, 1] * y_rel + M[1, 2]
+            return (float(x_local), float(y_local))
+
+        def transform_local_to_orig(x_local, y_local):
+            x_rel = Minv[0, 0] * float(x_local) + Minv[0, 1] * float(y_local) + Minv[0, 2]
+            y_rel = Minv[1, 0] * float(x_local) + Minv[1, 1] * float(y_local) + Minv[1, 2]
+            return (float(x_rel + roi_x1), float(y_rel + roi_y1))
+        roi_gray = gray[roi_y1:roi_y2, roi_x1:roi_x2]
+        rotated_gray = cv2.warpAffine(roi_gray, M, (roi_w, roi_h), flags=cv2.INTER_CUBIC)
+        roi_edges = edges[roi_y1:roi_y2, roi_x1:roi_x2]
+        rotated_edges = cv2.warpAffine(roi_edges, M, (roi_w, roi_h), flags=cv2.INTER_NEAREST)
+        roi_sobel_x_abs = sobel_x_abs[roi_y1:roi_y2, roi_x1:roi_x2]
+        rotated_sobel_x_abs = cv2.warpAffine(roi_sobel_x_abs, M, (roi_w, roi_h), flags=cv2.INTER_CUBIC)
+        b_local = {'columns': [], 'panels': []}
+        panel_map = {}
+        for p in b['panels']:
+            local_poly = [transform_orig_to_local(pt[0], pt[1]) for pt in p['refined_polygon']]
+            l_xs = [pt[0] for pt in local_poly]
+            l_ys = [pt[1] for pt in local_poly]
+            local_bbox = [min(l_xs), min(l_ys), max(l_xs), max(l_ys)]
+            p_local = {'bbox': local_bbox, 'refined_polygon': local_poly, 'orig_ref': p}
+            panel_map[id(p)] = p_local
+            b_local['panels'].append(p_local)
+        for col in b['columns']:
+            col_local = [panel_map[id(p)] for p in col]
+            b_local['columns'].append(col_local)
+        y_min_local = min((p['bbox'][1] for p in b_local['panels']))
+        y_max_local = max((p['bbox'][3] for p in b_local['panels']))
+        x_min_roi_local = min((p['bbox'][0] for p in b_local['panels'])) - 10
+        x_max_roi_local = max((p['bbox'][2] for p in b_local['panels'])) + 10
+        cv2.rectangle(img_blocks, (int(bx_min - 10), int(by_min)), (int(bx_max + 10), int(by_max)), (0, 255, 0), 2)
+        cv2.putText(img_blocks, f'{block_name} ({rotation_deg:.1f} deg)', (int(bx_min - 5), int(by_min) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+        row_count = max((len(col) for col in b_local['columns'])) if b_local['columns'] else 10
+        MIN_LARGE_BLOCK_ROWS = 4
+        MIN_SMALL_BLOCK_PANELS = 2
+        block_panels = b['panels']
+        if len(block_panels) < MIN_SMALL_BLOCK_PANELS:
+            continue
+        local_xs = [p['bbox'][0] for p in b_local['panels']] + [p['bbox'][2] for p in b_local['panels']]
+        local_ys = [p['bbox'][1] for p in b_local['panels']] + [p['bbox'][3] for p in b_local['panels']]
+        l_min_x, l_max_x = (min(local_xs), max(local_xs))
+        l_min_y, l_max_y = (min(local_ys), max(local_ys))
+        orig_xs = [p['bbox'][0] for p in b['panels']] + [p['bbox'][2] for p in b['panels']]
+        orig_ys = [p['bbox'][1] for p in b['panels']] + [p['bbox'][3] for p in b['panels']]
+        o_min_x, o_max_x = (min(orig_xs), max(orig_xs))
+        o_min_y, o_max_y = (min(orig_ys), max(orig_ys))
+        print(f'[SNAP_BLOCK] {block_name} local_bbox=({l_min_x:.1f},{l_min_y:.1f},{l_max_x:.1f},{l_max_y:.1f}) orig_bbox=({o_min_x:.1f},{o_min_y:.1f},{o_max_x:.1f},{o_max_y:.1f})')
+        is_small_block = V42__is_generic_small_block(row_count, len(b['panels']), n_cols)
+        if is_small_block:
+            result = V42__build_small_block_from_yolo_edges_hybrid(b, block_name, gray, img_support, img_snap, None, None, None, None, None, b_local, rotated_gray, transform_local_to_orig, transform_orig_to_local)
+            boundaries = result['boundaries']
+            snapped_horiz_gaps = result['snapped_horiz_gaps']
+            snap_blocks.append({'block_name': block_name, 'n_cols': n_cols, 'row_count': row_count, 'is_large_grid': False, 'is_grid': result['is_grid'], 'boundaries': copy.deepcopy(boundaries), 'snapped_horiz_gaps': copy.deepcopy(snapped_horiz_gaps), 'm_perp': 0.0, 'x_mid': float((x_min_roi_local + x_max_roi_local) / 2.0), 'b_local': copy.deepcopy(b_local), 'transform_info': {'rot_M_inv': Minv.copy(), 'roi_x1': int(roi_x1), 'roi_y1': int(roi_y1), 'local_w': int(roi_w), 'local_h': int(roi_h)}, 'rotation_deg': float(rotation_deg), 'is_small_block': True, 'rotated_gray': rotated_gray.copy()})
+            continue
+        if n_cols == 1:
+            boundary_keys = ['left_outer', 'right_outer']
+        else:
+            boundary_keys = ['left_outer', 'middle_divider', 'right_outer']
+        boundaries, snapped_horiz_gaps, consensus_stats = V42__build_grid_from_yolo_edge_consensus(rotated_gray, rotated_sobel_x_abs, b_local, y_min_local, y_max_local, n_cols, row_count, x_min_roi_local, x_max_roi_local, block_name, img_w=gray.shape[1], img_h=gray.shape[0])
+        bad_block_orientation = bool(consensus_stats.get('bad_block_orientation', False))
+        best_theta = math.atan(consensus_stats['m_consensus'])
+        m_perp = math.tan(best_theta)
+        x_mid = (x_min_roi_local + x_max_roi_local) / 2.0
+        boundaries_orig = {bkey: [transform_local_to_orig(pt[0], pt[1]) for pt in boundaries[bkey]] for bkey in boundaries}
+        for g in snapped_horiz_gaps:
+            for pt in g['support_pts']:
+                pt_orig = transform_local_to_orig(pt[0], pt[1])
+                cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        left_snapped_horiz_gaps_by_col = consensus_stats.get('left_snapped_horiz_gaps_by_col')
+        has_crop_left_col_runtime = left_snapped_horiz_gaps_by_col is not None
+        if has_crop_left_col_runtime:
+            has_gaps = left_snapped_horiz_gaps_by_col is not None
+            cols = list(left_snapped_horiz_gaps_by_col.keys()) if has_gaps else []
+            rows_col0 = sorted(left_snapped_horiz_gaps_by_col[0].keys()) if has_gaps and 0 in left_snapped_horiz_gaps_by_col else []
+            rows_col1 = sorted(left_snapped_horiz_gaps_by_col[1].keys()) if has_gaps and 1 in left_snapped_horiz_gaps_by_col else []
+            print(f'[CROP_LEFT_SNAPBLOCK_CHECK] block={block_name} has_left_snapped_horiz_gaps_by_col={str(has_gaps).lower()} cols={cols} rows_col0={rows_col0} rows_col1={rows_col1}')
+        if left_snapped_horiz_gaps_by_col:
+            for col_idx in left_snapped_horiz_gaps_by_col:
+                for r in left_snapped_horiz_gaps_by_col[col_idx]:
+                    g = left_snapped_horiz_gaps_by_col[col_idx][r]
+                    for pt in g['support_pts']:
+                        pt_orig = transform_local_to_orig(pt[0], pt[1])
+                        cv2.circle(img_support, (int(round(pt_orig[0])), int(round(pt_orig[1]))), 1, (255, 0, 255), -1)
+        V42__draw_polyline(img_snap, boundaries_orig['left_outer'], (180, 0, 0), 2)
+        V42__draw_polyline(img_snap, boundaries_orig['right_outer'], (180, 0, 0), 2)
+        if 'middle_divider' in boundaries_orig:
+            V42__draw_polyline(img_snap, boundaries_orig['middle_divider'], (180, 0, 0), 2)
+        if left_snapped_horiz_gaps_by_col:
+            for col_idx in [0, 1]:
+                gaps = left_snapped_horiz_gaps_by_col.get(col_idx, {})
+                for r in range(row_count + 1):
+                    if r not in gaps:
+                        if has_crop_left_col_runtime:
+                            print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source=None allowed=false pL_ok=false pR_ok=false xL=None yL=None xR=None yR=None reason=missing_gap')
+                        continue
+                    g = gaps[r]
+                    source_name = g.get('selected_cand') or g.get('source') or 'unknown'
+                    if bad_block_orientation:
+                        print(f"[HORIZ_DRAW_SUPPRESSED] block={block_name} r={r} col={col_idx} source={source_name} support_valid={str(bool(g.get('support_valid', False))).lower()} reason=bad_block_orientation")
+                        continue
+                    valid_crop_sources = ('crop_left_support_points_line', 'crop_left_support_fit', 'crop_left_borrow_right_line', 'crop_left_neighbor_inherit', 'crop_left_borrow_same_row_right', 'crop_left_pitch_extrapolate')
+                    allowed = source_name in valid_crop_sources
+                    if not allowed:
+                        if has_crop_left_col_runtime:
+                            print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source={source_name} allowed=false pL_ok=false pR_ok=false xL=None yL=None xR=None yR=None reason=source_not_allowed')
+                            print(f'[CROP_LEFT_SKIP_LINE] block={block_name} r={r} col={col_idx} source={source_name} reason=no_support_line')
+                        continue
+                    support_line_m = g.get('support_line_m')
+                    support_line_c = g.get('support_line_c')
+                    if support_line_m is None or support_line_c is None:
+                        if has_crop_left_col_runtime:
+                            print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source={source_name} allowed=true pL_ok=false pR_ok=false xL=None yL=None xR=None yR=None reason=missing_support_line_m_c')
+                        continue
+                    m_final = float(support_line_m)
+                    c_final = float(support_line_c)
+                    left_boundary = boundaries['left_outer'] if col_idx == 0 else boundaries['middle_divider']
+                    right_boundary = boundaries['middle_divider'] if col_idx == 0 else boundaries['right_outer']
+                    pL = V42__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, left_boundary)
+                    pL_ok = pL is not None
+                    if pL_ok:
+                        xL, yL = pL
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xL = V42__get_boundary_x_at_y(left_boundary, y_ref)
+                        yL = m_final * xL + c_final
+                    pR = V42__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, right_boundary)
+                    pR_ok = pR is not None
+                    if pR_ok:
+                        xR, yR = pR
+                    else:
+                        y_ref = m_final * x_mid + c_final
+                        xR = V42__get_boundary_x_at_y(right_boundary, y_ref)
+                        yR = m_final * xR + c_final
+                    vx = xR - xL
+                    vy = yR - yL
+                    norm = max(1e-06, math.sqrt(vx * vx + vy * vy))
+                    ux, uy = (vx / norm, vy / norm)
+                    extend_px = 2.0
+                    xL2 = xL - extend_px * ux
+                    yL2 = yL - extend_px * uy
+                    xR2 = xR + extend_px * ux
+                    yR2 = yR + extend_px * uy
+                    reason_val = 'ok'
+                    if not pL_ok or not pR_ok:
+                        reason_val = 'rail_intersection_failed'
+                    h_rot, w_rot = rotated_gray.shape[:2]
+                    out_of_bounds = not (0 <= xL2 < w_rot and 0 <= yL2 < h_rot and (0 <= xR2 < w_rot) and (0 <= yR2 < h_rot))
+                    if out_of_bounds:
+                        reason_val = 'endpoint_out_of_image'
+                    if has_crop_left_col_runtime:
+                        print(f'[CROP_LEFT_DRAW_CHECK] block={block_name} r={r} col={col_idx} source={source_name} allowed=true pL_ok={str(pL_ok).lower()} pR_ok={str(pR_ok).lower()} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f} reason={reason_val}')
+                        print(f'[CROP_LEFT_DRAW_SUPPORT_LINE] block={block_name} r={r} col={col_idx} source={source_name} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f}')
+                    pt1_orig = transform_local_to_orig(xL2, yL2)
+                    pt2_orig = transform_local_to_orig(xR2, yR2)
+                    p1_snap = (int(round(pt1_orig[0])), int(round(pt1_orig[1])))
+                    p2_snap = (int(round(pt2_orig[0])), int(round(pt2_orig[1])))
+                    cv2.line(img_snap, p1_snap, p2_snap, (255, 0, 255), 1, lineType=cv2.LINE_AA)
+        if not left_snapped_horiz_gaps_by_col:
+            for r, g in enumerate(snapped_horiz_gaps):
+                source_name = g.get('selected_cand', 'unknown')
+                support_valid = bool(g.get('support_valid', False))
+                real_line_for_draw = source_name in ('support', 'thermal', 'support_prefit', 'profile_recovered', 'profile_recovered_locked', 'profile_pitch') and support_valid and (g.get('support_line_m') is not None) and (g.get('support_line_c') is not None)
+                if bad_block_orientation or not real_line_for_draw:
+                    print(f"[HORIZ_DRAW_SUPPRESSED] block={block_name} r={r} source={source_name} support_valid={str(support_valid).lower()} reason={('bad_block_orientation' if bad_block_orientation else 'fallback_line_source')}")
+                    continue
+                if support_valid and g.get('support_line_m') is not None and (g.get('support_line_c') is not None):
+                    m_final = float(g['support_line_m'])
+                    c_final = float(g['support_line_c'])
+                else:
+                    m_final = float(g.get('m_row', 0.0))
+                    c_final = float(g.get('c_row', g.get('c_selected', 0.0)))
+                left_boundary = boundaries.get('left_outer')
+                right_boundary = boundaries.get('right_outer')
+                if left_boundary is None or right_boundary is None:
+                    continue
+                pL = V42__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, left_boundary)
+                if pL is None:
+                    y_ref = m_final * x_mid + c_final
+                    xL = V42__get_boundary_x_at_y(left_boundary, y_ref)
+                    yL = m_final * xL + c_final
+                else:
+                    xL, yL = pL
+                pR = V42__intersect_line_y_eq_mx_c_with_polyline(m_final, c_final, right_boundary)
+                if pR is None:
+                    y_ref = m_final * x_mid + c_final
+                    xR = V42__get_boundary_x_at_y(right_boundary, y_ref)
+                    yR = m_final * xR + c_final
+                else:
+                    xR, yR = pR
+                vx = xR - xL
+                vy = yR - yL
+                norm = max(1e-06, math.sqrt(vx * vx + vy * vy))
+                ux, uy = (vx / norm, vy / norm)
+                xL2, yL2 = (xL - 2.0 * ux, yL - 2.0 * uy)
+                xR2, yR2 = (xR + 2.0 * ux, yR + 2.0 * uy)
+                pt1_orig = transform_local_to_orig(xL2, yL2)
+                pt2_orig = transform_local_to_orig(xR2, yR2)
+                cv2.line(img_snap, (int(round(pt1_orig[0])), int(round(pt1_orig[1]))), (int(round(pt2_orig[0])), int(round(pt2_orig[1]))), (255, 0, 255), 1, lineType=cv2.LINE_AA)
+                print(f'[HORIZ_DRAW_LINE] block={block_name} r={r} source={source_name} support_valid={str(support_valid).lower()} xL={xL2:.1f} yL={yL2:.1f} xR={xR2:.1f} yR={yR2:.1f}')
+        snap_blocks.append({'block_name': block_name, 'n_cols': n_cols, 'row_count': row_count, 'is_large_grid': True, 'boundaries': copy.deepcopy(boundaries), 'snapped_horiz_gaps': copy.deepcopy(snapped_horiz_gaps), 'left_snapped_horiz_gaps_by_col': copy.deepcopy(left_snapped_horiz_gaps_by_col), 'bad_block_orientation': bool(consensus_stats.get('bad_block_orientation', False)), 'bad_block_orientation_angle_deg': float(consensus_stats.get('bad_block_orientation_angle_deg', 0.0)), 'm_perp': float(m_perp), 'x_mid': float(x_mid), 'b_local': copy.deepcopy(b_local), 'transform_info': {'rot_M_inv': Minv.copy(), 'roi_x1': int(roi_x1), 'roi_y1': int(roi_y1), 'local_w': int(roi_w), 'local_h': int(roi_h)}, 'rotation_deg': float(rotation_deg), 'rotated_gray': rotated_gray.copy()})
+    drawn_panel_count = V42__build_panel_polygons_from_visible_snap_evidence(img_panels_from_snap, snap_blocks, img_support, img_snap)
+    out_dir = Path(V42__OUTPUT_DEBUG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    old_files = [f'debug_{V42__IMAGE_STEM}_panels_quality.JPG', f'debug_{V42__IMAGE_STEM}_panels_verified.JPG', f'debug_{V42__IMAGE_STEM}_full_image_panels_verified_seg10.JPG', f'debug_{V42__IMAGE_STEM}_hybrid_sources.JPG', f'debug_{V42__IMAGE_STEM}_yolo_edge_consensus_lines.JPG', f'debug_{V42__IMAGE_STEM}_yolo_edge_consensus_panels.JPG', f'debug_{V42__IMAGE_STEM}_yolo_edge_consensus_quality.JPG', f'debug_{V42__IMAGE_STEM}_blocks.JPG', f'debug_{V42__IMAGE_STEM}_support_points.JPG', f'debug_{V42__IMAGE_STEM}_panels_from_snap.JPG', f'debug_{V42__IMAGE_STEM}_lower_support_debug.JPG', f'debug_{V42__IMAGE_STEM}_inner_margin_x2.JPG', f'panel_inner_area_{V42__IMAGE_STEM}.csv']
+    for old_name in old_files:
+        (out_dir / old_name).unlink(missing_ok=True)
+    cv2.imwrite(str(out_dir / f'debug_{V42__IMAGE_STEM}_line_snap.JPG'), img_snap)
+    print('\n' + '=' * 95)
+    print(f'TOTAL DRAWN PANELS FROM SNAP: {drawn_panel_count}')
+    print('=' * 95)
+    return int(drawn_panel_count)
+
+def V42___v36_panel_bbox(panel):
+    bbox = panel.get('bbox', None)
+    if bbox is None and 'box' in panel:
+        bbox = panel.get('box')
+    if bbox is None or len(bbox) < 4:
+        return None
+    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    if x2 < x1:
+        x1, x2 = (x2, x1)
+    if y2 < y1:
+        y1, y2 = (y2, y1)
+    return [x1, y1, x2, y2]
+
+def V42___v36_should_use_closeup_local(panels, image_shape, mode='auto'):
+    if mode == 'core':
+        return False
+    if mode == 'local':
+        return True
+    h, w = image_shape[:2]
+    img_area = max(1.0, float(w * h))
+    areas = []
+    for p in panels:
+        b = V42___v36_panel_bbox(p)
+        if b is None:
+            continue
+        areas.append(max(0.0, (b[2] - b[0]) * (b[3] - b[1])))
+    if not areas:
+        return False
+    med_area_ratio = float(np.median(areas) / img_area)
+    return len(areas) <= 24 and med_area_ratio >= 0.018
+
+def V42___v36_norm_gray_for_valleys(img_bgr):
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    return gray
+
+def V42___v36_fit_line(points, horizontal=True):
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.shape[0] < 4:
+        return None
+    if horizontal:
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+        if float(np.max(xs) - np.min(xs)) < 3:
+            return None
+        m, c = np.polyfit(xs, ys, 1)
+        pred = m * xs + c
+        res = float(np.sqrt(np.mean((ys - pred) ** 2)))
+        return {'m': float(m), 'c': float(c), 'res': res, 'n': int(len(points)), 'horizontal': True}
+    else:
+        ys = pts[:, 1]
+        xs = pts[:, 0]
+        if float(np.max(ys) - np.min(ys)) < 3:
+            return None
+        m, c = np.polyfit(ys, xs, 1)
+        pred = m * ys + c
+        res = float(np.sqrt(np.mean((xs - pred) ** 2)))
+        return {'m': float(m), 'c': float(c), 'res': res, 'n': int(len(points)), 'horizontal': False}
+
+def V42___v36_local_valley_line(gray, bbox, edge, win, step, pad_frac=0.08):
+    """Fit one panel edge from dark valley support around a bbox edge.
+
+    The bbox is only a search prior.  The returned line is fitted from image valley
+    support points.  Horizontal lines use y=m*x+c; vertical lines use x=m*y+c.
+    """
+    h, w = gray.shape[:2]
+    x1, y1, x2, y2 = bbox
+    bw = max(2.0, x2 - x1)
+    bh = max(2.0, y2 - y1)
+    pad_x = max(2.0, min(0.18 * bw, pad_frac * bw))
+    pad_y = max(2.0, min(0.18 * bh, pad_frac * bh))
+    pts = []
+    profiles = []
+    if edge in ('top', 'bottom'):
+        y0 = y1 if edge == 'top' else y2
+        xs = np.arange(x1 + pad_x, x2 - pad_x + 1e-06, max(2.0, float(step)))
+        for x in xs:
+            ya = int(round(max(0, y0 - win)))
+            yb = int(round(min(h - 1, y0 + win)))
+            xi = int(round(np.clip(x, 0, w - 1)))
+            if yb <= ya:
+                continue
+            col = gray[ya:yb + 1, xi]
+            if col.size < 3:
+                continue
+            vals = cv2.GaussianBlur(col.reshape(-1, 1), (1, 3), 0).reshape(-1)
+            k = int(np.argmin(vals))
+            yv = ya + k
+            pts.append([float(xi), float(yv)])
+            profiles.append((float(np.median(vals)), float(vals[k])))
+        line = V42___v36_fit_line(pts, horizontal=True)
+    else:
+        x0 = x1 if edge == 'left' else x2
+        ys = np.arange(y1 + pad_y, y2 - pad_y + 1e-06, max(2.0, float(step)))
+        for y in ys:
+            xa = int(round(max(0, x0 - win)))
+            xb = int(round(min(w - 1, x0 + win)))
+            yi = int(round(np.clip(y, 0, h - 1)))
+            if xb <= xa:
+                continue
+            row = gray[yi, xa:xb + 1]
+            if row.size < 3:
+                continue
+            vals = cv2.GaussianBlur(row.reshape(1, -1), (3, 1), 0).reshape(-1)
+            k = int(np.argmin(vals))
+            xv = xa + k
+            pts.append([float(xv), float(yi)])
+            profiles.append((float(np.median(vals)), float(vals[k])))
+        line = V42___v36_fit_line(pts, horizontal=False)
+    if line is None:
+        return None
+    if profiles:
+        med = np.array([p[0] for p in profiles], dtype=np.float32)
+        mn = np.array([p[1] for p in profiles], dtype=np.float32)
+        contrast = float(np.median(med - mn))
+    else:
+        contrast = 0.0
+    line['edge'] = edge
+    line['contrast'] = contrast
+    line['points'] = pts
+    return line
+
+def V42___v36_line_position_at_mid(line, bbox):
+    x1, y1, x2, y2 = bbox
+    if line['horizontal']:
+        xm = 0.5 * (x1 + x2)
+        return float(line['m'] * xm + line['c'])
+    ym = 0.5 * (y1 + y2)
+    return float(line['m'] * ym + line['c'])
+
+def V42___v36_regularize_shared_lines(panel_edges, bboxes):
+    """Snap coincident shared edges without inventing new YOLO polygons."""
+    if not panel_edges:
+        return panel_edges
+    all_items = []
+    for pi, edges in enumerate(panel_edges):
+        for edge_name, line in edges.items():
+            if line is not None:
+                pos = V42___v36_line_position_at_mid(line, bboxes[pi])
+                all_items.append((pos, pi, edge_name, line))
+
+    def cluster(kind_horizontal):
+        items = [(pos, pi, en, ln) for pos, pi, en, ln in all_items if ln['horizontal'] == kind_horizontal]
+        if not items:
+            return
+        if kind_horizontal:
+            dims = [bb[3] - bb[1] for bb in bboxes]
+        else:
+            dims = [bb[2] - bb[0] for bb in bboxes]
+        tol = max(3.0, 0.08 * float(np.median(dims)))
+        items.sort(key=lambda t: t[0])
+        groups = []
+        cur = [items[0]]
+        for it in items[1:]:
+            if abs(it[0] - np.median([q[0] for q in cur])) <= tol:
+                cur.append(it)
+            else:
+                groups.append(cur)
+                cur = [it]
+        groups.append(cur)
+        for g in groups:
+            if len(g) < 2:
+                continue
+            weights = []
+            ms = []
+            cs = []
+            for _, _, _, ln in g:
+                wt = max(1.0, float(ln.get('n', 1))) * max(1.0, float(ln.get('contrast', 1.0))) / max(1.0, 1.0 + float(ln.get('res', 0.0)))
+                weights.append(wt)
+                ms.append(float(ln['m']))
+                cs.append(float(ln['c']))
+            weights = np.asarray(weights, dtype=np.float64)
+            m_avg = float(np.average(ms, weights=weights))
+            c_avg = float(np.average(cs, weights=weights))
+            for _, pi, en, ln in g:
+                new_ln = dict(ln)
+                new_ln['m'] = m_avg
+                new_ln['c'] = c_avg
+                new_ln['shared_cluster_n'] = len(g)
+                panel_edges[pi][en] = new_ln
+    cluster(True)
+    cluster(False)
+    return panel_edges
+
+def V42___v36_intersect(hline, vline):
+    mh, ch = (float(hline['m']), float(hline['c']))
+    mv, cv = (float(vline['m']), float(vline['c']))
+    den = 1.0 - mv * mh
+    if abs(den) < 1e-06:
+        return None
+    x = (mv * ch + cv) / den
+    y = mh * x + ch
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return None
+    return [float(x), float(y)]
+
+def V42___v36_build_closeup_local_snap_outputs(image_path, panels_path, out_dir, stem):
+    """Build outputs by per-bbox local valley snapping for close-up images.
+
+    This path is intentionally conservative and only meant for close-up images with
+    large detected panels.  The panel log supplies search ROIs only; each edge is
+    refitted from dark thermal valley support before polygon construction.
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {image_path}')
+    gray = V42___v36_norm_gray_for_valleys(img)
+    panels = V42__load_panels_from_logs()
+    bboxes = []
+    for p in panels:
+        b = V42___v36_panel_bbox(p)
+        if b is None:
+            continue
+        bboxes.append(b)
+    if not bboxes:
+        return 0
+    h, w = gray.shape[:2]
+    med_w = float(np.median([b[2] - b[0] for b in bboxes]))
+    med_h = float(np.median([b[3] - b[1] for b in bboxes]))
+    win = int(round(np.clip(0.075 * min(med_w, med_h), 5, 18)))
+    step = float(np.clip(0.035 * min(med_w, med_h), 3, 8))
+    panel_edges = []
+    for b in bboxes:
+        edges = {}
+        for edge in ('top', 'bottom', 'left', 'right'):
+            ln = V42___v36_local_valley_line(gray, b, edge=edge, win=win, step=step)
+            if ln is not None:
+                max_res = 0.055 * (b[3] - b[1] if edge in ('top', 'bottom') else b[2] - b[0])
+                if ln.get('n', 0) < 4 or ln.get('res', 99) > max(3.0, max_res):
+                    ln = None
+            edges[edge] = ln
+        panel_edges.append(edges)
+    panel_edges = V42___v36_regularize_shared_lines(panel_edges, bboxes)
+    img_snap = img.copy()
+    img_calc = img.copy()
+    polys = []
+    for idx, (b, edges) in enumerate(zip(bboxes, panel_edges)):
+        needed = all((edges.get(k) is not None for k in ('top', 'bottom', 'left', 'right')))
+        if not needed:
+            print(f'[V36_LOCAL_SKIP] image={stem} idx={idx} reason=weak_edge_support')
+            continue
+        tl = V42___v36_intersect(edges['top'], edges['left'])
+        tr = V42___v36_intersect(edges['top'], edges['right'])
+        br = V42___v36_intersect(edges['bottom'], edges['right'])
+        bl = V42___v36_intersect(edges['bottom'], edges['left'])
+        if any((p is None for p in (tl, tr, br, bl))):
+            print(f'[V36_LOCAL_SKIP] image={stem} idx={idx} reason=intersection_fail')
+            continue
+        poly = np.asarray([tl, tr, br, bl], dtype=np.float32)
+        area = float(cv2.contourArea(poly))
+        bbox_area = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+        if area <= 20 or not cv2.isContourConvex(poly.astype(np.int32)) or (not 0.45 <= area / bbox_area <= 1.7):
+            print(f'[V36_LOCAL_SKIP] image={stem} idx={idx} reason=polygon_gate area_ratio={area / bbox_area:.2f}')
+            continue
+        polys.append(poly)
+        cv2.polylines(img_snap, [poly.astype(np.int32)], True, (180, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        inner, _, valid = V42__inset_quad_polygon(poly, V42__INNER_PANEL_MARGIN_PX)
+        if valid:
+            cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_line_snap.JPG'), img_snap)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_calc_inner_polygon.JPG'), img_calc)
+    print(f'[V36_LOCAL_SUMMARY] image={stem} panels_in_log={len(bboxes)} drawn={len(polys)} win={win} step={step:.1f}')
+    return len(polys)
+V42__V37_EDGE_SEGMENTS = 8
+V42__V37_MIN_COVERAGE_RATIO = 0.94
+V42__V37_MAX_EXPAND_RATIO = 1.85
+
+def V42___v37_robust_weighted_avg(values, weights):
+    values = np.asarray(values, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if values.size == 0:
+        return None
+    if np.sum(weights) <= 1e-09:
+        return float(np.median(values))
+    return float(np.average(values, weights=weights))
+
+def V42___v37_profile_valley_position(vals, origin, edge_pos, inward_sign, max_inward, prefer_near=True):
+    """Return one valley coordinate from a 1-D profile.
+
+    The edge_pos comes from the YOLO/log bbox prior, but the returned coordinate
+    is selected from actual dark/blue valley pixels.  A mild prior prevents the
+    fitter from jumping onto wide fake shadow bands deep inside the panel.
+    """
+    vals = np.asarray(vals, dtype=np.float32).reshape(-1)
+    n = vals.size
+    if n < 3:
+        return (None, 0.0)
+    smooth = cv2.GaussianBlur(vals.reshape(-1, 1), (1, 3), 0).reshape(-1)
+    cand = []
+    for i in range(1, n - 1):
+        if smooth[i] <= smooth[i - 1] and smooth[i] <= smooth[i + 1]:
+            cand.append(i)
+    cand.append(int(np.argmin(smooth)))
+    cand = sorted(set(cand), key=lambda i: float(smooth[i]))[:6]
+    if not cand:
+        return (None, 0.0)
+    med = float(np.median(smooth))
+    best = None
+    best_score = 1e+18
+    for i in cand:
+        pos = float(origin + i)
+        inward = inward_sign * (pos - float(edge_pos))
+        if inward > max_inward:
+            penalty = 45.0 + 10.0 * (inward - max_inward)
+        elif inward < -max_inward * 1.4:
+            penalty = 15.0 + 4.0 * abs(inward)
+        else:
+            penalty = 0.45 * abs(pos - float(edge_pos)) if prefer_near else 0.0
+        score = float(smooth[i]) + penalty
+        if score < best_score:
+            best_score = score
+            best = i
+    if best is None:
+        return (None, 0.0)
+    pos = float(origin + best)
+    contrast = max(0.0, med - float(smooth[best]))
+    return (pos, contrast)
+
+def V42___v37_fit_edge_segment(gray, bbox, edge, seg_idx, nseg, win):
+    h, w = gray.shape[:2]
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    bw = max(2.0, x2 - x1)
+    bh = max(2.0, y2 - y1)
+    pad_x = max(2.0, 0.035 * bw)
+    pad_y = max(2.0, 0.035 * bh)
+    pts = []
+    contrasts = []
+    if edge in ('top', 'bottom'):
+        y0 = y1 if edge == 'top' else y2
+        inward_sign = 1.0 if edge == 'top' else -1.0
+        max_inward = max(3.0, 0.055 * bh)
+        xa = x1 + pad_x + seg_idx * (bw - 2 * pad_x) / float(nseg)
+        xb = x1 + pad_x + (seg_idx + 1) * (bw - 2 * pad_x) / float(nseg)
+        sample_n = max(5, int(round((xb - xa) / 5.0)))
+        for x in np.linspace(xa, xb, sample_n):
+            xi = int(round(np.clip(x, 0, w - 1)))
+            ya = int(round(max(0, y0 - win)))
+            yb = int(round(min(h - 1, y0 + win)))
+            if yb <= ya + 2:
+                continue
+            pos, cont = V42___v37_profile_valley_position(gray[ya:yb + 1, xi], ya, y0, inward_sign, max_inward)
+            if pos is None:
+                continue
+            pts.append([float(xi), float(pos)])
+            contrasts.append(cont)
+        line = V42___v36_fit_line(pts, horizontal=True)
+    else:
+        x0 = x1 if edge == 'left' else x2
+        inward_sign = 1.0 if edge == 'left' else -1.0
+        max_inward = max(3.0, 0.055 * bw)
+        ya = y1 + pad_y + seg_idx * (bh - 2 * pad_y) / float(nseg)
+        yb = y1 + pad_y + (seg_idx + 1) * (bh - 2 * pad_y) / float(nseg)
+        sample_n = max(5, int(round((yb - ya) / 5.0)))
+        for y in np.linspace(ya, yb, sample_n):
+            yi = int(round(np.clip(y, 0, h - 1)))
+            xa = int(round(max(0, x0 - win)))
+            xb = int(round(min(w - 1, x0 + win)))
+            if xb <= xa + 2:
+                continue
+            pos, cont = V42___v37_profile_valley_position(gray[yi, xa:xb + 1], xa, x0, inward_sign, max_inward)
+            if pos is None:
+                continue
+            pts.append([float(pos), float(yi)])
+            contrasts.append(cont)
+        line = V42___v36_fit_line(pts, horizontal=False)
+    if line is None:
+        return None
+    line['edge'] = edge
+    line['segment'] = int(seg_idx)
+    line['contrast'] = float(np.median(contrasts)) if contrasts else 0.0
+    line['points'] = pts
+    return line
+
+def V42___v37_multiline_edge(gray, bbox, edge, win, nseg=V42__V37_EDGE_SEGMENTS):
+    """Fit 8 local line segments then merge into one edge line.
+
+    This keeps the benefits of many support lines on slightly warped close-up
+    panels, while the final downstream polygon still uses one common snapped line
+    per side.
+    """
+    seg_lines = []
+    for si in range(int(nseg)):
+        ln = V42___v37_fit_edge_segment(gray, bbox, edge, si, int(nseg), win)
+        if ln is not None and ln.get('n', 0) >= 3:
+            dim = bbox[2] - bbox[0] if edge in ('top', 'bottom') else bbox[3] - bbox[1]
+            if ln.get('res', 99.0) <= max(3.0, 0.1 * max(1.0, dim / float(nseg))):
+                seg_lines.append(ln)
+    if len(seg_lines) < max(3, int(0.45 * nseg)):
+        return V42___v36_local_valley_line(gray, bbox, edge=edge, win=win, step=max(3.0, 0.035 * min(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+    positions = np.array([V42___v36_line_position_at_mid(ln, bbox) for ln in seg_lines], dtype=np.float32)
+    med_pos = float(np.median(positions))
+    if edge in ('top', 'bottom'):
+        tol = max(4.0, 0.075 * (bbox[3] - bbox[1]))
+    else:
+        tol = max(4.0, 0.075 * (bbox[2] - bbox[0]))
+    kept = [ln for ln, pos in zip(seg_lines, positions) if abs(float(pos) - med_pos) <= tol]
+    if len(kept) < max(3, int(0.38 * nseg)):
+        kept = seg_lines
+    weights = []
+    ms = []
+    cs = []
+    pts_all = []
+    for ln in kept:
+        wt = max(1.0, float(ln.get('n', 1))) * max(1.0, float(ln.get('contrast', 1.0))) / max(1.0, 1.0 + float(ln.get('res', 0.0)))
+        weights.append(wt)
+        ms.append(float(ln['m']))
+        cs.append(float(ln['c']))
+        pts_all.extend(ln.get('points', []))
+    merged = {'m': V42___v37_robust_weighted_avg(ms, weights), 'c': V42___v37_robust_weighted_avg(cs, weights), 'res': float(np.median([ln.get('res', 0.0) for ln in kept])), 'n': int(sum((ln.get('n', 0) for ln in kept))), 'horizontal': edge in ('top', 'bottom'), 'edge': edge, 'contrast': float(np.median([ln.get('contrast', 0.0) for ln in kept])), 'segment_count': len(kept), 'points': pts_all, 'source': 'v37_8_segment_merge'}
+    return merged
+
+def V42___v37_apply_yolo_containment_guard(edges, bbox):
+    """Do not let snapped lines collapse inside the YOLO prior bbox.
+
+    YOLO is not used to draw the polygon.  It is used as a minimum coverage prior:
+    a line fitted from thermal valleys may be translated outward, preserving its
+    slope, if it would otherwise make the final panel smaller than the detector box.
+    """
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+    tol_x = max(2.0, 0.018 * bw)
+    tol_y = max(2.0, 0.018 * bh)
+    out = {k: dict(v) if v is not None else None for k, v in edges.items()}
+    if out.get('top') is not None:
+        xm = 0.5 * (x1 + x2)
+        y_at = out['top']['m'] * xm + out['top']['c']
+        if y_at > y1 + tol_y:
+            out['top']['c'] -= float(y_at - (y1 + tol_y))
+            out['top']['coverage_guard'] = 'shift_out_top'
+    if out.get('bottom') is not None:
+        xm = 0.5 * (x1 + x2)
+        y_at = out['bottom']['m'] * xm + out['bottom']['c']
+        if y_at < y2 - tol_y:
+            out['bottom']['c'] += float(y2 - tol_y - y_at)
+            out['bottom']['coverage_guard'] = 'shift_out_bottom'
+    if out.get('left') is not None:
+        ym = 0.5 * (y1 + y2)
+        x_at = out['left']['m'] * ym + out['left']['c']
+        if x_at > x1 + tol_x:
+            out['left']['c'] -= float(x_at - (x1 + tol_x))
+            out['left']['coverage_guard'] = 'shift_out_left'
+    if out.get('right') is not None:
+        ym = 0.5 * (y1 + y2)
+        x_at = out['right']['m'] * ym + out['right']['c']
+        if x_at < x2 - tol_x:
+            out['right']['c'] += float(x2 - tol_x - x_at)
+            out['right']['coverage_guard'] = 'shift_out_right'
+    return out
+
+def V42___v37_edges_to_poly(edges):
+    needed = all((edges.get(k) is not None for k in ('top', 'bottom', 'left', 'right')))
+    if not needed:
+        return None
+    tl = V42___v36_intersect(edges['top'], edges['left'])
+    tr = V42___v36_intersect(edges['top'], edges['right'])
+    br = V42___v36_intersect(edges['bottom'], edges['right'])
+    bl = V42___v36_intersect(edges['bottom'], edges['left'])
+    if any((p is None for p in (tl, tr, br, bl))):
+        return None
+    return np.asarray([tl, tr, br, bl], dtype=np.float32)
+
+def V42___v37_build_closeup_multiline_snap_outputs(image_path, panels_path, out_dir, stem):
+    """Close-up route using 8 merged line segments per edge.
+
+    Intended for cheap-camera thermal close-ups where temperature smearing and fake
+    shade-like bands can confuse a single dark-valley snap.  Bbox is a search and
+    minimum-coverage prior only; final geometry still comes from fitted lines.
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {image_path}')
+    gray = V42___v36_norm_gray_for_valleys(img)
+    panels = V42__load_panels_from_logs()
+    bboxes = []
+    for p in panels:
+        b = V42___v36_panel_bbox(p)
+        if b is None:
+            continue
+        bboxes.append(b)
+    if not bboxes:
+        return 0
+    med_w = float(np.median([b[2] - b[0] for b in bboxes]))
+    med_h = float(np.median([b[3] - b[1] for b in bboxes]))
+    win = int(round(np.clip(0.105 * min(med_w, med_h), 8, 26)))
+    panel_edges = []
+    for b in bboxes:
+        edges = {}
+        for edge in ('top', 'bottom', 'left', 'right'):
+            ln = V42___v37_multiline_edge(gray, b, edge=edge, win=win, nseg=V42__V37_EDGE_SEGMENTS)
+            if ln is not None:
+                max_res = 0.07 * (b[3] - b[1] if edge in ('top', 'bottom') else b[2] - b[0])
+                if ln.get('n', 0) < 10 or ln.get('res', 99) > max(4.0, max_res):
+                    ln = None
+            edges[edge] = ln
+        edges = V42___v37_apply_yolo_containment_guard(edges, b)
+        panel_edges.append(edges)
+    panel_edges = V42___v36_regularize_shared_lines(panel_edges, bboxes)
+    panel_edges = [V42___v37_apply_yolo_containment_guard(e, b) for e, b in zip(panel_edges, bboxes)]
+    img_snap = img.copy()
+    img_calc = img.copy()
+    polys = []
+    for idx, (b, edges) in enumerate(zip(bboxes, panel_edges)):
+        poly = V42___v37_edges_to_poly(edges)
+        if poly is None:
+            print(f'[V37_LOCAL_SKIP] image={stem} idx={idx} reason=weak_edge_support')
+            continue
+        area = float(cv2.contourArea(poly))
+        bbox_area = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+        bx, by, bw, bh = cv2.boundingRect(poly.astype(np.float32))
+        cover_w = max(0.0, min(float(bx + bw), b[2]) - max(float(bx), b[0])) / max(1.0, b[2] - b[0])
+        cover_h = max(0.0, min(float(by + bh), b[3]) - max(float(by), b[1])) / max(1.0, b[3] - b[1])
+        area_ratio = area / bbox_area
+        if area <= 20 or not cv2.isContourConvex(poly.astype(np.int32)) or area_ratio < V42__V37_MIN_COVERAGE_RATIO or (area_ratio > V42__V37_MAX_EXPAND_RATIO) or (cover_w < 0.92) or (cover_h < 0.92):
+            edges2 = V42___v37_apply_yolo_containment_guard(edges, b)
+            poly2 = V42___v37_edges_to_poly(edges2)
+            if poly2 is None:
+                print(f'[V37_LOCAL_SKIP] image={stem} idx={idx} reason=polygon_gate_no_recover')
+                continue
+            area2 = float(cv2.contourArea(poly2))
+            ratio2 = area2 / bbox_area
+            if area2 <= 20 or not cv2.isContourConvex(poly2.astype(np.int32)) or ratio2 < 0.88 or (ratio2 > V42__V37_MAX_EXPAND_RATIO):
+                print(f'[V37_LOCAL_SKIP] image={stem} idx={idx} reason=polygon_gate area_ratio={area_ratio:.2f} cover=({cover_w:.2f},{cover_h:.2f})')
+                continue
+            poly = poly2
+            area_ratio = ratio2
+        polys.append(poly)
+        cv2.polylines(img_snap, [poly.astype(np.int32)], True, (170, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        inner, _, valid = V42__inset_quad_polygon(poly, V42__INNER_PANEL_MARGIN_PX)
+        if valid:
+            cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_line_snap.JPG'), img_snap)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_calc_inner_polygon.JPG'), img_calc)
+    print(f'[V37_LOCAL_SUMMARY] image={stem} panels_in_log={len(bboxes)} drawn={len(polys)} win={win} segments={V42__V37_EDGE_SEGMENTS}')
+    return len(polys)
+V42__V38_EDGE_SEGMENTS = 8
+V42__V38_MIN_COVERAGE_RATIO = 0.88
+V42__V38_MAX_EXPAND_RATIO = 1.38
+
+def V42___v38_cluster_1d(values, tol):
+    """Cluster scalar boundary priors while preserving strong row/column topology."""
+    items = sorted([float(v) for v in values])
+    if not items:
+        return []
+    clusters = []
+    cur = [items[0]]
+    for v in items[1:]:
+        if abs(v - float(np.median(cur))) <= tol:
+            cur.append(v)
+        else:
+            clusters.append(cur)
+            cur = [v]
+    clusters.append(cur)
+    return [float(np.median(c)) for c in clusters]
+
+def V42___v38_infer_shared_grid_from_bboxes(bboxes):
+    """Infer shared vertical and horizontal grid boundary priors from YOLO bboxes.
+
+    YOLO bboxes are not drawn as final panels.  They are used only to define which
+    shared rails/rows should exist and where the search window should be centered.
+    """
+    if not bboxes:
+        return ([], [], [])
+    widths = [b[2] - b[0] for b in bboxes]
+    heights = [b[3] - b[1] for b in bboxes]
+    med_w = max(2.0, float(np.median(widths)))
+    med_h = max(2.0, float(np.median(heights)))
+    xtol = max(5.0, 0.16 * med_w)
+    ytol = max(5.0, 0.16 * med_h)
+    x_priors = []
+    y_priors = []
+    for b in bboxes:
+        x_priors.extend([b[0], b[2]])
+        y_priors.extend([b[1], b[3]])
+    xs = V42___v38_cluster_1d(x_priors, xtol)
+    ys = V42___v38_cluster_1d(y_priors, ytol)
+    assignments = []
+    for b in bboxes:
+        li = int(np.argmin([abs(x - b[0]) for x in xs])) if xs else -1
+        ri = int(np.argmin([abs(x - b[2]) for x in xs])) if xs else -1
+        ti = int(np.argmin([abs(y - b[1]) for y in ys])) if ys else -1
+        bi = int(np.argmin([abs(y - b[3]) for y in ys])) if ys else -1
+        if li == ri and len(xs) > 1:
+            ri = min(len(xs) - 1, li + 1)
+        if ti == bi and len(ys) > 1:
+            bi = min(len(ys) - 1, ti + 1)
+        assignments.append((li, ri, ti, bi))
+    return (xs, ys, assignments)
+
+def V42___v38_profile_valley_constrained(profile, origin, prior_abs, search_radius, prefer_dark=True):
+    """Pick a rail/groove valley close to prior, not merely the darkest shade.
+
+    Cheap thermal cameras create fake dark bands inside panels.  The prior-centered
+    penalty makes an internal shadow lose against a plausible boundary groove.
+    """
+    arr = np.asarray(profile, dtype=np.float32).reshape(-1)
+    if arr.size < 3:
+        return (None, 0.0)
+    arr = cv2.GaussianBlur(arr.reshape(-1, 1), (1, 3), 0).reshape(-1)
+    coords = origin + np.arange(arr.size, dtype=np.float32)
+    d = np.abs(coords - float(prior_abs))
+    mask = d <= float(search_radius)
+    if not np.any(mask):
+        return (None, 0.0)
+    vals = arr[mask]
+    cs = coords[mask]
+    ds = d[mask]
+    vmin = float(np.min(vals))
+    vmax = float(np.max(vals))
+    span = max(1.0, vmax - vmin)
+    score = (vals - vmin) / span + 0.62 * (ds / max(1.0, float(search_radius)))
+    k = int(np.argmin(score))
+    pos = float(cs[k])
+    kk = int(round(pos - origin))
+    lo = max(0, kk - 2)
+    hi = min(arr.size, kk + 3)
+    local_min = float(np.min(arr[lo:hi])) if hi > lo else float(arr[kk])
+    local_med = float(np.median(arr))
+    contrast = max(0.0, local_med - local_min)
+    return (pos, contrast)
+
+def V42___v38_fit_shared_boundary_line(gray, bboxes, assignments, priors, axis, idx, win, nseg=V42__V38_EDGE_SEGMENTS):
+    """Fit one shared grid boundary from constrained multi-segment dark valleys.
+
+    axis='v': vertical boundary, final line x=m*y+c.
+    axis='h': horizontal boundary, final line y=m*x+c.
+    """
+    h, w = gray.shape[:2]
+    related = []
+    for b, a in zip(bboxes, assignments):
+        li, ri, ti, bi = a
+        if axis == 'v' and (li == idx or ri == idx):
+            related.append(b)
+        elif axis == 'h' and (ti == idx or bi == idx):
+            related.append(b)
+    if not related:
+        return None
+    if axis == 'v':
+        prior = float(priors[idx])
+        ya = max(0.0, min((b[1] for b in related)) - 0.06 * float(np.median([bb[3] - bb[1] for bb in bboxes])))
+        yb = min(float(h - 1), max((b[3] for b in related)) + 0.06 * float(np.median([bb[3] - bb[1] for bb in bboxes])))
+        if yb <= ya + 4:
+            return None
+        seg_pts = []
+        contrasts = []
+        for si in range(int(nseg)):
+            s0 = ya + si * (yb - ya) / float(nseg)
+            s1 = ya + (si + 1) * (yb - ya) / float(nseg)
+            sample_n = max(5, int(round((s1 - s0) / 5.0)))
+            pts = []
+            conts = []
+            for y in np.linspace(s0, s1, sample_n):
+                yi = int(round(np.clip(y, 0, h - 1)))
+                xa = int(round(max(0, prior - win)))
+                xb = int(round(min(w - 1, prior + win)))
+                if xb <= xa + 2:
+                    continue
+                pos, cont = V42___v38_profile_valley_constrained(gray[yi, xa:xb + 1], xa, prior, win)
+                if pos is None:
+                    continue
+                pts.append([float(pos), float(yi)])
+                conts.append(cont)
+            ln = V42___v36_fit_line(pts, horizontal=False)
+            if ln is not None and ln.get('n', 0) >= 3:
+                pmid = 0.5 * (s0 + s1)
+                xpos = ln['m'] * pmid + ln['c']
+                if abs(xpos - prior) <= max(3.0, 0.8 * win):
+                    seg_pts.extend(pts)
+                    contrasts.extend(conts)
+        line = V42___v36_fit_line(seg_pts, horizontal=False)
+        anchor_coord = 0.5 * (ya + yb)
+    else:
+        prior = float(priors[idx])
+        xa = max(0.0, min((b[0] for b in related)) - 0.06 * float(np.median([bb[2] - bb[0] for bb in bboxes])))
+        xb = min(float(w - 1), max((b[2] for b in related)) + 0.06 * float(np.median([bb[2] - bb[0] for bb in bboxes])))
+        if xb <= xa + 4:
+            return None
+        seg_pts = []
+        contrasts = []
+        for si in range(int(nseg)):
+            s0 = xa + si * (xb - xa) / float(nseg)
+            s1 = xa + (si + 1) * (xb - xa) / float(nseg)
+            sample_n = max(5, int(round((s1 - s0) / 5.0)))
+            pts = []
+            conts = []
+            for x in np.linspace(s0, s1, sample_n):
+                xi = int(round(np.clip(x, 0, w - 1)))
+                ya2 = int(round(max(0, prior - win)))
+                yb2 = int(round(min(h - 1, prior + win)))
+                if yb2 <= ya2 + 2:
+                    continue
+                pos, cont = V42___v38_profile_valley_constrained(gray[ya2:yb2 + 1, xi], ya2, prior, win)
+                if pos is None:
+                    continue
+                pts.append([float(xi), float(pos)])
+                conts.append(cont)
+            ln = V42___v36_fit_line(pts, horizontal=True)
+            if ln is not None and ln.get('n', 0) >= 3:
+                pmid = 0.5 * (s0 + s1)
+                ypos = ln['m'] * pmid + ln['c']
+                if abs(ypos - prior) <= max(3.0, 0.8 * win):
+                    seg_pts.extend(pts)
+                    contrasts.extend(conts)
+        line = V42___v36_fit_line(seg_pts, horizontal=True)
+        anchor_coord = 0.5 * (xa + xb)
+    if line is None or line.get('n', 0) < 8:
+        if axis == 'v':
+            line = {'m': 0.0, 'c': prior, 'res': 99.0, 'n': 0, 'horizontal': False, 'source': 'v38_prior_boundary_fallback'}
+        else:
+            line = {'m': 0.0, 'c': prior, 'res': 99.0, 'n': 0, 'horizontal': True, 'source': 'v38_prior_boundary_fallback'}
+    else:
+        line['source'] = 'v38_shared_grid_8seg'
+    line['axis'] = axis
+    line['prior'] = float(prior)
+    line['anchor_coord'] = float(anchor_coord)
+    line['contrast'] = float(np.median(contrasts)) if contrasts else 0.0
+    line['boundary_idx'] = int(idx)
+    return line
+
+def V42___v38_clamp_shared_line_slopes(lines, axis, max_diff_deg=2.8):
+    valid = [ln for ln in lines if ln is not None and ln.get('n', 0) >= 8]
+    if not valid:
+        return lines
+    med_slope = float(np.median([ln['m'] for ln in valid]))
+    for ln in lines:
+        if ln is None:
+            continue
+        if ln.get('n', 0) < 8:
+            ln['m'] = med_slope
+            ln['source'] = ln.get('source', '') + '_consensus_slope'
+            continue
+        a = math.atan(float(ln['m']))
+        aref = math.atan(med_slope)
+        maxd = math.radians(float(max_diff_deg))
+        if abs(a - aref) > maxd:
+            new_m = math.tan(aref + math.copysign(maxd, a - aref))
+            ln['m'] = float(new_m)
+            ln['source'] = ln.get('source', '') + '_slope_clamp'
+    return lines
+
+def V42___v38_prior_guard_line(line, prior, axis):
+    """Keep shared boundary centered near the bbox-derived prior at its anchor."""
+    ln = dict(line)
+    anchor = float(ln.get('anchor_coord', 0.0))
+    if axis == 'v':
+        pos = float(ln['m']) * anchor + float(ln['c'])
+        if abs(pos - float(prior)) > 12.0:
+            ln['c'] += float(prior) - pos
+            ln['source'] = ln.get('source', '') + '_prior_anchor_guard'
+    else:
+        pos = float(ln['m']) * anchor + float(ln['c'])
+        if abs(pos - float(prior)) > 12.0:
+            ln['c'] += float(prior) - pos
+            ln['source'] = ln.get('source', '') + '_prior_anchor_guard'
+    return ln
+
+def V42___v38_poly_yolo_coverage_ok(poly, bbox):
+    if poly is None:
+        return (False, 'none')
+    b = bbox
+    area = float(cv2.contourArea(poly))
+    bbox_area = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    if area <= 20 or not cv2.isContourConvex(poly.astype(np.int32)):
+        return (False, 'area_or_convex')
+    bx, by, bw, bh = cv2.boundingRect(poly.astype(np.float32))
+    cover_w = max(0.0, min(float(bx + bw), b[2]) - max(float(bx), b[0])) / max(1.0, b[2] - b[0])
+    cover_h = max(0.0, min(float(by + bh), b[3]) - max(float(by), b[1])) / max(1.0, b[3] - b[1])
+    ratio = area / bbox_area
+    if ratio < V42__V38_MIN_COVERAGE_RATIO:
+        return (False, f'area_ratio_low_{ratio:.2f}')
+    if ratio > V42__V38_MAX_EXPAND_RATIO:
+        return (False, f'area_ratio_high_{ratio:.2f}')
+    if cover_w < 0.9 or cover_h < 0.9:
+        return (False, f'coverage_low_{cover_w:.2f}_{cover_h:.2f}')
+    return (True, 'ok')
+
+def V42___v38_build_closeup_shared_grid_outputs(image_path, panels_path, out_dir, stem):
+    """Build close-up geometry from shared grid boundary lines.
+
+    This is stricter than v37: panels in the same row/column reuse the same fitted
+    line, so the final grid is visually coherent.  Each shared boundary is still
+    fitted from 8 constrained dark-groove segments.
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {image_path}')
+    gray = V42___v36_norm_gray_for_valleys(img)
+    panels = V42__load_panels_from_logs()
+    bboxes = []
+    for p0 in panels:
+        b = V42___v36_panel_bbox(p0)
+        if b is not None:
+            bboxes.append(b)
+    if not bboxes:
+        return 0
+    med_w = float(np.median([b[2] - b[0] for b in bboxes]))
+    med_h = float(np.median([b[3] - b[1] for b in bboxes]))
+    win = int(round(np.clip(0.045 * min(med_w, med_h), 5, 14)))
+    xs, ys, assignments = V42___v38_infer_shared_grid_from_bboxes(bboxes)
+    if len(xs) < 2 or len(ys) < 2:
+        print(f'[V38_SHARED_GRID_FALLBACK] image={stem} reason=insufficient_grid_lines')
+        return V42___v37_build_closeup_multiline_snap_outputs(image_path, panels_path, out_dir, stem)
+    vlines = [V42___v38_fit_shared_boundary_line(gray, bboxes, assignments, xs, 'v', i, win, V42__V38_EDGE_SEGMENTS) for i in range(len(xs))]
+    hlines = [V42___v38_fit_shared_boundary_line(gray, bboxes, assignments, ys, 'h', i, win, V42__V38_EDGE_SEGMENTS) for i in range(len(ys))]
+    vlines = V42___v38_clamp_shared_line_slopes(vlines, 'v')
+    hlines = V42___v38_clamp_shared_line_slopes(hlines, 'h')
+    vlines = [V42___v38_prior_guard_line(ln, xs[i], 'v') if ln is not None else None for i, ln in enumerate(vlines)]
+    hlines = [V42___v38_prior_guard_line(ln, ys[i], 'h') if ln is not None else None for i, ln in enumerate(hlines)]
+    img_snap = img.copy()
+    img_calc = img.copy()
+    polys = []
+    for idx, (b, a) in enumerate(zip(bboxes, assignments)):
+        li, ri, ti, bi = a
+        if min(li, ri, ti, bi) < 0 or li >= len(vlines) or ri >= len(vlines) or (ti >= len(hlines)) or (bi >= len(hlines)):
+            print(f'[V38_LOCAL_SKIP] image={stem} idx={idx} reason=bad_assignment')
+            continue
+        edges = {'left': vlines[li], 'right': vlines[ri], 'top': hlines[ti], 'bottom': hlines[bi]}
+        poly = V42___v37_edges_to_poly(edges)
+        ok, reason = V42___v38_poly_yolo_coverage_ok(poly, b)
+        if not ok:
+            edges2 = {k: dict(v) if v is not None else None for k, v in edges.items()}
+            if edges2['left'] is not None:
+                edges2['left']['c'] = float(xs[li])
+            if edges2['right'] is not None:
+                edges2['right']['c'] = float(xs[ri])
+            if edges2['top'] is not None:
+                edges2['top']['c'] = float(ys[ti])
+            if edges2['bottom'] is not None:
+                edges2['bottom']['c'] = float(ys[bi])
+            poly2 = V42___v37_edges_to_poly(edges2)
+            ok2, reason2 = V42___v38_poly_yolo_coverage_ok(poly2, b)
+            if not ok2:
+                print(f'[V38_LOCAL_SKIP] image={stem} idx={idx} reason={reason}->{reason2}')
+                continue
+            poly = poly2
+        polys.append(poly)
+        cv2.polylines(img_snap, [poly.astype(np.int32)], True, (170, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        inner, _, valid = V42__inset_quad_polygon(poly, V42__INNER_PANEL_MARGIN_PX)
+        if valid:
+            cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_line_snap.JPG'), img_snap)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_calc_inner_polygon.JPG'), img_calc)
+    print(f'[V38_LOCAL_SUMMARY] image={stem} panels_in_log={len(bboxes)} drawn={len(polys)} shared_v={len(xs)} shared_h={len(ys)} win={win} segments={V42__V38_EDGE_SEGMENTS}')
+    return len(polys)
+V42__V39_MIN_BLOCK_SIZE = 1
+V42__V39_ADJ_SAME_ROW_Y_FRAC = 0.62
+V42__V39_ADJ_SAME_COL_X_FRAC = 0.62
+V42__V39_ADJ_GAP_X_FRAC = 0.42
+V42__V39_ADJ_GAP_Y_FRAC = 0.42
+V42__V39_BOUNDARY_ERR_FRAC = 0.085
+V42__V39_BOUNDARY_ERR_MIN_PX = 5.5
+
+def V42___v39_bbox_center(b):
+    return ((float(b[0]) + float(b[2])) * 0.5, (float(b[1]) + float(b[3])) * 0.5)
+
+def V42___v39_gap_1d(a0, a1, b0, b1):
+    """Positive gap between two 1D intervals, zero if overlapping/touching."""
+    return max(0.0, max(float(a0), float(b0)) - min(float(a1), float(b1)))
+
+def V42___v39_partition_bboxes_into_blocks(bboxes):
+    """Split YOLO-prior panels into spatially connected mounting blocks.
+
+    V38 treated all detections in one image as one shared grid.  On close-up
+    imagery this can allow a hot/cold structural lane between two PV mounting
+    areas to influence a shared horizontal/vertical boundary.  V39 builds the
+    graph from actual bbox adjacency and fits each connected component
+    independently.  YOLO bboxes remain priors only; final panels are still made
+    by line intersections.
+    """
+    n = len(bboxes)
+    if n <= 1:
+        return [list(range(n))]
+    widths = [float(b[2] - b[0]) for b in bboxes]
+    heights = [float(b[3] - b[1]) for b in bboxes]
+    med_w = max(2.0, float(np.median(widths)))
+    med_h = max(2.0, float(np.median(heights)))
+    same_row_y = V42__V39_ADJ_SAME_ROW_Y_FRAC * med_h
+    same_col_x = V42__V39_ADJ_SAME_COL_X_FRAC * med_w
+    max_gap_x = V42__V39_ADJ_GAP_X_FRAC * med_w
+    max_gap_y = V42__V39_ADJ_GAP_Y_FRAC * med_h
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = (find(a), find(b))
+        if ra != rb:
+            parent[rb] = ra
+    centers = [V42___v39_bbox_center(b) for b in bboxes]
+    for i in range(n):
+        bi = bboxes[i]
+        cxi, cyi = centers[i]
+        for j in range(i + 1, n):
+            bj = bboxes[j]
+            cxj, cyj = centers[j]
+            gap_x = V42___v39_gap_1d(bi[0], bi[2], bj[0], bj[2])
+            y_overlap = max(0.0, min(float(bi[3]), float(bj[3])) - max(float(bi[1]), float(bj[1])))
+            same_row = abs(cyi - cyj) <= same_row_y or y_overlap >= 0.45 * min(float(bi[3] - bi[1]), float(bj[3] - bj[1]))
+            if same_row and gap_x <= max_gap_x:
+                union(i, j)
+                continue
+            gap_y = V42___v39_gap_1d(bi[1], bi[3], bj[1], bj[3])
+            x_overlap = max(0.0, min(float(bi[2]), float(bj[2])) - max(float(bi[0]), float(bj[0])))
+            same_col = abs(cxi - cxj) <= same_col_x or x_overlap >= 0.45 * min(float(bi[2] - bi[0]), float(bj[2] - bj[0]))
+            if same_col and gap_y <= max_gap_y:
+                union(i, j)
+    comps = {}
+    for i in range(n):
+        comps.setdefault(find(i), []).append(i)
+    blocks = list(comps.values())
+    blocks.sort(key=lambda inds: (np.mean([centers[i][1] for i in inds]), np.mean([centers[i][0] for i in inds])))
+    return blocks
+
+def V42___v39_boundary_related_errors(line, bboxes, assignments, priors, axis, idx):
+    errs = []
+    hlist = [float(b[3] - b[1]) for b in bboxes]
+    wlist = [float(b[2] - b[0]) for b in bboxes]
+    med_dim = max(2.0, float(np.median(wlist if axis == 'v' else hlist)))
+    for b, a in zip(bboxes, assignments):
+        li, ri, ti, bi = a
+        if axis == 'v':
+            expected = None
+            if li == idx:
+                expected = float(b[0])
+            elif ri == idx:
+                expected = float(b[2])
+            if expected is None:
+                continue
+            y = 0.5 * (float(b[1]) + float(b[3]))
+            pred = float(line['m']) * y + float(line['c'])
+        else:
+            expected = None
+            if ti == idx:
+                expected = float(b[1])
+            elif bi == idx:
+                expected = float(b[3])
+            if expected is None:
+                continue
+            x = 0.5 * (float(b[0]) + float(b[2]))
+            pred = float(line['m']) * x + float(line['c'])
+        errs.append(abs(pred - expected))
+    lim = max(V42__V39_BOUNDARY_ERR_MIN_PX, V42__V39_BOUNDARY_ERR_FRAC * med_dim)
+    return (errs, lim)
+
+def V42___v39_guard_shared_lines_against_bbox_priors(lines, bboxes, assignments, priors, axis):
+    """Reject line fits that explain a fake dark band but violate bbox edges.
+
+    This uses YOLO only as a prior/guard.  The final line remains a line primitive;
+    when the thermal valley evidence is inconsistent with bbox topology, we keep
+    the consensus slope but re-anchor the line to the shared boundary prior.
+    """
+    valid_slopes = [float(ln['m']) for ln in lines if ln is not None and ln.get('n', 0) >= 8]
+    med_slope = float(np.median(valid_slopes)) if valid_slopes else 0.0
+    guarded = []
+    for i, ln in enumerate(lines):
+        if ln is None:
+            guarded.append(None)
+            continue
+        errs, lim = V42___v39_boundary_related_errors(ln, bboxes, assignments, priors, axis, i)
+        med_err = float(np.median(errs)) if errs else 0.0
+        p80_err = float(np.percentile(errs, 80)) if errs else 0.0
+        if errs and (med_err > lim or p80_err > 1.35 * lim):
+            new_ln = dict(ln)
+            new_ln['m'] = med_slope
+            if axis == 'v':
+                ys = []
+                for b, a in zip(bboxes, assignments):
+                    li, ri, ti, bi = a
+                    if li == i or ri == i:
+                        ys.append(0.5 * (float(b[1]) + float(b[3])))
+                anchor = float(np.median(ys)) if ys else float(new_ln.get('anchor_coord', 0.0))
+                new_ln['c'] = float(priors[i]) - med_slope * anchor
+            else:
+                xs2 = []
+                for b, a in zip(bboxes, assignments):
+                    li, ri, ti, bi = a
+                    if ti == i or bi == i:
+                        xs2.append(0.5 * (float(b[0]) + float(b[2])))
+                anchor = float(np.median(xs2)) if xs2 else float(new_ln.get('anchor_coord', 0.0))
+                new_ln['c'] = float(priors[i]) - med_slope * anchor
+            new_ln['source'] = new_ln.get('source', '') + f'_v39_bbox_prior_guard_mederr_{med_err:.1f}'
+            guarded.append(new_ln)
+        else:
+            guarded.append(ln)
+    return guarded
+
+def V42___v39_component_lines(gray, block_bboxes, win):
+    xs, ys, assignments = V42___v38_infer_shared_grid_from_bboxes(block_bboxes)
+    if len(xs) < 2 or len(ys) < 2:
+        return (None, None, None, xs, ys)
+    vlines = [V42___v38_fit_shared_boundary_line(gray, block_bboxes, assignments, xs, 'v', i, win, V42__V38_EDGE_SEGMENTS) for i in range(len(xs))]
+    hlines = [V42___v38_fit_shared_boundary_line(gray, block_bboxes, assignments, ys, 'h', i, win, V42__V38_EDGE_SEGMENTS) for i in range(len(ys))]
+    vlines = V42___v38_clamp_shared_line_slopes(vlines, 'v', max_diff_deg=1.8)
+    hlines = V42___v38_clamp_shared_line_slopes(hlines, 'h', max_diff_deg=1.8)
+    vlines = [V42___v38_prior_guard_line(ln, xs[i], 'v') if ln is not None else None for i, ln in enumerate(vlines)]
+    hlines = [V42___v38_prior_guard_line(ln, ys[i], 'h') if ln is not None else None for i, ln in enumerate(hlines)]
+    vlines = V42___v39_guard_shared_lines_against_bbox_priors(vlines, block_bboxes, assignments, xs, 'v')
+    hlines = V42___v39_guard_shared_lines_against_bbox_priors(hlines, block_bboxes, assignments, ys, 'h')
+    return (vlines, hlines, assignments, xs, ys)
+
+def V42___v39_build_closeup_partitioned_grid_outputs(image_path, panels_path, out_dir, stem):
+    """V39 local route: partitioned shared-grid snapping.
+
+    Compared with V38, this avoids fitting one image-wide grid across physically
+    separate PV mounting areas or across a structural service lane.  It also adds
+    a per-boundary bbox-topology guard so fake shade/thermal smear cannot pull a
+    shared line far away from the detector prior.
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {image_path}')
+    gray = V42___v36_norm_gray_for_valleys(img)
+    panels = V42__load_panels_from_logs()
+    bboxes = []
+    for p0 in panels:
+        b = V42___v36_panel_bbox(p0)
+        if b is not None:
+            bboxes.append(b)
+    if not bboxes:
+        return 0
+    med_w = float(np.median([b[2] - b[0] for b in bboxes]))
+    med_h = float(np.median([b[3] - b[1] for b in bboxes]))
+    win = int(round(np.clip(0.04 * min(med_w, med_h), 5, 12)))
+    blocks = V42___v39_partition_bboxes_into_blocks(bboxes)
+    img_snap = img.copy()
+    img_calc = img.copy()
+    drawn = 0
+    block_summaries = []
+    for block_id, inds in enumerate(blocks):
+        block_bboxes = [bboxes[i] for i in inds]
+        if len(block_bboxes) < V42__V39_MIN_BLOCK_SIZE:
+            continue
+        vlines, hlines, assignments, xs, ys = V42___v39_component_lines(gray, block_bboxes, win)
+        if vlines is None or hlines is None or assignments is None:
+            for orig_i, b in zip(inds, block_bboxes):
+                x1, y1, x2, y2 = map(float, b)
+                poly = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+                ok, reason = V42___v38_poly_yolo_coverage_ok(poly, b)
+                if not ok:
+                    continue
+                cv2.polylines(img_snap, [poly.astype(np.int32)], True, (170, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+                cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+                inner, _, valid = V42__inset_quad_polygon(poly, V42__INNER_PANEL_MARGIN_PX)
+                if valid:
+                    cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+                drawn += 1
+            block_summaries.append(f'b{block_id}:fallback_n{len(block_bboxes)}')
+            continue
+        local_drawn = 0
+        for local_idx, (orig_i, b, a) in enumerate(zip(inds, block_bboxes, assignments)):
+            li, ri, ti, bi = a
+            if min(li, ri, ti, bi) < 0 or li >= len(vlines) or ri >= len(vlines) or (ti >= len(hlines)) or (bi >= len(hlines)):
+                print(f'[V39_LOCAL_SKIP] image={stem} block={block_id} idx={orig_i} reason=bad_assignment')
+                continue
+            edges = {'left': vlines[li], 'right': vlines[ri], 'top': hlines[ti], 'bottom': hlines[bi]}
+            poly = V42___v37_edges_to_poly(edges)
+            ok, reason = V42___v38_poly_yolo_coverage_ok(poly, b)
+            if not ok:
+                edges2 = {k: dict(v) if v is not None else None for k, v in edges.items()}
+                if edges2['left'] is not None:
+                    yanch = 0.5 * (float(b[1]) + float(b[3]))
+                    edges2['left']['c'] = float(b[0]) - float(edges2['left']['m']) * yanch
+                if edges2['right'] is not None:
+                    yanch = 0.5 * (float(b[1]) + float(b[3]))
+                    edges2['right']['c'] = float(b[2]) - float(edges2['right']['m']) * yanch
+                if edges2['top'] is not None:
+                    xanch = 0.5 * (float(b[0]) + float(b[2]))
+                    edges2['top']['c'] = float(b[1]) - float(edges2['top']['m']) * xanch
+                if edges2['bottom'] is not None:
+                    xanch = 0.5 * (float(b[0]) + float(b[2]))
+                    edges2['bottom']['c'] = float(b[3]) - float(edges2['bottom']['m']) * xanch
+                poly2 = V42___v37_edges_to_poly(edges2)
+                ok2, reason2 = V42___v38_poly_yolo_coverage_ok(poly2, b)
+                if not ok2:
+                    print(f'[V39_LOCAL_SKIP] image={stem} block={block_id} idx={orig_i} reason={reason}->{reason2}')
+                    continue
+                poly = poly2
+            cv2.polylines(img_snap, [poly.astype(np.int32)], True, (170, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            inner, _, valid = V42__inset_quad_polygon(poly, V42__INNER_PANEL_MARGIN_PX)
+            if valid:
+                cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            drawn += 1
+            local_drawn += 1
+        block_summaries.append(f'b{block_id}:n{len(block_bboxes)} draw{local_drawn} v{len(xs)} h{len(ys)}')
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_line_snap.JPG'), img_snap)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_calc_inner_polygon.JPG'), img_calc)
+    print(f"[V39_LOCAL_SUMMARY] image={stem} panels_in_log={len(bboxes)} drawn={drawn} blocks={len(blocks)} win={win} segments={V42__V38_EDGE_SEGMENTS} detail={'|'.join(block_summaries[:12])}")
+    return drawn
+V42__V40_MIN_COVERAGE_RATIO = 0.92
+V42__V40_MAX_EXPAND_RATIO = 1.16
+V42__V40_EDGE_ENVELOPE_FRAC = 0.035
+V42__V40_EDGE_ENVELOPE_MIN_PX = 3.0
+V42__V40_ISOLATED_TEXTURE_MIN = 0.34
+V42__V40_WEAK_TEXTURE_MIN = 0.2
+
+def V42___v40_bbox_conf(panel_obj):
+    for k in ('confidence', 'conf', 'score'):
+        try:
+            if k in panel_obj:
+                return float(panel_obj[k])
+        except Exception:
+            pass
+    return 1.0
+
+def V42___v40_bbox_iou_aabb(b1, b2):
+    x1 = max(float(b1[0]), float(b2[0]))
+    y1 = max(float(b1[1]), float(b2[1]))
+    x2 = min(float(b1[2]), float(b2[2]))
+    y2 = min(float(b1[3]), float(b2[3]))
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    a1 = max(1.0, (float(b1[2]) - float(b1[0])) * (float(b1[3]) - float(b1[1])))
+    a2 = max(1.0, (float(b2[2]) - float(b2[0])) * (float(b2[3]) - float(b2[1])))
+    return inter / max(1.0, a1 + a2 - inter)
+
+def V42___v40_panel_texture_score(gray, bbox):
+    """Cheap PV texture validator for close-up false positives.
+
+    Real module crops normally contain repeated cell busbar/grid texture plus
+    boundary rails. Service lanes / hot metal strips can be very hot or dark but
+    usually lack balanced fine x/y texture in the panel interior.  This is only a
+    gate for very weak/isolated priors; it does not classify faults.
+    """
+    h, w = gray.shape[:2]
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+    ix1 = int(round(np.clip(x1 + 0.1 * bw, 0, w - 1)))
+    ix2 = int(round(np.clip(x2 - 0.1 * bw, 0, w - 1)))
+    iy1 = int(round(np.clip(y1 + 0.12 * bh, 0, h - 1)))
+    iy2 = int(round(np.clip(y2 - 0.12 * bh, 0, h - 1)))
+    if ix2 <= ix1 + 8 or iy2 <= iy1 + 8:
+        return (0.0, {'reason': 'small_crop'})
+    crop = gray[iy1:iy2 + 1, ix1:ix2 + 1].astype(np.float32)
+    cmin, cmax = (float(np.percentile(crop, 2)), float(np.percentile(crop, 98)))
+    norm = np.clip((crop - cmin) / max(1.0, cmax - cmin), 0, 1)
+    gx = cv2.Sobel(norm, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(norm, cv2.CV_32F, 0, 1, ksize=3)
+    ax = np.abs(gx)
+    ay = np.abs(gy)
+    tx = float(np.mean(ax))
+    ty = float(np.mean(ay))
+    edge_mag = np.sqrt(ax * ax + ay * ay)
+    edge_density = float(np.mean(edge_mag > max(0.035, float(np.percentile(edge_mag, 65)))))
+    balance = min(tx, ty) / max(tx, ty, 1e-06)
+    col_prof = np.mean(norm, axis=0)
+    row_prof = np.mean(norm, axis=1)
+    col_var = float(np.std(cv2.GaussianBlur(col_prof.reshape(1, -1), (1, 5), 0).reshape(-1)))
+    row_var = float(np.std(cv2.GaussianBlur(row_prof.reshape(-1, 1), (1, 5), 0).reshape(-1)))
+    profile_score = np.clip((col_var + row_var) * 4.0, 0, 1)
+    texture = np.clip((tx + ty) * 3.2, 0, 1)
+    score = float(np.clip(0.4 * texture + 0.25 * edge_density + 0.2 * balance + 0.15 * profile_score, 0, 1))
+    return (score, {'tx': tx, 'ty': ty, 'edge_density': edge_density, 'balance': balance, 'profile': profile_score})
+
+def V42___v40_poly_yolo_coverage_ok(poly, bbox):
+    if poly is None:
+        return (False, 'none')
+    b = [float(v) for v in bbox]
+    area = float(cv2.contourArea(poly))
+    bbox_area = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    if area <= 20 or not cv2.isContourConvex(poly.astype(np.int32)):
+        return (False, 'area_or_convex')
+    bx, by, bw, bh = cv2.boundingRect(poly.astype(np.float32))
+    cover_w = max(0.0, min(float(bx + bw), b[2]) - max(float(bx), b[0])) / max(1.0, b[2] - b[0])
+    cover_h = max(0.0, min(float(by + bh), b[3]) - max(float(by), b[1])) / max(1.0, b[3] - b[1])
+    ratio = area / bbox_area
+    if ratio < V42__V40_MIN_COVERAGE_RATIO:
+        return (False, f'area_ratio_low_{ratio:.2f}')
+    if ratio > V42__V40_MAX_EXPAND_RATIO:
+        return (False, f'area_ratio_high_{ratio:.2f}')
+    if cover_w < 0.93 or cover_h < 0.93:
+        return (False, f'coverage_low_{cover_w:.2f}_{cover_h:.2f}')
+    return (True, 'ok')
+
+def V42___v40_clamp_edges_to_bbox_envelope(edges, bbox):
+    """Re-anchor line primitives to a small expanded bbox envelope.
+
+    This is deliberately not returning a YOLO rectangle.  The line slopes are kept;
+    only intercepts are adjusted if the line-grid polygon expands into a service
+    lane or hot/cold non-panel strip.
+    """
+    b = [float(v) for v in bbox]
+    w = max(1.0, b[2] - b[0])
+    h = max(1.0, b[3] - b[1])
+    ex = max(V42__V40_EDGE_ENVELOPE_MIN_PX, V42__V40_EDGE_ENVELOPE_FRAC * w)
+    ey = max(V42__V40_EDGE_ENVELOPE_MIN_PX, V42__V40_EDGE_ENVELOPE_FRAC * h)
+    targets = {'left': b[0] - ex, 'right': b[2] + ex, 'top': b[1] - ey, 'bottom': b[3] + ey}
+    out = {k: dict(v) if v is not None else None for k, v in edges.items()}
+    yanch = 0.5 * (b[1] + b[3])
+    xanch = 0.5 * (b[0] + b[2])
+    for side in ('left', 'right'):
+        ln = out.get(side)
+        if ln is None:
+            continue
+        pos = float(ln['m']) * yanch + float(ln['c'])
+        if side == 'left' and pos < targets['left']:
+            ln['c'] = targets['left'] - float(ln['m']) * yanch
+            ln['source'] = ln.get('source', '') + '_v40_left_envelope'
+        if side == 'right' and pos > targets['right']:
+            ln['c'] = targets['right'] - float(ln['m']) * yanch
+            ln['source'] = ln.get('source', '') + '_v40_right_envelope'
+    for side in ('top', 'bottom'):
+        ln = out.get(side)
+        if ln is None:
+            continue
+        pos = float(ln['m']) * xanch + float(ln['c'])
+        if side == 'top' and pos < targets['top']:
+            ln['c'] = targets['top'] - float(ln['m']) * xanch
+            ln['source'] = ln.get('source', '') + '_v40_top_envelope'
+        if side == 'bottom' and pos > targets['bottom']:
+            ln['c'] = targets['bottom'] - float(ln['m']) * xanch
+            ln['source'] = ln.get('source', '') + '_v40_bottom_envelope'
+    return out
+
+def V42___v40_anchor_edges_to_bbox(edges, bbox, expand_px=2.0):
+    b = [float(v) for v in bbox]
+    yanch = 0.5 * (b[1] + b[3])
+    xanch = 0.5 * (b[0] + b[2])
+    out = {k: dict(v) if v is not None else None for k, v in edges.items()}
+    if out.get('left') is not None:
+        out['left']['c'] = b[0] - expand_px - float(out['left']['m']) * yanch
+        out['left']['source'] = out['left'].get('source', '') + '_v40_bbox_anchor'
+    if out.get('right') is not None:
+        out['right']['c'] = b[2] + expand_px - float(out['right']['m']) * yanch
+        out['right']['source'] = out['right'].get('source', '') + '_v40_bbox_anchor'
+    if out.get('top') is not None:
+        out['top']['c'] = b[1] - expand_px - float(out['top']['m']) * xanch
+        out['top']['source'] = out['top'].get('source', '') + '_v40_bbox_anchor'
+    if out.get('bottom') is not None:
+        out['bottom']['c'] = b[3] + expand_px - float(out['bottom']['m']) * xanch
+        out['bottom']['source'] = out['bottom'].get('source', '') + '_v40_bbox_anchor'
+    return out
+
+def V42___v40_filter_bboxes_by_texture_and_isolation(gray, bboxes, panels):
+    if not bboxes:
+        return ([], [], [])
+    blocks0 = V42___v39_partition_bboxes_into_blocks(bboxes)
+    block_id_of = {}
+    for bi, inds in enumerate(blocks0):
+        for idx in inds:
+            block_id_of[idx] = bi
+    kept_b, kept_p, kept_orig = ([], [], [])
+    for i, (b, p) in enumerate(zip(bboxes, panels)):
+        score, info = V42___v40_panel_texture_score(gray, b)
+        block_n = len(blocks0[block_id_of.get(i, 0)]) if blocks0 else len(bboxes)
+        conf = V42___v40_bbox_conf(p)
+        if block_n <= 1 and score < V42__V40_ISOLATED_TEXTURE_MIN and (conf < 0.94):
+            print(f'[V40_PREFILTER_SKIP] idx={i} reason=isolated_weak_texture score={score:.2f} conf={conf:.2f} bbox={list(map(int, b))}')
+            continue
+        if score < 0.1 and conf < 0.9:
+            print(f'[V40_PREFILTER_SKIP] idx={i} reason=very_weak_texture score={score:.2f} conf={conf:.2f} bbox={list(map(int, b))}')
+            continue
+        kept_b.append(b)
+        kept_p.append(p)
+        kept_orig.append(i)
+    return (kept_b, kept_p, kept_orig)
+
+def V42___v40_build_closeup_conservative_grid_outputs(image_path, panels_path, out_dir, stem):
+    """V40 route: conservative close-up shared-grid line snap.
+
+    V40 is intended for cheap thermal close-ups where false shade/smear and hot
+    service lanes can pull dark-valley fitting.  It still builds line geometry,
+    but treats YOLO bboxes as stronger topology/envelope priors.
+    """
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {image_path}')
+    gray = V42___v36_norm_gray_for_valleys(img)
+    panels0 = V42__load_panels_from_logs()
+    bboxes0, panels = ([], [])
+    for p0 in panels0:
+        b = V42___v36_panel_bbox(p0)
+        if b is not None:
+            bboxes0.append(b)
+            panels.append(p0)
+    if not bboxes0:
+        return 0
+    bboxes, panels, kept_orig = V42___v40_filter_bboxes_by_texture_and_isolation(gray, bboxes0, panels)
+    if not bboxes:
+        return 0
+    med_w = float(np.median([b[2] - b[0] for b in bboxes]))
+    med_h = float(np.median([b[3] - b[1] for b in bboxes]))
+    win = int(round(np.clip(0.032 * min(med_w, med_h), 4, 9)))
+    blocks = V42___v39_partition_bboxes_into_blocks(bboxes)
+    img_snap = img.copy()
+    img_calc = img.copy()
+    drawn = 0
+    block_summaries = []
+    for block_id, inds in enumerate(blocks):
+        block_bboxes = [bboxes[i] for i in inds]
+        vlines, hlines, assignments, xs, ys = V42___v39_component_lines(gray, block_bboxes, win)
+        if vlines is None or hlines is None or assignments is None:
+            block_summaries.append(f'b{block_id}:skip_no_grid_n{len(block_bboxes)}')
+            continue
+        local_drawn = 0
+        for local_idx, (orig_i, b, a) in enumerate(zip(inds, block_bboxes, assignments)):
+            li, ri, ti, bi = a
+            if min(li, ri, ti, bi) < 0 or li >= len(vlines) or ri >= len(vlines) or (ti >= len(hlines)) or (bi >= len(hlines)):
+                print(f'[V40_LOCAL_SKIP] image={stem} block={block_id} idx={(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)} reason=bad_assignment')
+                continue
+            edges = {'left': vlines[li], 'right': vlines[ri], 'top': hlines[ti], 'bottom': hlines[bi]}
+            edges = V42___v40_clamp_edges_to_bbox_envelope(edges, b)
+            poly = V42___v37_edges_to_poly(edges)
+            ok, reason = V42___v40_poly_yolo_coverage_ok(poly, b)
+            if not ok:
+                edges2 = V42___v40_anchor_edges_to_bbox(edges, b, expand_px=2.0)
+                poly2 = V42___v37_edges_to_poly(edges2)
+                ok2, reason2 = V42___v40_poly_yolo_coverage_ok(poly2, b)
+                if not ok2:
+                    print(f'[V40_LOCAL_SKIP] image={stem} block={block_id} idx={(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)} reason={reason}->{reason2}')
+                    continue
+                poly = poly2
+            tex, _ = V42___v40_panel_texture_score(gray, b)
+            conf = V42___v40_bbox_conf(panels[orig_i]) if orig_i < len(panels) else 1.0
+            if tex < V42__V40_WEAK_TEXTURE_MIN and conf < 0.9:
+                print(f'[V40_LOCAL_SKIP] image={stem} block={block_id} idx={(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)} reason=weak_texture_final score={tex:.2f} conf={conf:.2f}')
+                continue
+            cv2.polylines(img_snap, [poly.astype(np.int32)], True, (170, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            inner, _, valid = V42__inset_quad_polygon(poly, V42__INNER_PANEL_MARGIN_PX)
+            if valid:
+                cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+            drawn += 1
+            local_drawn += 1
+        block_summaries.append(f'b{block_id}:n{len(block_bboxes)} draw{local_drawn} v{len(xs)} h{len(ys)}')
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_line_snap.JPG'), img_snap)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_calc_inner_polygon.JPG'), img_calc)
+    print(f"[V40_LOCAL_SUMMARY] image={stem} panels_in_log={len(bboxes0)} kept={len(bboxes)} drawn={drawn} blocks={len(blocks)} win={win} segments={V42__V38_EDGE_SEGMENTS} detail={'|'.join(block_summaries[:12])}")
+    return drawn
+V42__V42_POLY_SLOPE_WEIGHT = 0.72
+V42__V42_MAX_PRIOR_SLOPE_DEG_H = 8.0
+V42__V42_MAX_PRIOR_SLOPE_DEG_V = 8.0
+V42__V42_POLY_ANCHOR_EXPAND_PX = 2.0
+V42__V42_USE_POLYGON_FOR_BBOX = True
+
+def V42___v42_panel_prior_poly(panel_obj):
+    """Return an ordered detector prior polygon if present.
+
+    Priority: raw_yolo_poly > refined_polygon > segmentation/polygon-like keys.
+    This is only a prior for orientation/topology/guard.  It is never copied as
+    the final output polygon.
+    """
+    if not isinstance(panel_obj, dict):
+        return None
+    for key in ('raw_yolo_poly', 'mask_polygon', 'segmentation', 'polygon', 'refined_polygon'):
+        val = panel_obj.get(key, None)
+        if val is None:
+            continue
+        if key == 'segmentation' and isinstance(val, list) and val:
+            if isinstance(val[0], (int, float)):
+                arr = np.asarray(val, dtype=np.float32).reshape(-1, 2)
+            elif isinstance(val[0], list) and val[0] and isinstance(val[0][0], (int, float)):
+                arr = np.asarray(val[0], dtype=np.float32).reshape(-1, 2)
+            else:
+                try:
+                    arr = np.asarray(val, dtype=np.float32).reshape(-1, 2)
+                except Exception:
+                    arr = None
+        else:
+            try:
+                arr = np.asarray(val, dtype=np.float32).reshape(-1, 2)
+            except Exception:
+                arr = None
+        if arr is None or arr.shape[0] < 4:
+            continue
+        if not np.all(np.isfinite(arr)):
+            continue
+        if abs(float(cv2.contourArea(arr))) < 20:
+            continue
+        rect = cv2.minAreaRect(arr.astype(np.float32))
+        box = cv2.boxPoints(rect).astype(np.float32)
+        return V42___v42_order_quad_points(box)
+    return None
+
+def V42___v42_order_quad_points(pts):
+    pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
+    if pts.shape[0] != 4:
+        rect = cv2.minAreaRect(pts.astype(np.float32))
+        pts = cv2.boxPoints(rect).astype(np.float32)
+    c = np.mean(pts, axis=0)
+    ang = np.arctan2(pts[:, 1] - c[1], pts[:, 0] - c[0])
+    pts = pts[np.argsort(ang)]
+    ssum = pts[:, 0] + pts[:, 1]
+    tl_i = int(np.argmin(ssum))
+    pts = np.roll(pts, -tl_i, axis=0)
+    if pts[1, 1] > pts[3, 1]:
+        pts = np.array([pts[0], pts[3], pts[2], pts[1]], dtype=np.float32)
+    return pts.astype(np.float32)
+
+def V42___v42_line_from_points(p1, p2, axis):
+    p1 = np.asarray(p1, dtype=np.float32)
+    p2 = np.asarray(p2, dtype=np.float32)
+    if axis == 'h':
+        dx = float(p2[0] - p1[0])
+        dy = float(p2[1] - p1[1])
+        if abs(dx) < 1e-06:
+            return None
+        m = dy / dx
+        c = float(p1[1]) - m * float(p1[0])
+        return (m, c)
+    else:
+        dy = float(p2[1] - p1[1])
+        dx = float(p2[0] - p1[0])
+        if abs(dy) < 1e-06:
+            return None
+        m = dx / dy
+        c = float(p1[0]) - m * float(p1[1])
+        return (m, c)
+
+def V42___v42_poly_edge_slopes_and_priors(polys, bboxes):
+    """Extract per-panel horizontal/vertical slopes and boundary priors."""
+    h_slopes = []
+    v_slopes = []
+    edge_priors = []
+    for poly, b in zip(polys, bboxes):
+        if poly is None:
+            x1, y1, x2, y2 = [float(v) for v in b]
+            edge_priors.append({'left': x1, 'right': x2, 'top': y1, 'bottom': y2, 'poly': None})
+            continue
+        q = V42___v42_order_quad_points(poly)
+        tl, tr, br, bl = q
+        top = V42___v42_line_from_points(tl, tr, 'h')
+        bottom = V42___v42_line_from_points(bl, br, 'h')
+        left = V42___v42_line_from_points(tl, bl, 'v')
+        right = V42___v42_line_from_points(tr, br, 'v')
+        for ln in (top, bottom):
+            if ln is not None:
+                m = float(ln[0])
+                if abs(math.degrees(math.atan(m))) <= V42__V42_MAX_PRIOR_SLOPE_DEG_H:
+                    h_slopes.append(m)
+        for ln in (left, right):
+            if ln is not None:
+                m = float(ln[0])
+                if abs(math.degrees(math.atan(m))) <= V42__V42_MAX_PRIOR_SLOPE_DEG_V:
+                    v_slopes.append(m)
+        cx = float(np.mean(q[:, 0]))
+        cy = float(np.mean(q[:, 1]))
+        pr = {'poly': q}
+        pr['left'] = float(left[0]) * cy + float(left[1]) if left else float(b[0])
+        pr['right'] = float(right[0]) * cy + float(right[1]) if right else float(b[2])
+        pr['top'] = float(top[0]) * cx + float(top[1]) if top else float(b[1])
+        pr['bottom'] = float(bottom[0]) * cx + float(bottom[1]) if bottom else float(b[3])
+        edge_priors.append(pr)
+    mh = float(np.median(h_slopes)) if h_slopes else 0.0
+    mv = float(np.median(v_slopes)) if v_slopes else 0.0
+    mh = float(np.clip(mh, -math.tan(math.radians(V42__V42_MAX_PRIOR_SLOPE_DEG_H)), math.tan(math.radians(V42__V42_MAX_PRIOR_SLOPE_DEG_H))))
+    mv = float(np.clip(mv, -math.tan(math.radians(V42__V42_MAX_PRIOR_SLOPE_DEG_V)), math.tan(math.radians(V42__V42_MAX_PRIOR_SLOPE_DEG_V))))
+    return (mh, mv, edge_priors)
+
+def V42___v42_apply_polygon_orientation_prior(vlines, hlines, block_bboxes, assignments, poly_priors):
+    """Blend snapped line slopes with polygon/mask-derived orientation.
+
+    Positions remain from the shared-grid snap/guard.  Only slopes are regularized
+    toward the detector mask orientation, preserving each line's position at the
+    median related panel center.  This avoids bbox's 0-degree bias while keeping
+    final geometry line-derived.
+    """
+    mh, mv, edge_priors = V42___v42_poly_edge_slopes_and_priors(poly_priors, block_bboxes)
+    out_v = []
+    for i, ln in enumerate(vlines):
+        if ln is None:
+            out_v.append(None)
+            continue
+        related_y = []
+        for b, a in zip(block_bboxes, assignments):
+            li, ri, ti, bi = a
+            if li == i or ri == i:
+                related_y.append(0.5 * (float(b[1]) + float(b[3])))
+        yanch = float(np.median(related_y)) if related_y else float(ln.get('anchor_coord', 0.0))
+        old_m = float(ln.get('m', 0.0))
+        old_c = float(ln.get('c', 0.0))
+        pos = old_m * yanch + old_c
+        new_m = V42__V42_POLY_SLOPE_WEIGHT * mv + (1.0 - V42__V42_POLY_SLOPE_WEIGHT) * old_m
+        new_ln = dict(ln)
+        new_ln['m'] = float(new_m)
+        new_ln['c'] = float(pos - new_m * yanch)
+        new_ln['source'] = new_ln.get('source', '') + f'_v42_polyorient_mv_{mv:.4f}'
+        out_v.append(new_ln)
+    out_h = []
+    for i, ln in enumerate(hlines):
+        if ln is None:
+            out_h.append(None)
+            continue
+        related_x = []
+        for b, a in zip(block_bboxes, assignments):
+            li, ri, ti, bi = a
+            if ti == i or bi == i:
+                related_x.append(0.5 * (float(b[0]) + float(b[2])))
+        xanch = float(np.median(related_x)) if related_x else float(ln.get('anchor_coord', 0.0))
+        old_m = float(ln.get('m', 0.0))
+        old_c = float(ln.get('c', 0.0))
+        pos = old_m * xanch + old_c
+        new_m = V42__V42_POLY_SLOPE_WEIGHT * mh + (1.0 - V42__V42_POLY_SLOPE_WEIGHT) * old_m
+        new_ln = dict(ln)
+        new_ln['m'] = float(new_m)
+        new_ln['c'] = float(pos - new_m * xanch)
+        new_ln['source'] = new_ln.get('source', '') + f'_v42_polyorient_mh_{mh:.4f}'
+        out_h.append(new_ln)
+    return (out_v, out_h, mh, mv, edge_priors)
+
+def V42___v42_anchor_edges_to_polygon_or_bbox(edges, bbox, poly_prior=None, expand_px=V42__V42_POLY_ANCHOR_EXPAND_PX):
+    """Recovery anchor: use detector polygon/mask edges when present, bbox otherwise."""
+    out = {k: dict(v) if v is not None else None for k, v in edges.items()}
+    b = [float(v) for v in bbox]
+    x1, y1, x2, y2 = b
+    if poly_prior is not None:
+        q = V42___v42_order_quad_points(poly_prior)
+        tl, tr, br, bl = q
+        cx = float(np.mean(q[:, 0]))
+        cy = float(np.mean(q[:, 1]))
+        lines = {'left': V42___v42_line_from_points(tl, bl, 'v'), 'right': V42___v42_line_from_points(tr, br, 'v'), 'top': V42___v42_line_from_points(tl, tr, 'h'), 'bottom': V42___v42_line_from_points(bl, br, 'h')}
+        targets = {'left': float(lines['left'][0]) * cy + float(lines['left'][1]) if lines['left'] else x1, 'right': float(lines['right'][0]) * cy + float(lines['right'][1]) if lines['right'] else x2, 'top': float(lines['top'][0]) * cx + float(lines['top'][1]) if lines['top'] else y1, 'bottom': float(lines['bottom'][0]) * cx + float(lines['bottom'][1]) if lines['bottom'] else y2}
+        xanch = cx
+        yanch = cy
+    else:
+        targets = {'left': x1 - expand_px, 'right': x2 + expand_px, 'top': y1 - expand_px, 'bottom': y2 + expand_px}
+        xanch = 0.5 * (x1 + x2)
+        yanch = 0.5 * (y1 + y2)
+    if out.get('left') is not None:
+        out['left']['c'] = float(targets['left']) - float(out['left']['m']) * yanch
+        out['left']['source'] = out['left'].get('source', '') + '_v42_poly_anchor'
+    if out.get('right') is not None:
+        out['right']['c'] = float(targets['right']) - float(out['right']['m']) * yanch
+        out['right']['source'] = out['right'].get('source', '') + '_v42_poly_anchor'
+    if out.get('top') is not None:
+        out['top']['c'] = float(targets['top']) - float(out['top']['m']) * xanch
+        out['top']['source'] = out['top'].get('source', '') + '_v42_poly_anchor'
+    if out.get('bottom') is not None:
+        out['bottom']['c'] = float(targets['bottom']) - float(out['bottom']['m']) * xanch
+        out['bottom']['source'] = out['bottom'].get('source', '') + '_v42_poly_anchor'
+    return out
+
+def V42___v42_build_closeup_polygon_prior_grid_outputs(image_path, panels_path, out_dir, stem):
+    """V42 route: V40 conservative shared grid + polygon/mask orientation prior."""
+    img = cv2.imread(str(image_path))
+    if img is None:
+        raise ValueError(f'Could not read image at {image_path}')
+    gray = V42___v36_norm_gray_for_valleys(img)
+    panels0 = V42__load_panels_from_logs()
+    bboxes0, panels, prior_polys0 = ([], [], [])
+    for p0 in panels0:
+        b = V42___v36_panel_bbox(p0)
+        if b is not None:
+            poly = V42___v42_panel_prior_poly(p0)
+            bboxes0.append(b)
+            panels.append(p0)
+            prior_polys0.append(poly)
+    if not bboxes0:
+        return 0
+    bboxes, panels, kept_orig = V42___v40_filter_bboxes_by_texture_and_isolation(gray, bboxes0, panels)
+    prior_polys = [prior_polys0[i] if i < len(prior_polys0) else None for i in kept_orig]
+    if not bboxes:
+        return 0
+    med_w = float(np.median([b[2] - b[0] for b in bboxes]))
+    med_h = float(np.median([b[3] - b[1] for b in bboxes]))
+    win = int(round(np.clip(0.032 * min(med_w, med_h), 4, 9)))
+    blocks = V42___v39_partition_bboxes_into_blocks(bboxes)
+    img_snap = img.copy()
+    img_calc = img.copy()
+    drawn = 0
+    block_summaries = []
+    all_valid_polys = []
+    poly_orig_indices = []
+    for block_id, inds in enumerate(blocks):
+        block_bboxes = [bboxes[i] for i in inds]
+        block_polys = [prior_polys[i] for i in inds]
+        vlines, hlines, assignments, xs, ys = V42___v39_component_lines(gray, block_bboxes, win)
+        if vlines is None or hlines is None or assignments is None:
+            block_summaries.append(f'b{block_id}:skip_no_grid_n{len(block_bboxes)}')
+            continue
+        vlines, hlines, mh, mv, edge_priors = V42___v42_apply_polygon_orientation_prior(vlines, hlines, block_bboxes, assignments, block_polys)
+        local_drawn = 0
+        for local_idx, (orig_i, b, a) in enumerate(zip(inds, block_bboxes, assignments)):
+            li, ri, ti, bi = a
+            if min(li, ri, ti, bi) < 0 or li >= len(vlines) or ri >= len(vlines) or (ti >= len(hlines)) or (bi >= len(hlines)):
+                print(f'[V42_LOCAL_SKIP] image={stem} block={block_id} idx={(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)} reason=bad_assignment')
+                continue
+            edges = {'left': vlines[li], 'right': vlines[ri], 'top': hlines[ti], 'bottom': hlines[bi]}
+            edges = V42___v40_clamp_edges_to_bbox_envelope(edges, b)
+            poly = V42___v37_edges_to_poly(edges)
+            ok, reason = V42___v40_poly_yolo_coverage_ok(poly, b)
+            if not ok:
+                local_poly_prior = block_polys[local_idx] if local_idx < len(block_polys) else None
+                edges2 = V42___v42_anchor_edges_to_polygon_or_bbox(edges, b, local_poly_prior)
+                poly2 = V42___v37_edges_to_poly(edges2)
+                ok2, reason2 = V42___v40_poly_yolo_coverage_ok(poly2, b)
+                if not ok2:
+                    print(f'[V42_LOCAL_SKIP] image={stem} block={block_id} idx={(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)} reason={reason}->{reason2}')
+                    continue
+                poly = poly2
+            tex, _ = V42___v40_panel_texture_score(gray, b)
+            conf = V42___v40_bbox_conf(panels[orig_i]) if orig_i < len(panels) else 1.0
+            if tex < V42__V40_WEAK_TEXTURE_MIN and conf < 0.9:
+                print(f'[V42_LOCAL_SKIP] image={stem} block={block_id} idx={(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)} reason=weak_texture_final score={tex:.2f} conf={conf:.2f}')
+                continue
+            all_valid_polys.append(poly)
+            poly_orig_indices.append(kept_orig[orig_i] if orig_i < len(kept_orig) else orig_i)
+            local_drawn += 1
+        poly_n = sum((1 for pp in block_polys if pp is not None))
+        block_summaries.append(f'b{block_id}:n{len(block_bboxes)} draw{local_drawn} v{len(xs)} h{len(ys)} poly{poly_n} mh{mh:.4f} mv{mv:.4f}')
+    if all_valid_polys:
+        calc_areas = []
+        for poly in all_valid_polys:
+            final_poly = poly.astype(np.float32)
+            inner_poly, _, valid = V42__inset_quad_polygon(final_poly, V42__INNER_PANEL_MARGIN_PX)
+            area = float(cv2.contourArea(inner_poly)) if valid else float(cv2.contourArea(final_poly))
+            calc_areas.append(area)
+        sorted_areas = sorted(calc_areas, reverse=True)
+        k = max(1, int(math.ceil(len(sorted_areas) * 0.5)))
+        top_50_avg = sum(sorted_areas[:k]) / k
+        threshold_area = 0.8 * top_50_avg
+        filtered_polys = []
+        for poly, area, orig_idx in zip(all_valid_polys, calc_areas, poly_orig_indices):
+            if area >= threshold_area:
+                filtered_polys.append(poly)
+            else:
+                print(f'[AREA_FILTER_REJECT] idx={orig_idx} area_after_inset={area:.1f} threshold={threshold_area:.1f} top_50_avg={top_50_avg:.1f} action=discard')
+        all_valid_polys = filtered_polys
+    for poly in all_valid_polys:
+        cv2.polylines(img_snap, [poly.astype(np.int32)], True, (170, 0, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        cv2.polylines(img_calc, [poly.astype(np.int32)], True, (0, 255, 255), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        inner, _, valid = V42__inset_quad_polygon(poly.astype(np.float32), V42__INNER_PANEL_MARGIN_PX)
+        if valid:
+            cv2.polylines(img_calc, [inner.astype(np.int32)], True, (255, 255, 0), V42__VISUAL_PANEL_THICKNESS, cv2.LINE_AA)
+        drawn += 1
+        poly_n = sum((1 for pp in block_polys if pp is not None))
+        block_summaries.append(f'b{block_id}:n{len(block_bboxes)} draw{local_drawn} v{len(xs)} h{len(ys)} poly{poly_n} mh{mh:.4f} mv{mv:.4f}')
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_line_snap.JPG'), img_snap)
+    cv2.imwrite(str(Path(out_dir) / f'debug_{stem}_calc_inner_polygon.JPG'), img_calc)
+    print(f"[V42_LOCAL_SUMMARY] image={stem} panels_in_log={len(bboxes0)} kept={len(bboxes)} drawn={drawn} blocks={len(blocks)} win={win} segments={V42__V38_EDGE_SEGMENTS} detail={'|'.join(block_summaries[:12])}")
+    return drawn
+
+def V42___strip_raw_prefix_from_stem(stem):
+    """Return canonical stem used by YOLO/refine logs.
+
+    Many backend folders contain both annotated images (DJI_0953.JPG) and clean
+    thermal images (raw_DJI_0953.JPG).  The panel log is normally keyed by the
+    non-raw stem.  V35 keeps the output/log stem canonical while allowing the
+    clean raw_* image to be used as the line-snap/debug base.
+    """
+    return stem[4:] if stem.startswith('raw_') else stem
+
+def V42___resolve_clean_base_image(img_path, prefer_raw=True):
+    """Prefer sibling raw_<name> image as processing base when available.
+
+    This prevents YOLO/demo annotations already burned into DJI_*.JPG from
+    contaminating the debug output and the valley/rail sampling.  Geometry is
+    still driven by the same canonical panel log; only the raster base changes.
+    """
+    img_path = Path(img_path)
+    if not prefer_raw:
+        return img_path
+    if img_path.name.startswith('raw_'):
+        return img_path
+    raw_candidate = img_path.with_name('raw_' + img_path.name)
+    if raw_candidate.exists():
+        return raw_candidate
+    return img_path
+
+def V42___find_panel_log_for_stem(stem, logs_dir):
+    stem = V42___strip_raw_prefix_from_stem(stem)
+    logs_dir = Path(logs_dir)
+    candidates = [logs_dir / f'{stem}_panel_refine.jsonl', logs_dir / f'{stem}_panel_refine.json', logs_dir / f'{stem}.jsonl', logs_dir / f'{stem}.json']
+    for p in candidates:
+        if p.exists():
+            return p
+    loose = sorted(logs_dir.glob(f'*{stem}*panel*.*'))
+    for p in loose:
+        if p.suffix.lower() in ('.jsonl', '.json'):
+            return p
+    return None
+
+def V42___cleanup_outputs_for_stem(stem, out_dir):
+    out_dir = Path(out_dir)
+    keep = {f'debug_{stem}_line_snap.JPG', f'debug_{stem}_calc_inner_polygon.JPG'}
+    for p in out_dir.glob(f'debug_{stem}_*'):
+        if p.name not in keep:
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    for p in out_dir.glob(f'*{stem}*.csv'):
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+def V42___cleanup_global_debug_side_outputs(out_dir):
+    """Remove legacy side-output debug files from previous runs.
+
+    The local test workflow must keep only *_line_snap.JPG and *_calc_inner_polygon.JPG.
+    This also removes old hardcoded DJI_0087 crop-left files that older builds emitted.
+    """
+    out_dir = Path(out_dir)
+    patterns = ['debug_*_crop_left_snap_debug.JPG', 'debug_*_crop_left_profiles.jsonl', 'debug_*_smallblock_mask.JPG', 'debug_*_block_*_mask.JPG', 'debug_*_inner_margin_x2.JPG', 'panel_inner_area_*.csv', 'panel_calc_polygon_*.csv']
+    for pat in patterns:
+        for q in out_dir.glob(pat):
+            try:
+                q.unlink()
+            except Exception:
+                pass
+
+def V42__main():
+    parser = argparse.ArgumentParser(description='Batch PV geometry post-processor using preserved line-snap pipeline + v42 polygon/mask-prior close-up routing.')
+    parser.add_argument('--dataset', default='D:\\\\Image\\\\Plot_16_50MW\\\\content\\\\Dataset\\\\Plot_16_50MW\\\\DATASET', help='Folder containing input JPG/JPEG/PNG images')
+    parser.add_argument('--logs', default='data/results/debug_logs', help='Folder containing *_panel_refine.jsonl/json files')
+    parser.add_argument('--out', default='data/results/debug', help='Output folder')
+    parser.add_argument('--image', default=None, help='Optional single image path')
+    parser.add_argument('--panels', default=None, help='Optional panel json/jsonl path for --image')
+    parser.add_argument('--pattern', default='*.JPG', help='Image glob pattern when processing --dataset')
+    parser.add_argument('--limit', type=int, default=0, help='Max number of images to process; 0 means all')
+    parser.add_argument('--include-raw', action='store_true', help='Also process raw_* images found in --dataset. Default: skip raw_* duplicates.')
+    parser.add_argument('--no-prefer-raw-base', action='store_true', help='Do not replace annotated DJI_*.JPG with sibling raw_DJI_*.JPG as the processing/debug base image.')
+    parser.add_argument('--geometry-mode', choices=['auto', 'core', 'local'], default='auto', help='v42 geometry route. auto uses polygon/mask-prior conservative shared-grid local snap for close-up large-panel images and core v34/v35 for high-altitude grids.')
+    args = parser.parse_args()
+    global V42__IMAGE_STEM, V42__CURRENT_IMAGE_PATH, V42__CURRENT_PANELS_PATH, V42__OUTPUT_DEBUG_DIR, V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG
+    V42__OUTPUT_DEBUG_DIR = args.out
+    Path(V42__OUTPUT_DEBUG_DIR).mkdir(parents=True, exist_ok=True)
+    V42___cleanup_global_debug_side_outputs(V42__OUTPUT_DEBUG_DIR)
+    if args.image:
+        images = [Path(args.image)]
+    else:
+        dataset_dir = Path(args.dataset)
+        if not dataset_dir.exists():
+            raise FileNotFoundError(f'Dataset folder not found: {dataset_dir}')
+        patterns = [args.pattern]
+        if args.pattern == '*.JPG':
+            patterns = ['*.JPG', '*.jpg', '*.JPEG', '*.jpeg', '*.PNG', '*.png']
+        images = []
+        for pat in patterns:
+            images.extend(sorted(dataset_dir.glob(pat)))
+        seen = set()
+        images = [p for p in images if not (str(p).lower() in seen or seen.add(str(p).lower()))]
+        if not args.include_raw:
+            images = [p for p in images if not p.name.startswith('raw_')]
+        if args.limit and args.limit > 0:
+            images = images[:args.limit]
+    if not images:
+        print('[BATCH] no input images found')
+        return
+    ok = 0
+    skipped = 0
+    for img_path in images:
+        stem = V42___strip_raw_prefix_from_stem(img_path.stem)
+        base_img_path = V42___resolve_clean_base_image(img_path, prefer_raw=not args.no_prefer_raw_base)
+        panel_path = Path(args.panels) if args.panels and len(images) == 1 else V42___find_panel_log_for_stem(stem, args.logs)
+        if panel_path is None or not panel_path.exists():
+            print(f'[SKIP] stem={stem} reason=missing_panel_log')
+            skipped += 1
+            continue
+        V42__IMAGE_STEM = stem
+        V42__CURRENT_IMAGE_PATH = str(base_img_path)
+        V42__CURRENT_PANELS_PATH = str(panel_path)
+        V42__GLOBAL_LOWER_SUPPORT_DEBUG_IMG = None
+        print(f'[RUN] stem={stem} image={base_img_path} panels={panel_path}')
+        try:
+            probe_img = cv2.imread(str(base_img_path))
+            probe_panels = V42__load_panels_from_logs()
+            use_local = probe_img is not None and V42___v36_should_use_closeup_local(probe_panels, probe_img.shape, mode=args.geometry_mode)
+            if use_local:
+                print(f'[V42_ROUTE] stem={stem} mode=local_polygon_prior_conservative_grid')
+                drawn = V42___v42_build_closeup_polygon_prior_grid_outputs(base_img_path, panel_path, V42__OUTPUT_DEBUG_DIR, stem)
+                if drawn <= 0 and args.geometry_mode == 'auto':
+                    print(f'[V42_ROUTE_FALLBACK] stem={stem} reason=local_drawn_0 action=core')
+                    drawn = V42__run_current_image()
+            else:
+                print(f'[V42_ROUTE] stem={stem} mode=core')
+                drawn = V42__run_current_image()
+            V42___cleanup_outputs_for_stem(stem, V42__OUTPUT_DEBUG_DIR)
+            print(f'[DONE] stem={stem} drawn={drawn} outputs=debug_{stem}_line_snap.JPG,debug_{stem}_calc_inner_polygon.JPG')
+            ok += 1
+        except Exception as exc:
+            print(f'[ERROR] stem={stem} type={type(exc).__name__} message={exc}')
+    V42___cleanup_global_debug_side_outputs(V42__OUTPUT_DEBUG_DIR)
+    print(f'[BATCH_SUMMARY] ok={ok} skipped={skipped} total={len(images)} out={V42__OUTPUT_DEBUG_DIR}')
+
+# ============================================================
+# V63 unified one-file runner
+# ============================================================
+
+import sys
+import subprocess
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+ROUTE_PANEL_AREA_FRAC_THRESHOLD = 0.025
+REPRESENTATIVE_TOP_AREA_RATIO = 0.40
+
+
+def _read_json_or_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if path.suffix.lower() == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data = data.get("panels", data.get("detections", []))
+        if not isinstance(data, list):
+            raise ValueError(f"Unsupported JSON panel log: {path}")
+        return [p for p in data if isinstance(p, dict)]
+    out = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    out.append(item)
+    return out
+
+
+def _strip_raw_prefix_from_stem(stem: str) -> str:
+    return stem[4:] if stem.startswith("raw_") else stem
+
+
+def _find_panel_log(logs_dir: Path, stem: str) -> Optional[Path]:
+    s = _strip_raw_prefix_from_stem(stem)
+    candidates = [
+        logs_dir / f"{s}_panel_refine.jsonl",
+        logs_dir / f"{s}_panel_refine.json",
+        logs_dir / f"{s}.jsonl",
+        logs_dir / f"{s}.json",
+        logs_dir / f"raw_{s}_panel_refine.jsonl",
+        logs_dir / f"raw_{s}_panel_refine.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    loose = sorted(logs_dir.glob(f"*{s}*panel*.*"))
+    for p in loose:
+        if p.suffix.lower() in (".jsonl", ".json"):
+            return p
+    return None
+
+
+def _bbox_from_panel(p: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
+    bbox = p.get("bbox") or p.get("xyxy") or p.get("box")
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        try:
+            x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+            if x2 > x1 and y2 > y1:
+                return x1, y1, x2, y2
+        except Exception:
+            return None
+    return None
+
+
+def _route_metrics(image_path: Path, panel_log: Path, top_frac: float = 0.40) -> Dict[str, Any]:
+    img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError(f"Cannot read image: {image_path}")
+    img_h, img_w = img.shape[:2]
+    image_area = float(max(1, img_w * img_h))
+    panels = _read_json_or_jsonl(panel_log)
+    boxes = [b for p in panels if (b := _bbox_from_panel(p)) is not None]
+    if not boxes:
+        raise ValueError(f"No valid bbox panels in log: {panel_log}")
+    rows = []
+    for x1, y1, x2, y2 in boxes:
+        w, h = max(0.0, x2 - x1), max(0.0, y2 - y1)
+        area = w * h
+        if area > 1:
+            rows.append({"w": w, "h": h, "long": max(w, h), "short": min(w, h), "area": area})
+    if not rows:
+        raise ValueError(f"No positive-area bbox panels in log: {panel_log}")
+    rows_sorted = sorted(rows, key=lambda r: r["area"], reverse=True)
+    k = max(1, int(math.ceil(len(rows_sorted) * float(top_frac))))
+    top = rows_sorted[:k]
+
+    def med(key: str) -> float:
+        return float(np.median([r[key] for r in top]))
+
+    rep_area = med("area")
+    return {
+        "image_w": img_w,
+        "image_h": img_h,
+        "image_area": image_area,
+        "panel_count": len(rows),
+        "top_k": k,
+        "rep_w": med("w"),
+        "rep_h": med("h"),
+        "rep_long": med("long"),
+        "rep_short": med("short"),
+        "rep_area": rep_area,
+        "rep_area_frac": rep_area / image_area,
+    }
+
+
+def _iter_images(dataset: Path, skip_raw_duplicates: bool = True) -> Iterable[Path]:
+    if dataset.is_file() and dataset.suffix.lower() in IMAGE_EXTS:
+        yield dataset
+        return
+    for p in sorted(dataset.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        if skip_raw_duplicates and p.stem.lower().startswith("raw_"):
+            continue
+        yield p
+
+
+def _output_paths(out_dir: Path, stem: str) -> Tuple[Path, Path]:
+    return out_dir / f"debug_{stem}_line_snap.JPG", out_dir / f"debug_{stem}_calc_inner_polygon.JPG"
+
+
+def _run_v34_engine(image_path: Path, panel_log: Path, logs_dir: Path, out_dir: Path) -> None:
+    old_argv = sys.argv[:]
+    sys.argv = [
+        "v34_engine",
+        "--image", str(image_path),
+        "--panels", str(panel_log),
+        "--logs", str(logs_dir),
+        "--out", str(out_dir),
+    ]
+    try:
+        V34__main()
+    finally:
+        sys.argv = old_argv
+
+
+def _run_v42_engine(image_path: Path, panel_log: Path, logs_dir: Path, out_dir: Path) -> None:
+    old_argv = sys.argv[:]
+    sys.argv = [
+        "v42_engine",
+        "--image", str(image_path),
+        "--panels", str(panel_log),
+        "--logs", str(logs_dir),
+        "--out", str(out_dir),
+    ]
+    try:
+        V42__main()
+    finally:
+        sys.argv = old_argv
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="V63 FULL one-file: full v34/v42 line-snap engines, no external engine files, no zip; area filter is per connected block/component top50/80.")
+    ap.add_argument("--dataset", required=True, help="Image folder or single image path")
+    ap.add_argument("--logs", required=True, help="Folder containing *_panel_refine.json/jsonl")
+    ap.add_argument("--out", required=True, help="Output debug folder")
+    ap.add_argument("--route-threshold", type=float, default=ROUTE_PANEL_AREA_FRAC_THRESHOLD)
+    ap.add_argument("--top-frac", type=float, default=REPRESENTATIVE_TOP_AREA_RATIO)
+    ap.add_argument("--geometry-mode", choices=["auto", "core", "local"], default="auto")
+    ap.add_argument("--no-skip-raw", action="store_true")
+    ap.add_argument("--clean-output", action="store_true")
+    args = ap.parse_args()
+
+    dataset = Path(args.dataset)
+    logs_dir = Path(args.logs)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    total = ok = skipped = failed = 0
+    for image_path in _iter_images(dataset, skip_raw_duplicates=not args.no_skip_raw):
+        total += 1
+        stem = _strip_raw_prefix_from_stem(image_path.stem)
+        line_out, calc_out = _output_paths(out_dir, stem)
+        if args.clean_output:
+            for p in (line_out, calc_out):
+                if p.exists():
+                    p.unlink()
+        panel_log = _find_panel_log(logs_dir, stem)
+        if panel_log is None:
+            print(f"[SKIP] stem={stem} reason=missing_panel_log")
+            skipped += 1
+            continue
+        try:
+            metrics = _route_metrics(image_path, panel_log, top_frac=args.top_frac)
+        except Exception as e:
+            print(f"[ERROR] stem={stem} reason=route_metrics_failed type={type(e).__name__} message={e}")
+            failed += 1
+            continue
+        if args.geometry_mode == "core":
+            route, reason = "core", "forced_core"
+        elif args.geometry_mode == "local":
+            route, reason = "local", "forced_local"
+        else:
+            route = "local" if metrics["rep_area_frac"] > args.route_threshold else "core"
+            reason = f"rep_area_frac>{args.route_threshold}" if route == "local" else f"rep_area_frac<={args.route_threshold}"
+        engine_name = "v42_full_local" if route == "local" else "v34_full_core"
+        print(
+            f"[V63_ROUTE_METRICS] stem={stem} decision={route} engine={engine_name} reason={reason} "
+            f"n={metrics['panel_count']} top_k={metrics['top_k']} rep_w={metrics['rep_w']:.1f} rep_h={metrics['rep_h']:.1f} "
+            f"rep_area={metrics['rep_area']:.1f} rep_area_frac={metrics['rep_area_frac']:.5f} "
+            f"image={metrics['image_w']}x{metrics['image_h']} log={panel_log.name}"
+        )
+        try:
+            if route == "local":
+                _run_v42_engine(image_path, panel_log, logs_dir, out_dir)
+            else:
+                _run_v34_engine(image_path, panel_log, logs_dir, out_dir)
+        except Exception as e:
+            print(f"[ERROR] stem={stem} route={route} engine={engine_name} type={type(e).__name__} message={e}")
+            failed += 1
+            continue
+        missing = [str(p.name) for p in (line_out, calc_out) if not p.exists()]
+        if missing:
+            print(f"[ERROR] stem={stem} route={route} engine={engine_name} missing_outputs={missing}")
+            failed += 1
+        else:
+            print(f"[DONE] stem={stem} route={route} engine={engine_name} line_snap={line_out.name} calc_inner={calc_out.name}")
+            ok += 1
+    print(f"[BATCH_SUMMARY] ok={ok} skipped={skipped} failed={failed} total={total} out={out_dir}")
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

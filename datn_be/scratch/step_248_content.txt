@@ -1,0 +1,71 @@
+Created At: 2026-06-05T13:42:10Z
+Completed At: 2026-06-05T13:42:11Z
+File Path: `file:///c:/Solar_Inspection_Project/datn_be/scratch/edge_grid_full_image_DJI_0029.py`
+Total Lines: 954
+Total Bytes: 41716
+Showing lines 580 to 954
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+580:         # 1. Search for best shared angle within +/- 2 degrees of base
+581:         best_theta = theta_base
+582:         max_score = -1.0
+583:         for delta_deg in np.linspace(-2.0, 2.0, 21):
+584:             theta_cand = theta_base + math.radians(delta_deg)
+585:             score = evaluate_angle_candidate(gray, raw_horiz_gaps, x_mid, theta_cand, n_samples=30)
+586:             if score > max_score:
+587:                 max_score = score
+588:                 best_theta = theta_cand
+589:                 
+590:         m_perp = math.tan(best_theta)
+591:         vertical_angle_deg = np.degrees(np.arctan(1.0 / a_avg if a_avg != 0 else 9999))
+592:         horizontal_angle_deg = np.degrees(best_theta)
+593:         
+594:         # 2. Build profile projection along normal for each raw gap and find dark-valley center
+595:         candidate_y_snaps = []
+596:         for y, x_start, x_end in raw_horiz_gaps:
+597:             xs = np.linspace(x_start, x_end, 30)
+598:             profile_sums = np.zeros(2 * 8 + 1)
+599:             profile_counts = np.zeros(2 * 8 + 1)
+600:             for dn in range(-8, 9):
+601:                 for x in xs:
+602:                     x_sample = x - dn * math.sin(best_theta)
+603:                     y_sample = m_perp * (x - x_mid) + y + dn * math.cos(best_theta)
+604:                     x_idx = int(round(x_sample))
+605:                     y_idx = int(round(y_sample))
+606:                     if 0 <= x_idx < gray.shape[1] and 0 <= y_idx < gray.shape[0]:
+607:                         profile_sums[dn + 8] += gray[y_idx, x_idx]
+608:
+<truncated 17652 bytes>
+horizontal_lines_count": rejected_count,
+923:             "verified_panel_count": verified_panel_count
+924:         })
+925:         
+926:     # Save outputs
+927:     out_dir = Path("data/results/debug")
+928:     out_dir.mkdir(parents=True, exist_ok=True)
+929:     
+930:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_blocks.JPG"), img_blocks)
+931:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_lines.JPG"), img_lines)
+932:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_panels.JPG"), img_panels)
+933:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_line_support.JPG"), img_support)
+934:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_line_snap.JPG"), img_snap)
+935:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_panels_verified.JPG"), img_panels_verified)
+936:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_panels_verified_seg8.JPG"), img_panels_verified)
+937:     
+938:     # Print oriented stats report
+939:     print("\n" + "="*95)
+940:     print("ORIENTED HORIZONTAL GAP & BOUNDARY STATS REPORT")
+941:     print("="*95)
+942:     for s in stats:
+943:         print(f"Block: {s['name']}")
+944:         print(f"  - horizontal_angle_deg:                 {s['horizontal_angle_deg']:.2f} deg")
+945:         print(f"  - estimated_pitch_px:                   {s['estimated_pitch_px']:.2f} px")
+946:         print(f"  - pitch_std_px:                         {s['pitch_std_px']:.4f} px")
+947:         print(f"  - number_of_interpolated_missing_lines: {s['number_of_interpolated_missing_lines']}")
+948:         print(f"  - rejected_horizontal_lines_count:     {s['rejected_horizontal_lines_count']}")
+949:         print(f"  - verified_panel_count:                 {s['verified_panel_count']}")
+950:         print("-" * 95)
+951: 
+952: if __name__ == "__main__":
+953:     main()
+954: 
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

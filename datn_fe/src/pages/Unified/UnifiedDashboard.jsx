@@ -9,8 +9,9 @@ import {
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
-    Battery, Wifi, Compass, Navigation, Activity, Search, Thermometer, Map as MapIcon, X, Maximize2
+    Battery, Wifi, Compass, Navigation, Activity, Search, Thermometer, Map as MapIcon, X, Maximize2, ShieldAlert
 } from 'lucide-react';
+import DefectReviewModal from '../../components/DefectReviewModal';
 
 import './UnifiedStyles.css';
 
@@ -65,16 +66,53 @@ function FitBounds({ gridData, focusTarget }) {
  * xOffset, yOffset: vị trí ảnh trong grid map ảo.
  * Trục y leaflet: dương lên trên → yOffset là số âm (row * -imgH).
  */
-function pixelPolyToLeaflet(polygon, xOffset, yOffset) {
-    if (!polygon) return [];
-    return polygon.map(([px, py]) => {
-        const x = Number(px) || 0;
-        const y = Number(py) || 0;
-        return [yOffset - y, xOffset + x];
-    });
+function pixelPolyToLeafletScaled(poly, layout) {
+  if (!poly || !Array.isArray(poly)) return [];
+
+  const srcW = Number(layout.srcW || 640);
+  const srcH = Number(layout.srcH || 512);
+  const dstW = Number(layout.w);
+  const dstH = Number(layout.h);
+  const offX = Number(layout.x);
+  const offY = Number(layout.y);
+
+  return poly.map(([x, y]) => {
+    const px = Number(x);
+    const py = Number(y);
+
+    const mapX = offX + (px / srcW) * dstW;
+
+    // QUAN TRỌNG:
+    // Pixel y=0 là mép trên ảnh.
+    // Leaflet bounds [offY, offY + dstH] có offY là mép dưới.
+    // Vì vậy phải lật Y:
+    const mapY = offY + dstH - (py / srcH) * dstH;
+
+    return [mapY, mapX];
+  });
 }
 
-export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }) {
+const getPanelDrawPolygon = (panel) => {
+    if (panel?.outer_polygon && panel.outer_polygon.length >= 3) {
+        return panel.outer_polygon;
+    }
+    if (panel?.polygon && panel.polygon.length >= 3) {
+        return panel.polygon;
+    }
+    return null;
+};
+
+const polygonFromBBox = (bbox) => {
+    if (!bbox || bbox.length < 4) return null;
+    const bx1 = Number(bbox[0]) || 0;
+    const by1 = Number(bbox[1]) || 0;
+    const bx2 = Number(bbox[2]) || 0;
+    const by2 = Number(bbox[3]) || 0;
+    return [[bx1, by1], [bx2, by1], [bx2, by2], [bx1, by2]];
+};
+
+export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, batchId, onRefresh }) {
+    const [isReviewOpen, setIsReviewOpen] = useState(false);
     const PANEL_RATED_POWER_W = 400; // Công suất định mức tấm pin 400W
     const translateDefect = (cls) => {
         if (!cls) return "Điểm bất thường";
@@ -109,28 +147,27 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }
             const xOffset = col * (imgW + PADDING);
             const yOffset = -(row * (imgH + PADDING));
 
-            const bounds = [[yOffset - imgH, xOffset], [yOffset, xOffset + imgW]];
+            const layout = {
+                x: xOffset,
+                y: yOffset,
+                w: imgW,
+                h: imgH,
+                srcW: img.image_width || 640,
+                srcH: img.image_height || 512,
+            };
+
+            const bounds = [
+                [layout.y, layout.x],
+                [layout.y + layout.h, layout.x + layout.w],
+            ];
 
             const mappedPanels = img.panels.map(p => {
-                // ✅ Ưu tiên dùng polygon thật từ backend (đã refine bằng minAreaRect)
-                // Fallback về bbox chỉ khi không có polygon
-                let leafletPolygon;
-                if (p.polygon && p.polygon.length >= 3) {
-                    leafletPolygon = pixelPolyToLeaflet(p.polygon, xOffset, yOffset);
-                } else {
-                    // Fallback: tạo polygon từ bbox với phòng vệ tối đa
-                    const bbox = p.bbox && p.bbox.length === 4 ? p.bbox : (p.box && p.box.length === 4 ? p.box : [0, 0, 0, 0]);
-                    const bx1 = Number(bbox[0]) || 0;
-                    const by1 = Number(bbox[1]) || 0;
-                    const bx2 = Number(bbox[2]) || 0;
-                    const by2 = Number(bbox[3]) || 0;
-                    leafletPolygon = [
-                        [yOffset - by1, xOffset + bx1],
-                        [yOffset - by1, xOffset + bx2],
-                        [yOffset - by2, xOffset + bx2],
-                        [yOffset - by2, xOffset + bx1],
-                    ];
+                let srcPoly = getPanelDrawPolygon(p);
+                if (!srcPoly) {
+                    srcPoly = polygonFromBBox(p.bbox || p.box);
                 }
+
+                const leafletPolygon = srcPoly ? pixelPolyToLeafletScaled(srcPoly, layout) : [];
 
                 // Status: dùng field mới 'status' (faulty/healthy), fallback sang cũ
                 const status = p.status || (p.total_panel_loss > 0 ? "faulty" : "healthy");
@@ -248,8 +285,12 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }
                             pathOptions={{
                                 color: color,
                                 fillColor: color,
-                                fillOpacity: isHealthy ? 0.25 : 0.45,
-                                weight: isHealthy ? 2 : 3
+                                fillOpacity: 0.0,
+                                weight: 3,
+                                opacity: 1.0,
+                                lineCap: "round",
+                                lineJoin: "round",
+                                className: "panel-outer-polygon-line",
                             }}
                             eventHandlers={{
                                 mouseover: () => setHoveredPanel(p),
@@ -261,18 +302,28 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }
                                 }
                             }}
                         >
-                            <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg">
-                                <div className="text-sm font-bold text-sky-400">{p.local_id}</div>
-                                <div className="text-xs">
-                                    {isHealthy
-                                        ? "Bình thường"
-                                        : `${translateDefect(p.main_defect_class)} (-${Number(p.total_panel_loss || 0).toFixed(1)} W)`
-                                    }
+                        <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg">
+                            <div className="text-sm font-bold text-sky-400">{p.local_id}</div>
+                            <div className="text-xs">
+                                {isHealthy
+                                    ? "Bình thường"
+                                    : `${translateDefect(p.main_defect_class)} (-${Number(p.total_panel_loss || 0).toFixed(1)} W)`
+                                }
+                            </div>
+                            {p.worst_severity && !isHealthy && (
+                                <div className="text-xs text-orange-300">Mức độ: {p.worst_severity}</div>
+                            )}
+                            {p.review_label && (
+                                <div className="text-xs text-emerald-400 font-bold" style={{ marginTop: 2 }}>
+                                    Duyệt: {p.review_label}
                                 </div>
-                                {p.worst_severity && !isHealthy && (
-                                    <div className="text-xs text-orange-300">Mức độ: {p.worst_severity}</div>
-                                )}
-                            </Tooltip>
+                            )}
+                            {p.geometry_source && (
+                                <div className="text-xs text-slate-400" style={{ marginTop: 2, fontStyle: 'italic' }}>
+                                    Polygon: {p.geometry_source === 'v61_line_snap' ? '✓ Line-snap V61' : `⚠ ${p.geometry_source || 'unknown'}`}
+                                </div>
+                            )}
+                        </Tooltip>
                         </Polygon>
                     );
                 })}
@@ -351,6 +402,26 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }
                                 </span>
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                {activePanel.review_status && (
+                                    <span style={{ 
+                                        color: activePanel.review_status === 'confirmed_defect' ? '#fca5a5' : 
+                                               activePanel.review_status === 'needs_review' ? '#fde047' : 
+                                               activePanel.review_status === 'false_positive' ? '#94a3b8' : '#e2e8f0',
+                                        background: activePanel.review_status === 'confirmed_defect' ? 'rgba(239, 68, 68, 0.15)' : 
+                                                    activePanel.review_status === 'needs_review' ? 'rgba(245, 158, 11, 0.15)' : 
+                                                    activePanel.review_status === 'false_positive' ? 'rgba(148, 163, 184, 0.15)' : 'rgba(255,255,255,0.05)',
+                                        fontWeight: 700, fontSize: 11, padding: "4px 10px", 
+                                        borderRadius: 6, textTransform: "uppercase",
+                                        border: '1px solid ' + (
+                                            activePanel.review_status === 'confirmed_defect' ? 'rgba(239, 68, 68, 0.3)' : 
+                                            activePanel.review_status === 'needs_review' ? 'rgba(245, 158, 11, 0.3)' : 
+                                            activePanel.review_status === 'false_positive' ? 'rgba(148, 163, 184, 0.3)' : 'rgba(255,255,255,0.1)'
+                                        ),
+                                        letterSpacing: "0.5px"
+                                    }}>
+                                        {activePanel.review_label || 'Chưa duyệt'}
+                                    </span>
+                                )}
                                 <span style={{ 
                                     color: "#FFFFFF", background: themeColor, 
                                     fontWeight: 700, fontSize: 11, padding: "4px 10px", 
@@ -485,6 +556,73 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }
                                 </div>
                             )}
                         </div>
+
+                        {/* Kiểm chứng nhiệt tương đối */}
+                        {activePanel.defects && activePanel.defects.length > 0 && activePanel.defects.some(d => d.thermal_validation_status) && (
+                            <div style={{ marginBottom: 20 }}>
+                                <h3 style={{ color: "#38bdf8", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                                    <Thermometer size={14} /> Kiểm chứng nhiệt tương đối
+                                </h3>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                                    {activePanel.defects.filter(d => d.thermal_validation_status).map((d, idx) => {
+                                        const tvStatus = d.thermal_validation_status;
+                                        if (tvStatus === 'not_run') return null;
+
+                                        const statusMeta = {
+                                            confirmed_by_relative_thermal: { label: 'Đã xác nhận bằng tương phản nhiệt', color: '#10b981', bg: 'rgba(16,185,129,0.08)', icon: '✔' },
+                                            needs_review:                  { label: 'Cần xem xét thêm',                  color: '#f59e0b', bg: 'rgba(245,158,11,0.08)',  icon: '⚠' },
+                                            class_mismatch:                { label: 'Sai loại lỗi (class mismatch)',    color: '#f97316', bg: 'rgba(249,115,22,0.08)',  icon: '⚠' },
+                                            suspect_false_positive:        { label: 'Nghi ngờ nhận nhầm (FP)',           color: '#ef4444', bg: 'rgba(239,68,68,0.08)',   icon: '✗' },
+                                            insufficient_pixels:           { label: 'Không đủ dữ liệu ảnh',             color: '#64748b', bg: 'rgba(100,116,139,0.08)', icon: '?' },
+                                            not_run:                       { label: 'Chưa chạy',                        color: '#64748b', bg: 'rgba(100,116,139,0.08)', icon: '-' },
+                                        };
+                                        const sm = statusMeta[tvStatus] || statusMeta.not_run;
+                                        const fmt = (v) => v != null ? Number(v).toFixed(3) : 'N/A';
+
+                                        return (
+                                            <div key={idx} style={{
+                                                padding: '12px 14px', backgroundColor: sm.bg,
+                                                border: `1px solid ${sm.color}30`, borderRadius: 12
+                                            }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                                    <span style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 700 }}>Lỗi: {translateDefect(d.class_name)}</span>
+                                                    <span style={{ color: sm.color, fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                        {sm.icon} {sm.label}
+                                                    </span>
+                                                </div>
+
+                                                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '4px 12px', fontSize: 11 }}>
+                                                    <div style={{ color: '#64748b' }}>Độ tin cậy kiểm chứng (Score)</div>
+                                                    <div style={{ color: sm.color, fontWeight: 700 }}>
+                                                        {d.thermal_validation_score != null ? (d.thermal_validation_score * 100).toFixed(0) + '%' : 'N/A'}
+                                                    </div>
+
+                                                    <div style={{ color: '#64748b' }}>Chênh lệch nhiệt (Δhot)</div>
+                                                    <div style={{ color: d.relative_hot_delta >= 0.12 ? '#f87171' : '#cbd5e1', fontWeight: 600 }}>
+                                                        {fmt(d.relative_hot_delta)}
+                                                    </div>
+
+                                                    <div style={{ color: '#64748b' }}>Khử màu lam (Blue suppression)</div>
+                                                    <div style={{ color: d.blue_suppression >= 0.06 ? '#fb923c' : '#cbd5e1', fontWeight: 600 }}>
+                                                        {fmt(d.blue_suppression)}
+                                                    </div>
+
+                                                    <div style={{ color: '#64748b' }}>Độ không đồng nhất (TNI)</div>
+                                                    <div style={{ color: d.tni >= 0.12 ? '#facc15' : '#cbd5e1', fontWeight: 600 }}>
+                                                        {fmt(d.tni)}
+                                                    </div>
+
+                                                    <div style={{ color: '#64748b' }}>Đề xuất / Phân loại tự động</div>
+                                                    <div style={{ color: '#38bdf8', fontWeight: 600 }}>
+                                                        {d.rule_class ? `${translateDefect(d.rule_class)} (${d.suggested_review_status === 'confirmed_defect' ? 'Xác nhận' : 'Xem xét'})` : 'N/A'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
 
                         {/* So sánh Side-by-Side xếp dọc */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 20 }}>
@@ -662,10 +800,42 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget }
 
             {/* Top right floating info */}
             <div style={{ position: "absolute", top: 24, right: 24, zIndex: 1000, display: "flex", gap: 12 }}>
+                {batchId && (
+                    <button
+                        onClick={() => setIsReviewOpen(true)}
+                        style={{
+                            background: "rgba(239, 68, 68, 0.95)",
+                            backdropFilter: "blur(12px)",
+                            border: "1px solid rgba(255,255,255,0.15)",
+                            borderRadius: 12,
+                            padding: "8px 16px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            color: "#fff",
+                            fontSize: 13,
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            boxShadow: "0 4px 12px rgba(239,68,68,0.25)",
+                            transition: "all 0.2s"
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+                        onMouseLeave={(e) => e.currentTarget.style.transform = "none"}
+                    >
+                        <ShieldAlert size={16} color="#fff" /> Duyệt lỗi phát hiện
+                    </button>
+                )}
                 <div style={{ background: "rgba(15, 23, 42, 0.8)", backdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, padding: "8px 16px", display: "flex", alignItems: "center", gap: 8, color: "#fff", fontSize: 13, fontWeight: 600 }}>
                     <Maximize2 size={16} color="#0EA5E9" /> Bản đồ toàn cảnh
                 </div>
             </div>
+
+            <DefectReviewModal 
+                isOpen={isReviewOpen} 
+                onClose={() => setIsReviewOpen(false)} 
+                batchId={batchId} 
+                onRefresh={onRefresh} 
+            />
         </div>
     );
 }

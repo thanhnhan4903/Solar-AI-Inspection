@@ -230,7 +230,12 @@ class ReportGenerator:
                 if p.defect_type.startswith("{"):
                     try:
                         panel_detail = json.loads(p.defect_type)
-                        if panel_detail.get("status") == "faulty":
+                        review_status = panel_detail.get("review_status", "unreviewed")
+                        include_in_report = panel_detail.get("include_in_report", True)
+                        # false_positive hoặc include_in_report=False → không tính vào báo cáo chính
+                        if review_status == "false_positive" or include_in_report is False:
+                            is_faulty = False
+                        elif panel_detail.get("status") == "faulty":
                             is_faulty = True
                     except Exception:
                         pass

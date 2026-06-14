@@ -525,8 +525,8 @@ def save_panel_refine_debug_jsonl(
                     "threshold_set": "small" if bbox_area <= SMALL_PANEL_BBOX_AREA_PX else "strict",
                     "method":        method,
                     "decision":      decision,
-                    "reason":        reason,
                     "refined_polygon": refined_poly,
+                    "raw_yolo_poly": raw_yolo_poly,
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -953,6 +953,10 @@ def process_yolo_predictions(
                 debug_info=debug_info,
             )
 
+            if len(panel_poly) != 4:
+                logger.info(f"[PANEL_FILTER] Rejecting panel idx={i} due to polygon edges count != 4 ({len(panel_poly)})")
+                continue
+
             features = get_polygon_features(panel_poly)
 
             panel_dict: Dict[str, Any] = {
@@ -1197,10 +1201,11 @@ def draw_custom_annotation(
     DEFAULT_DEFECT_COLOR = (100, 100, 255)
 
     for p in panels:
-        p_poly = p.get("polygon", [])
+        # V62: ưu tiên outer_polygon (từ line-snap), fallback về polygon cũ
+        p_poly = p.get("outer_polygon") or p.get("polygon", [])
         if len(p_poly) >= 3:
             pts = np.array(p_poly, dtype=np.int32)
-            cv2.polylines(img, [pts], True, (255, 0, 0), 2, cv2.LINE_AA)
+            cv2.polylines(img, [pts], True, (255, 0, 0), 3, cv2.LINE_AA)  # thickness=3px
             cx, cy = p.get("center", [0, 0])
             label = p.get("local_id", p.get("class_name", "panel"))
             cv2.putText(img, label, (int(cx) - 20, int(cy)),

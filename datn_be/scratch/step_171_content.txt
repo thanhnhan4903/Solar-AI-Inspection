@@ -1,0 +1,16 @@
+Created At: 2026-06-05T14:14:09Z
+Completed At: 2026-06-05T14:14:11Z
+The following changes were made by the replace_file_content tool to: c:\Solar_Inspection_Project\datn_be\scratch\edge_grid_full_image_DJI_0029.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -421,6 +421,8 @@
+         turn = min(turn, 360.0 - turn)
+         max_turn_angle = max(max_turn_angle, turn)
+         
++    return final_pts, local_segment_fits, segment_diagnostics, fallback_count, max_v_jump, max_turn_angle
++
+ def draw_polyline(img, pts, color, thickness=2):
+     for idx in range(len(pts) - 1):
+         p1 = (int(round(pts[idx][0])), int(round(pts[idx][1])))
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.

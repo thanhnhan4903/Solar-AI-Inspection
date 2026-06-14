@@ -92,10 +92,14 @@ function AnomalyBarChart({ data }) {
 // ─────────────────────────────────────────
 // AI Progress Modal
 // ─────────────────────────────────────────
-function AIProgressModal({ onDone }) {
-    const [progress, setProgress] = useState({ current: 0, total: 0, filename: "", step: "Khởi động...", done: false });
+function AIProgressModal({ onComplete, onFailed }) {
+    const [progress, setProgress] = useState({ current: 0, total: 0, filename: "", step: "Khởi động...", done: false, running: false });
     const [startTime] = useState(Date.now());
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+    const hasStartedRef = useRef(false);
+    const elapsedSecondsRef = useRef(0);
+    elapsedSecondsRef.current = elapsedSeconds;
 
     React.useEffect(() => {
         const timer = setInterval(() => {
@@ -109,13 +113,25 @@ function AIProgressModal({ onDone }) {
             try {
                 const res = await axios.get(`${API}/api/v1/analyze-progress`);
                 setProgress(res.data);
+                
+                if (res.data.running) {
+                    hasStartedRef.current = true;
+                }
+
                 if (res.data.done && !res.data.running) {
-                    clearInterval(interval);
+                    if (hasStartedRef.current || elapsedSecondsRef.current > 5) {
+                        clearInterval(interval);
+                        if (res.data.step && res.data.step.startsWith("Thất bại")) {
+                            if (onFailed) onFailed(res.data.step);
+                        } else {
+                            if (onComplete) onComplete();
+                        }
+                    }
                 }
             } catch (_) {}
         }, 2000);
         return () => clearInterval(interval);
-    }, []);
+    }, [onComplete, onFailed]);
 
     const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
 
@@ -125,9 +141,8 @@ function AIProgressModal({ onDone }) {
         if (progress.current === progress.total) {
             etaText = progress.done ? "Hoàn tất!" : "Đang hoàn tất lưu trữ...";
         } else {
-            const activeSeconds = Math.max(1, elapsedSeconds - 3);
-            const timePerImage = progress.current > 0 ? (activeSeconds / progress.current) : 2.2;
-            const clampedTime = Math.max(1.5, Math.min(3.5, timePerImage));
+            const timePerImage = progress.current > 0 ? (elapsedSeconds / progress.current) : 5.0;
+            const clampedTime = Math.max(1.5, Math.min(15.0, timePerImage));
             const remainingImages = progress.total - progress.current;
             const remainingSeconds = Math.round(clampedTime * remainingImages);
             
@@ -861,7 +876,12 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
 
     const allPanels = data?.flatMap((img) => img.panels || []) || [];
     const totalPanels = allPanels.length;
-    const faultyPanels = allPanels.filter((p) => p.total_panel_loss > 0 || p.status === "faulty");
+    // Loại false_positive ra khỏi danh sách lỗi chính (sau khi review sync)
+    const faultyPanels = allPanels.filter((p) =>
+        (p.total_panel_loss > 0 || p.status === "faulty") &&
+        p.review_status !== "false_positive" &&
+        p.include_in_report !== false
+    );
     const totalFaults = faultyPanels.length;
     const estimatedLoss = faultyPanels.reduce((sum, p) => sum + Number(p.total_panel_loss || 0), 0);
     const healthyRate = totalPanels > 0 ? ((totalPanels - totalFaults) / totalPanels) * 100 : 0;
@@ -1027,7 +1047,6 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             }
         } catch (error) {
             alert("Lỗi AI: " + (error.response?.data?.detail || error.message));
-        } finally {
             setIsRunningAI(false);
         }
     };
@@ -1105,7 +1124,28 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
     return (
         <div>
             {/* AI Progress modal — hiển thị khi đang chạy AI */}
-            {isRunningAI && <AIProgressModal />}
+            {isRunningAI && (
+                <AIProgressModal
+                    onComplete={async () => {
+                        setIsRunningAI(false);
+                        setQualityData(null);
+                        setShowMetadataModal(false);
+                        try {
+                            const latestRes = await axios.get(`${API}/api/v1/latest-batch`);
+                            if (latestRes.data && onAnalysisComplete) {
+                                onAnalysisComplete(latestRes.data.data, latestRes.data.batch_id, latestRes.data.panel_power);
+                            }
+                            alert(`✅ Thành công! Đã phân tích xong ${latestRes.data.data?.length || 0} ảnh.`);
+                        } catch (err) {
+                            alert("Lỗi khi tải kết quả phân tích: " + err.message);
+                        }
+                    }}
+                    onFailed={(errorMsg) => {
+                        setIsRunningAI(false);
+                        alert(errorMsg || "Phân tích thất bại.");
+                    }}
+                />
+            )}
 
             {/* Quality Review modal — sau preprocessing */}
             {qualityData && (

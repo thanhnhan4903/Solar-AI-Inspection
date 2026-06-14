@@ -1,0 +1,62 @@
+Created At: 2026-06-05T13:36:11Z
+Completed At: 2026-06-05T13:36:11Z
+File Path: `file:///c:/Solar_Inspection_Project/datn_be/scratch/edge_grid_full_image_DJI_0029.py`
+Total Lines: 930
+Total Bytes: 40450
+Showing lines 870 to 930
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+870:             if n_cols == 1:
+871:                 tl = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, left_pts)
+872:                 tr = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, right_pts)
+873:                 br = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_b, right_pts)
+874:                 bl = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_b, left_pts)
+875:                 cv2.polylines(img_panels_verified, [np.array([tl, tr, br, bl], dtype=np.int32)], True, (0, 255, 255), 1, cv2.LINE_AA)
+876:                 verified_panel_count += 1
+877:             else:
+878:                 mid_pts = boundaries["middle_divider"]
+879:                 tl1 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, left_pts)
+880:                 tr1 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, mid_pts)
+881:                 br1 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_b, mid_pts)
+882:                 bl1 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_b, left_pts)
+883:                 cv2.polylines(img_panels_verified, [np.array([tl1, tr1, br1, bl1], dtype=np.int32)], True, (0, 255, 255), 1, cv2.LINE_AA)
+884:                 
+885:                 tl2 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, mid_pts)
+886:                 tr2 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_t, right_pts)
+887:                 br2 = intersect_oriented_line_with_boundary(m_perp, x_mid, y_snap_b, right_pts)
+888:           
+<truncated 578 bytes>
+": interpolated_missing_count,
+898:             "rejected_horizontal_lines_count": rejected_count,
+899:             "verified_panel_count": verified_panel_count
+900:         })
+901:         
+902:     # Save outputs
+903:     out_dir = Path("data/results/debug")
+904:     out_dir.mkdir(parents=True, exist_ok=True)
+905:     
+906:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_blocks.JPG"), img_blocks)
+907:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_lines.JPG"), img_lines)
+908:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_panels.JPG"), img_panels)
+909:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_line_support.JPG"), img_support)
+910:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_line_snap.JPG"), img_snap)
+911:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_panels_verified.JPG"), img_panels_verified)
+912:     cv2.imwrite(str(out_dir / "debug_DJI_0029_R_full_image_panels_verified_seg8.JPG"), img_panels_verified)
+913:     
+914:     # Print oriented stats report
+915:     print("\n" + "="*95)
+916:     print("ORIENTED HORIZONTAL GAP & BOUNDARY STATS REPORT")
+917:     print("="*95)
+918:     for s in stats:
+919:         print(f"Block: {s['name']}")
+920:         print(f"  - Horizontal gap angle:             {s['horizontal_angle']:.2f} deg")
+921:         print(f"  - Estimated regular pitch:          {s['estimated_pitch']:.2f} px")
+922:         print(f"  - Pitch standard deviation (std):   {s['pitch_std']:.4f} px")
+923:         print(f"  - Number of interpolated/grid lines: {s['interpolated_missing_count']}")
+924:         print(f"  - Rejected horizontal lines count:   {s['rejected_count']}")
+925:         print(f"  - Verified Panel Polygons:          {s['verified_panel_count']}")
+926:         print("-" * 95)
+927: 
+928: if __name__ == "__main__":
+929:     main()
+930: 
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

@@ -1,0 +1,80 @@
+Created At: 2026-06-05T13:36:10Z
+Completed At: 2026-06-05T13:36:10Z
+File Path: `file:///c:/Solar_Inspection_Project/datn_be/scratch/edge_grid_full_image_DJI_0029.py`
+Total Lines: 930
+Total Bytes: 40450
+Showing lines 710 to 790
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+710:                         y_idx = int(round(y_sample))
+711:                         if 0 <= x_idx < gray.shape[1] and 0 <= y_idx < gray.shape[0]:
+712:                             profile_sums[dn + 3] += gray[y_idx, x_idx]
+713:                             profile_counts[dn + 3] += 1
+714:                 profile = profile_sums / np.maximum(profile_counts, 1)
+715:                 smoothed = np.convolve(profile, np.ones(3)/3.0, mode="same")
+716:                 
+717:                 best_valley_idx = -1
+718:                 best_depth = -1.0
+719:                 for v in range(1, len(smoothed) - 1):
+720:                     if smoothed[v] < smoothed[v-1] and smoothed[v] < smoothed[v+1]:
+721:                         left_peak = np.max(smoothed[:v])
+722:                         right_peak = np.max(smoothed[v+1:])
+723:                         depth = min(left_peak, right_peak) - smoothed[v]
+724:                         if depth > best_depth:
+725:                             best_depth = depth
+726:                             best_valley_idx = v
+727:                 
+728:                 if best_valley_idx != -1 and best_depth >= 2.0:
+729:                     snap_offset = best_valley_idx - 3
+730:                     y_snap = y_grid + snap_offset
+731:                     dark_valley_score = best_depth
+732:                 else:
+733:                     snap_offset = 0
+734:                     y_snap = y_grid
+735:                     dark_valley_score = 0.0
+736:                     
+737:                 # Support ratio calculation
+738:                 support
+<truncated 611 bytes>
+= 1:
+750:                         sup_cnt += 1
+751:                     support_pts.append((int(round(x)), m_perp * (x - x_mid) + y_snap + loc_offset))
+752:                     
+753:                 support_ratio = sup_cnt / len(xs)
+754:                 mean_abs_offset = abs(y_snap - y_grid)
+755:                 pitch_deviation = abs(y_snap - y_grid)
+756:                 
+757:                 # Check gate
+758:                 is_gate_passed = (
+759:                     dark_valley_score >= 2.0 and
+760:                     support_ratio >= 0.65 and
+761:                     mean_abs_offset <= 2.5 and
+762:                     pitch_deviation <= 3.0
+763:                 )
+764:                 
+765:                 if not is_gate_passed:
+766:                     rejected_count += 1
+767:                     
+768:             snapped_horiz_gaps.append({
+769:                 "y_snap": y_snap,
+770:                 "is_good": is_gate_passed,
+771:                 "support_ratio": support_ratio,
+772:                 "mean_offset": mean_abs_offset,
+773:                 "pitch_deviation": pitch_deviation,
+774:                 "support_pts": support_pts,
+775:                 "x_start": x_start,
+776:                 "x_end": x_end,
+777:                 "dark_valley_score": dark_valley_score
+778:             })
+779:             
+780:         # --- DRAW VISUALS ---
+781:         for g in snapped_horiz_gaps:
+782:             y_snap_anchor = g["y_snap"]
+783:             x_start = g["x_start"]
+784:             x_end = g["x_end"]
+785:             is_good = g["is_good"]
+786:             
+787:             y_start_draw = int(round(get_oriented_line_y_at_x(m_perp, x_mid, y_snap_anchor, x_start)))
+788:             y_end_draw = int(round(get_oriented_line_y_at_x(m_perp, x_mid, y_snap_anchor, x_end)))
+789:             
+790:             # Draw on support image
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

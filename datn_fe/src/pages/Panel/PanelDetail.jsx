@@ -74,6 +74,30 @@ function getPanelIndex(panels, localId) {
     return idx >= 0 ? idx + 1 : null;
 }
 
+/**
+ * V62: Lấy polygon để vẽ panel.
+ * Ưu tiên outer_polygon (từ line-snap v61),
+ * fallback về polygon cũ, rồi null.
+ */
+function getPanelOuterPoly(p) {
+    if (!p) return null;
+    if (p.outer_polygon && p.outer_polygon.length >= 3) return p.outer_polygon;
+    if (p.polygon       && p.polygon.length       >= 3) return p.polygon;
+    return null;
+}
+
+function getPanelDrawPoly(p) {
+    const poly = getPanelOuterPoly(p);
+    if (poly) return poly;
+
+    const bbox = p?.bbox || p?.box;
+    if (bbox && bbox.length >= 4) {
+        const [x1, y1, x2, y2] = bbox;
+        return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]];
+    }
+    return null;
+}
+
 // Kiểm tra tấm pin có lỗi hay không
 function isPanelFaulty(p) {
     if (!p) return false;
@@ -294,31 +318,22 @@ export default function PanelDetail({ panel: image, data, panelPower = 600, onSe
 
                                 return (
                                     <g key={i} onClick={() => setSelectedFaultyPanel(p)}>
-                                        {p.polygon && p.polygon.length >= 3 ? (
-                                            <polygon
-                                                points={p.polygon.map(pt => Array.isArray(pt) ? pt.join(',') : pt).join(' ')}
-                                                fill={fillColor}
-                                                stroke={strokeColor}
-                                                strokeWidth={isHovered ? 2.5 : 1.5}
-                                                onMouseEnter={() => { setHoveredPanel(p); setHoveredDefect(null); }}
-                                                onMouseLeave={() => { setHoveredPanel(null); setHoveredDefect(null); }}
-                                                style={{ cursor: "pointer", transition: "all 0.2s" }}
-                                            />
-                                        ) : (
-                                            p.bbox && (
-                                                <rect
-                                                    x={(p.bbox || p.box)[0]} y={(p.bbox || p.box)[1]}
-                                                    width={(p.bbox || p.box)[2] - (p.bbox || p.box)[0]}
-                                                    height={(p.bbox || p.box)[3] - (p.bbox || p.box)[1]}
-                                                    fill={fillColor}
+                                        {(() => {
+                                            const displayPoly = getPanelDrawPoly(p);
+                                            return displayPoly ? (
+                                                <polygon
+                                                    points={displayPoly.map(pt => Array.isArray(pt) ? pt.join(',') : pt).join(' ')}
+                                                    className="panel-outer-svg-line"
+                                                    fill="none"
                                                     stroke={strokeColor}
-                                                    strokeWidth={isHovered ? 2.5 : 1.5}
+                                                    strokeWidth={isHovered ? 3.5 : 3}
+                                                    vectorEffect="non-scaling-stroke"
                                                     onMouseEnter={() => { setHoveredPanel(p); setHoveredDefect(null); }}
                                                     onMouseLeave={() => { setHoveredPanel(null); setHoveredDefect(null); }}
-                                                    style={{ cursor: "pointer", transition: "all 0.2s" }}
+                                                    style={{ cursor: 'pointer', transition: 'all 0.2s' }}
                                                 />
-                                            )
-                                        )}
+                                            ) : null;
+                                        })()}
 
                                         {p.center && (
                                             <text
@@ -463,6 +478,38 @@ export default function PanelDetail({ panel: image, data, panelPower = 600, onSe
                                                     Hàng {hoveredPanel.row} · Cột {hoveredPanel.col}
                                                 </p>
                                             )}
+                                            {hoveredPanel.review_status && (
+                                                <div style={{
+                                                    marginTop: 8,
+                                                    display: "inline-flex",
+                                                    alignItems: "center",
+                                                    gap: 6,
+                                                    padding: "4px 10px",
+                                                    borderRadius: 20,
+                                                    fontSize: 12,
+                                                    fontWeight: 600,
+                                                    backgroundColor: 
+                                                        hoveredPanel.review_status === "confirmed_defect" ? "#fee2e2" :
+                                                        hoveredPanel.review_status === "needs_review" ? "#fef3c7" :
+                                                        hoveredPanel.review_status === "false_positive" ? "#f1f5f9" : "#f1f5f9",
+                                                    color: 
+                                                        hoveredPanel.review_status === "confirmed_defect" ? "#ef4444" :
+                                                        hoveredPanel.review_status === "needs_review" ? "#f59e0b" :
+                                                        hoveredPanel.review_status === "false_positive" ? "#64748b" : "#64748b"
+                                                }}>
+                                                    <span style={{
+                                                        width: 6,
+                                                        height: 6,
+                                                        borderRadius: "50%",
+                                                        backgroundColor: 
+                                                            hoveredPanel.review_status === "confirmed_defect" ? "#ef4444" :
+                                                            hoveredPanel.review_status === "needs_review" ? "#f59e0b" :
+                                                            hoveredPanel.review_status === "false_positive" ? "#64748b" : "#64748b"
+                                                    }} />
+                                                    Duyệt: {hoveredPanel.review_label || "Chưa duyệt"}
+                                                    {hoveredPanel.review_note && ` (${hoveredPanel.review_note})`}
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                     {/* ID TẤM HÌNH box */}
@@ -513,6 +560,11 @@ export default function PanelDetail({ panel: image, data, panelPower = 600, onSe
                                         <Percent size={13} style={{ verticalAlign: "middle", marginRight: 4 }} />
                                         Độ tin cậy AI: <b>{((hoveredPanel.confidence || 0) * 100).toFixed(0)}%</b>
                                     </p>
+                                    {hoveredPanel.geometry_source && (
+                                        <p style={{ margin: '6px 0 0 0', fontSize: 11, color: hoveredPanel.geometry_source === 'v61_line_snap' ? '#22c55e' : '#f59e0b' }}>
+                                            Polygon: {hoveredPanel.geometry_source === 'v61_line_snap' ? '✓ Line-snap V61' : `⚠ ${hoveredPanel.geometry_source || 'unknown'}`}
+                                        </p>
+                                    )}
                                 </div>
 
                                 {/* Danh sách lỗi */}
@@ -609,12 +661,19 @@ export default function PanelDetail({ panel: image, data, panelPower = 600, onSe
                             >
                                 <svg width="100%" height="100%" viewBox={vBox} preserveAspectRatio="xMidYMid meet">
                                     <image href={`${IMAGE_BASE_API}${image.filename}`} width={imgW} height={imgH} />
-                                    <polygon
-                                        points={selectedFaultyPanel.polygon?.map(pt => Array.isArray(pt) ? pt.join(',') : pt).join(' ')}
-                                        fill="transparent"
-                                        stroke="#EF4444"
-                                        strokeWidth={2}
-                                    />
+                                    {(() => {
+                                        const modalPoly = getPanelDrawPoly(selectedFaultyPanel);
+                                        return modalPoly ? (
+                                            <polygon
+                                                points={modalPoly.map(pt => Array.isArray(pt) ? pt.join(',') : pt).join(' ')}
+                                                className="panel-outer-svg-line"
+                                                fill="none"
+                                                stroke="#EF4444"
+                                                strokeWidth={3}
+                                                vectorEffect="non-scaling-stroke"
+                                            />
+                                        ) : null;
+                                    })()}
                                     {selectedFaultyPanel.defects && selectedFaultyPanel.defects.map((d, di) => {
                                         const isDefectHovered = modalHoveredDefect?.class_name === d.class_name
                                                 && modalHoveredDefect?.location_in_panel === d.location_in_panel;

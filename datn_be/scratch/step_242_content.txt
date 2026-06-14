@@ -1,0 +1,49 @@
+Created At: 2026-06-05T13:42:01Z
+Completed At: 2026-06-05T13:42:01Z
+File Path: `file:///c:/Solar_Inspection_Project/datn_be/scratch/edge_grid_full_image_DJI_0029.py`
+Total Lines: 931
+Total Bytes: 40708
+Showing lines 480 to 520
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+480:     img_panels = img.copy()
+481:     img_support = img.copy()
+482:     img_snap = img.copy()
+483:     img_panels_verified = img.copy()
+484:     
+485:     stats = []
+486:     
+487:     for b_idx, b in enumerate(blocks):
+488:         block_name = f"block_{b_idx + 1}"
+489:         n_cols = len(b["columns"])
+490:         
+491:         y_min = min(p["bbox"][1] for p in b["panels"])
+492:         y_max = max(p["bbox"][3] for p in b["panels"])
+493:         x_min_roi = min(p["bbox"][0] for p in b["panels"]) - 10
+494:         x_max_roi = max(p["bbox"][2] for p in b["panels"]) + 10
+495:         
+496:         # Draw block ROI
+497:         cv2.rectangle(img_blocks, (x_min_roi, y_min), (x_max_roi, y_max), (0, 255, 0), 2)
+498:         cv2.putText(img_blocks, block_name, (x_min_roi + 5, y_min + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
+499:         
+500:         # Fit boundaries
+501:         if n_cols == 1:
+502:             col = b["columns"][0]
+503:             x_baselines = [
+504:                 lambda seg: np.median([p["bbox"][0] for p in seg]),
+505:                 lambda seg: np.median([p["bbox"][2] for p in seg])
+506:             ]
+507:             boundary_keys = ["left_outer", "right_outer"]
+508:         else:
+509:             col1 = b["columns"][0]
+510:             col2 = b["columns"][1]
+511:             x_baselines = [
+512:                 lambda seg: np.median([p["bbox"][0] for p in seg if p in col1] or [p["bbox"][0] for p in seg]),
+513:                 lambda seg: np.median([((p1["bbox"][2]+p2["bbox"][0])/2.0) for p1 in seg if p1 in col1 for p2 in seg if p2 in col2] or [(p["bbox"][2]+p["bbox"][0])/2.0 for p in seg]),
+514:                 lambda seg: np.median([p["bbox"][2] for p in seg if p in col2] or [p["bbox"][2] for p in seg])
+515:             ]
+516:             boundary_keys = ["left_outer", "middle_divider", "right_outer"]
+517:             
+518:         boundaries = {}
+519:         boundaries_local_fits = {}
+520:         boundaries_diags = {}
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

@@ -25,7 +25,7 @@ export default function App() {
 
     const [mapFocusTarget, setMapFocusTarget] = useState(null);
 
-    useEffect(() => {
+    const refreshData = () => {
         if (isAuth) {
             fetchLatestBatch().then(res => {
                 if (res.data && res.data.batch_id) {
@@ -35,6 +35,19 @@ export default function App() {
                 }
             }).catch(console.error);
         }
+    };
+
+    useEffect(() => {
+        refreshData();
+    }, [isAuth]);
+
+    // Lắng nghe sự kiện review-sync-completed để refresh toàn app
+    useEffect(() => {
+        const handler = () => {
+            refreshData();
+        };
+        window.addEventListener('review-sync-completed', handler);
+        return () => window.removeEventListener('review-sync-completed', handler);
     }, [isAuth]);
 
     const handleLogin = () => { localStorage.setItem("isAuth", "true"); setIsAuth(true); };
@@ -106,7 +119,7 @@ export default function App() {
 
                 {page === "report" && <ReportPage data={aiResults} batchId={currentBatchId} />}
 
-                {page === "ops" && <UnifiedDashboard data={aiResults} panelPower={currentPanelPower} focusTarget={mapFocusTarget} />}
+                {page === "ops" && <UnifiedDashboard data={aiResults} panelPower={currentPanelPower} focusTarget={mapFocusTarget} batchId={currentBatchId} onRefresh={refreshData} />}
             </div>
         </div>
     );

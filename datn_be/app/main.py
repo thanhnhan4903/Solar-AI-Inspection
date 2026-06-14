@@ -5,7 +5,7 @@ import shutil
 import uuid
 import logging
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Depends, Form, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Depends, Form, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +27,11 @@ from app.services.analyzer import SolarAnalyzer
 from app.services.panel_geometry import assign_row_col_ids
 from app.services.defect_logic import assign_defects_to_panels
 from app.services.report_generator import ReportGenerator
+from app.services.pv_panel_snapper import snap_panels_with_v61
+from app.services.defect_thermal_validator import (
+    validate_defects_by_relative_thermal_contrast,
+    THERMAL_VALIDATOR_ENABLED,
+)
 
 # ─────────────────────────────────────────
 # LOGGING
@@ -180,6 +185,30 @@ async def get_latest_batch(db: Session = Depends(get_db)):
                     row_val = int(m.group(1))
                     col_val = int(m.group(2))
 
+            raw_polygon = panel_detail.get("polygon", [])
+            outer_polygon = panel_detail.get("outer_polygon") or raw_polygon
+            inner_polygon = panel_detail.get("inner_polygon", [])
+            calc_polygon = panel_detail.get("calc_polygon") or inner_polygon
+
+            # Nếu outer_polygon rỗng hoặc không đủ 3 điểm thì fallback raw polygon.
+            if not outer_polygon or len(outer_polygon) < 3:
+                outer_polygon = raw_polygon
+
+            geometry_source = panel_detail.get("geometry_source", "unknown")
+            snap_source = panel_detail.get("snap_source", "")
+            outer_area = panel_detail.get("outer_area", 0.0)
+            inner_area = panel_detail.get("inner_area", panel_detail.get("area", 0.0))
+
+            review_status = panel_detail.get("review_status", "unreviewed")
+            review_label = panel_detail.get("review_label", "Chưa duyệt")
+            review_note = panel_detail.get("review_note", "")
+            include_in_report = panel_detail.get("include_in_report", True)
+
+            if review_status == "false_positive":
+                status_val = "healthy"
+            else:
+                status_val = "faulty" if defects_list else "healthy"
+
             panels_data.append({
                 "local_id": panel_info.local_id,
                 "row": panel_detail.get("row", row_val),
@@ -189,22 +218,50 @@ async def get_latest_batch(db: Session = Depends(get_db)):
                 "center": [panel_info.x_coord, panel_info.y_coord],
                 "bbox": panel_detail.get("bbox", []),
                 "box": panel_detail.get("bbox", []),
-                "polygon": panel_detail.get("polygon", []),
+                "polygon": outer_polygon,
+                "outer_polygon": outer_polygon,
+                "inner_polygon": inner_polygon,
+                "calc_polygon": calc_polygon,
+                "geometry_source": geometry_source,
+                "snap_source": snap_source,
+                "outer_area": outer_area,
+                "inner_area": inner_area,
                 "total_panel_loss": r.loss_pct,
                 "total_defect_area_ratio_percent": r.loss_pct,
                 "confidence": r.confidence,
                 "defects": defects_list,
-                "status": "faulty" if defects_list else "healthy",
+                "status": status_val,
                 "worst_severity": panel_detail.get("worst_severity", "healthy"),
                 "recommendation": panel_detail.get("recommendation", "Không cần xử lý"),
                 "gps_lat": panel_detail.get("gps_lat"),
                 "gps_lng": panel_detail.get("gps_lng"),
+                "main_defect_class": panel_detail.get("main_defect_class"),
+                "review_status": review_status,
+                "review_label": review_label,
+                "review_note": review_note,
+                "include_in_report": include_in_report,
             })
             
+        # Get image dimensions from file on disk, fallback to 640x512
+        img_w, img_h = 640, 512
+        try:
+            from PIL import Image as PILImage
+            precalib_path = os.path.join("data", "precalib", img.filename)
+            if os.path.exists(precalib_path):
+                with PILImage.open(precalib_path) as pil_img:
+                    img_w, img_h = pil_img.size
+            elif os.path.exists(img.path):
+                with PILImage.open(img.path) as pil_img:
+                    img_w, img_h = pil_img.size
+        except Exception as e:
+            logger.warning(f"Could not get image dimensions for {img.filename}: {e}")
+
         final_report.append({
             "id": img.filename, # frontend UnifiedDashboard dùng ID như filename
             "filename": img.filename,
             "rgb_image": thermal_to_rgb.get(img.filename, img.filename.replace("_thermal", "")),
+            "image_width": img_w,
+            "image_height": img_h,
             "total_panels": len(panels_data),
             "panels": panels_data,
             "upload_date": img.batch.upload_date.isoformat() if img.batch else None
@@ -399,6 +456,256 @@ def get_gps_metadata(img_path):
 # ================================
 # --- KHỐI 4-5: CHẠY AI + PHÂN TÍCH + LƯU DB ---
 # ================================
+def run_analysis_pipeline_task(
+    batch_id: int,
+    thermal_files: List[str],
+    processed_images: List[str],
+    thermal_to_rgb: dict,
+    raw_dir: str,
+    precalib_dir: str,
+    results_dir: str,
+    panel_power: float
+):
+    """Background task to run the full analysis pipeline."""
+    from app.core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        # Calculate total images and processed count for accurate progress reporting
+        all_thermal_in_precalib = [
+            fn for fn in os.listdir(precalib_dir)
+            if fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
+            and fn not in [p for p in thermal_to_rgb.values()]
+        ]
+        total_images = len(all_thermal_in_precalib)
+        processed_count = total_images - len(thermal_files)
+
+        progress_state["running"] = True
+        progress_state["done"] = False
+        progress_state["current"] = processed_count
+        progress_state["total"] = total_images
+        progress_state["filename"] = ""
+        progress_state["step"] = "Khởi động..."
+
+        # ── Re-associate existing images from previous runs with the new batch ──
+        if processed_images:
+            db.query(models.Image).filter(models.Image.filename.in_(processed_images)).update(
+                {models.Image.batch_id: batch_id},
+                synchronize_session=False
+            )
+            db.commit()
+
+        final_report = []
+
+        logger.info(f"[analyze-all background] Model classes: {ai_engine.model.names if ai_engine else 'None'}")
+        logger.info(f"[analyze-all background] Bắt đầu xử lý {len(thermal_files)} ảnh")
+
+        for idx, filename in enumerate(thermal_files):
+            # ── Cập nhật progress ──
+            progress_state["current"] = processed_count + idx + 1
+            progress_state["filename"] = filename
+            progress_state["step"] = f"YOLO inference..."
+
+            img_path = os.path.join(precalib_dir, filename)
+            logger.info(f"[analyze-all background] Inference ({idx+1}/{len(thermal_files)}): {img_path}")
+
+            # ── BƯỚC 1: Chạy YOLOv8-seg ──
+            raw_detections, yolo_result = ai_engine.detect_and_segment(img_path)
+            img_h, img_w = yolo_result.orig_shape
+
+            # Tách panel và defect từ YOLO raw output
+            panels_yolo = [d for d in raw_detections if d["category"] == "panel"]
+            defects_raw = [d for d in raw_detections if d["category"] == "defect"]
+
+            logger.info(
+                f"  → YOLO raw: {len(panels_yolo)} panel, {len(defects_raw)} defect | "
+                f"Ảnh: {img_w}x{img_h}"
+            )
+
+            # ── BƯỚC 1b: Thay panel polygon bằng v62 line-snap ──
+            try:
+                panels_snapped = snap_panels_with_v61(
+                    image_path=img_path,
+                    yolo_panels=panels_yolo,
+                    output_dir=results_dir,
+                    debug=True,
+                )
+            except Exception as _snap_err:
+                logger.exception(f"  → V62 snap failed: {_snap_err}. Falling back to YOLO panels.")
+                panels_snapped = []
+
+            if panels_snapped:
+                panels_raw = panels_snapped
+                logger.info(
+                    f"  → V62 line-snap: {len(panels_raw)} panels (outer_polygon from line-snap)"
+                )
+            else:
+                panels_raw = panels_yolo
+                for p in panels_raw:
+                    p["geometry_source"] = "yolo_fallback"
+                logger.warning(
+                    f"  → V62 snap returned 0 panels, falling back to {len(panels_raw)} YOLO panels."
+                )
+
+            # ── BƯỚC 2: Gán UUID cho panel ──
+            for p in panels_raw:
+                if not p.get("id"):
+                    p["id"] = str(uuid.uuid4())
+
+            # ── BƯỚC 3: Gán defect vào panel bằng overlap area ──
+            panels_with_defects, unassigned = assign_defects_to_panels(panels_raw, defects_raw, panel_power, image_path=img_path)
+
+            logger.info(
+                f"  → Defect assigned: {sum(len(p['defects']) for p in panels_with_defects)}, "
+                f"unassigned: {len(unassigned)}"
+            )
+
+            # ── BƯỚC 3b: Kiểm chứng lỗi bằng tương quan nhiệt tương đối ──
+            if THERMAL_VALIDATOR_ENABLED:
+                try:
+                    stem = os.path.splitext(filename)[0]
+                    panels_with_defects = validate_defects_by_relative_thermal_contrast(
+                        image_path=img_path,
+                        panels=panels_with_defects,
+                        debug_dir="data/results/debug_logs",
+                        image_stem=stem,
+                    )
+                    logger.info(f"  → Thermal validation: OK ({stem})")
+                except Exception as _tv_err:
+                    logger.warning(
+                        f"  → Thermal validator failed: {_tv_err}. Tiếp tục không có validation."
+                    )
+
+            # ── BƯỚC 4: Gán hàng/cột (R01_C03) ──
+            final_panels = assign_row_col_ids(panels_with_defects)
+
+            # Lấy GPS từ EXIF của ảnh RGB ghép cặp
+            lat_exif, lng_exif = None, None
+            rgb_filename = thermal_to_rgb.get(filename)
+            if rgb_filename:
+                rgb_path = os.path.join(raw_dir, rgb_filename)
+                gps_coords = get_gps_metadata(rgb_path)
+                if gps_coords:
+                    lat_exif, lng_exif = gps_coords
+
+            for p in final_panels:
+                p["gps_lat"] = lat_exif
+                p["gps_lng"] = lng_exif
+
+            n_faulty = sum(1 for p in final_panels if p["status"] == "faulty")
+            n_healthy = sum(1 for p in final_panels if p["status"] == "healthy")
+            logger.info(f"  → Panel faulty: {n_faulty}, healthy: {n_healthy}")
+
+            # ── BƯỚC 5 (debug): Lưu ảnh annotated ──
+            try:
+                orig_img = cv2.imread(img_path)
+                if orig_img is not None:
+                    annotated_raw = yolo_result.plot()
+                    cv2.imwrite(os.path.join(results_dir, "raw_" + filename), annotated_raw)
+
+                    annotated_custom = draw_custom_annotation(orig_img, final_panels)
+                    cv2.imwrite(os.path.join(results_dir, filename), annotated_custom)
+            except Exception as e:
+                logger.warning(f"  → Không thể lưu ảnh annotated: {e}")
+
+            # ── BƯỚC 6: Lưu Image vào DB ──
+            db_image = models.Image(
+                batch_id=batch_id,
+                filename=filename,
+                image_type="Thermal",
+                path=os.path.join(results_dir, filename).replace("\\", "/")
+            )
+            db.add(db_image)
+            db.flush()
+
+            # ── BƯỚC 7: Lưu panel và AI Result vào DB ──
+            for p in final_panels:
+                local_id = p.get("local_id", f"R00_C00")
+                center = p.get("center", [0, 0])
+
+                db_panel = db.query(models.Panel).filter(models.Panel.local_id == local_id).first()
+                if not db_panel:
+                    db_panel = models.Panel(
+                        local_id=local_id,
+                        x_coord=center[0],
+                        y_coord=center[1],
+                    )
+                    db.add(db_panel)
+                    db.flush()
+                else:
+                    db_panel.x_coord = center[0]
+                    db_panel.y_coord = center[1]
+
+                import json
+                defect_str = json.dumps({
+                    "bbox": _to_list(p.get("bbox") or p.get("box", [])),
+                    "polygon": _to_list(p.get("polygon", [])),
+                    "outer_polygon": _to_list(p.get("outer_polygon") or p.get("polygon", [])),
+                    "inner_polygon": _to_list(p.get("inner_polygon", [])),
+                    "calc_polygon": _to_list(p.get("calc_polygon") or p.get("inner_polygon", [])),
+                    "geometry_source": p.get("geometry_source", "yolo_fallback"),
+                    "snap_source": p.get("snap_source", ""),
+                    "outer_area": p.get("outer_area", p.get("area", 0.0)),
+                    "inner_area": p.get("inner_area", p.get("area", 0.0)),
+                    "defects": _serialize_defects(p.get("defects", [])),
+                    "row": p.get("row", 0),
+                    "col": p.get("col", 0),
+                    "status": p.get("status", "healthy"),
+                    "total_panel_loss": p.get("total_panel_loss", 0.0),
+                    "worst_severity": p.get("worst_severity", "healthy"),
+                    "recommendation": p.get("recommendation", "Không cần xử lý"),
+                    "confidence": p.get("confidence", 0.0),
+                    "gps_lat": lat_exif,
+                    "gps_lng": lng_exif,
+                })
+
+                db_ai_result = models.AiResult(
+                    image_id=db_image.id,
+                    panel_id=db_panel.id,
+                    defect_type=defect_str,
+                    loss_pct=p.get("total_panel_loss", 0.0),
+                    confidence=p.get("confidence", 0.0),
+                )
+                db.add(db_ai_result)
+
+            final_report.append({
+                "filename": filename,
+                "rgb_image": thermal_to_rgb.get(filename),
+                "image_width": img_w,
+                "image_height": img_h,
+                "total_panels": len(final_panels),
+                "panels": _serialize_panels(final_panels),
+            })
+
+        db.commit()
+
+        # ── Auto-generate report PDF ──
+        ai_results = db.query(models.AiResult).join(models.Image).filter(
+            models.Image.batch_id == batch_id
+        ).all()
+        if ai_results:
+            report_name = f"Report_Batch_{batch_id}.pdf"
+            report_path = os.path.join("data", report_name)
+            ReportGenerator.generate_inspection_report(batch_id, ai_results, report_path)
+            
+            db_report = models.Report(batch_id=batch_id, file_path=report_path)
+            db.add(db_report)
+            db.commit()
+
+        logger.info(f"[analyze-all background] Hoàn tất! Batch ID: {batch_id}, {len(final_report)} ảnh.")
+        
+        progress_state["running"] = False
+        progress_state["done"] = True
+        progress_state["step"] = "Hoàn tất!"
+
+    except Exception as e:
+        logger.exception(f"Error in run_analysis_pipeline_task: {e}")
+        progress_state["running"] = False
+        progress_state["done"] = True
+        progress_state["step"] = f"Thất bại: {str(e)}"
+    finally:
+        db.close()
+
+
 @app.post("/api/v1/analyze-all")
 def start_analysis(
     background_tasks: BackgroundTasks,
@@ -423,7 +730,24 @@ def start_analysis(
     7. Định vị lỗi trong panel (upper-left, ...)
     8. Lưu DB và trả kết quả
     """
+    global progress_state
+    
+    # ── Reset progress tracker immediately ──
+    progress_state.update({
+        "running": True,
+        "done": False,
+        "current": 0,
+        "total": 0,
+        "filename": "",
+        "step": "Đang chuẩn bị..."
+    })
+
     if ai_engine is None:
+        progress_state.update({
+            "running": False,
+            "done": True,
+            "step": "Thất bại: Chưa tìm thấy file weights/best.pt"
+        })
         return {"error": "Chưa tìm thấy file weights/best.pt"}
 
     raw_dir = "data/raw"
@@ -432,6 +756,11 @@ def start_analysis(
     os.makedirs(results_dir, exist_ok=True)
 
     if not os.path.exists(precalib_dir) or len(os.listdir(precalib_dir)) == 0:
+        progress_state.update({
+            "running": False,
+            "done": True,
+            "step": "Thất bại: Thư mục precalib trống"
+        })
         return {"error": "Thư mục precalib trống. Hãy chạy tiền xử lý trước!"}
 
     # Ghép cặp Thermal và RGB
@@ -451,15 +780,16 @@ def start_analysis(
     ]
 
     if not thermal_files:
-        return {"message": "Không có ảnh mới nào cần phân tích!"}
-
-    # ── Reset + bắt đầu progress tracker ──
-    progress_state["running"] = True
-    progress_state["done"] = False
-    progress_state["current"] = 0
-    progress_state["total"] = len(thermal_files)
-    progress_state["filename"] = ""
-    progress_state["step"] = "Khởi động..."
+        progress_state.update({
+            "running": False,
+            "done": True,
+            "step": "Hoàn tất! Không có ảnh mới"
+        })
+        latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
+        return {
+            "message": "Không có ảnh mới nào cần phân tích!",
+            "batch_id": latest_batch.id if latest_batch else None
+        }
 
     # Tạo Batch mới trong DB
     new_batch = models.UploadBatch(
@@ -477,167 +807,40 @@ def start_analysis(
     db.commit()
     db.refresh(new_batch)
 
-    final_report = []
+    # Tính toán total và current ban đầu
+    all_thermal_in_precalib = [
+        fn for fn in os.listdir(precalib_dir)
+        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
+        and fn not in rgb_images
+    ]
+    total_images = len(all_thermal_in_precalib)
+    processed_count = total_images - len(thermal_files)
 
-    logger.info(f"[analyze-all] Model classes: {ai_engine.model.names}")
-    logger.info(f"[analyze-all] Bắt đầu xử lý {len(thermal_files)} ảnh")
+    progress_state.update({
+        "running": True,
+        "done": False,
+        "current": processed_count,
+        "total": total_images,
+        "filename": "",
+        "step": "Khởi động..."
+    })
 
-    for idx, filename in enumerate(thermal_files):
-        # ── Cập nhật progress ──
-        progress_state["current"] = idx + 1
-        progress_state["filename"] = filename
-        progress_state["step"] = f"YOLO inference..."
-
-        img_path = os.path.join(precalib_dir, filename)
-        logger.info(f"[analyze-all] Inference ({idx+1}/{len(thermal_files)}): {img_path}")
-
-        # ── BƯỚC 1: Chạy YOLOv8-seg ──
-        raw_detections, yolo_result = ai_engine.detect_and_segment(img_path)
-        img_h, img_w = yolo_result.orig_shape
-
-        # Tách panel và defect
-        panels_raw = [d for d in raw_detections if d["category"] == "panel"]
-        defects_raw = [d for d in raw_detections if d["category"] == "defect"]
-
-        logger.info(
-            f"  → YOLO raw: {len(panels_raw)} panel, {len(defects_raw)} defect | "
-            f"Ảnh: {img_w}x{img_h}"
-        )
-
-        # ── BƯỚC 2: Gán UUID cho panel ──
-        for p in panels_raw:
-            p["id"] = str(uuid.uuid4())
-
-        # ── BƯỚC 3: Gán defect vào panel bằng overlap area ──
-        panels_with_defects, unassigned = assign_defects_to_panels(panels_raw, defects_raw, panel_power, image_path=img_path)
-
-        logger.info(
-            f"  → Defect assigned: {sum(len(p['defects']) for p in panels_with_defects)}, "
-            f"unassigned: {len(unassigned)}"
-        )
-
-        # ── BƯỚC 4: Gán hàng/cột (R01_C03) ──
-        final_panels = assign_row_col_ids(panels_with_defects)
-
-        # Lấy GPS từ EXIF của ảnh RGB ghép cặp
-        lat_exif, lng_exif = None, None
-        rgb_filename = thermal_to_rgb.get(filename)
-        if rgb_filename:
-            rgb_path = os.path.join(raw_dir, rgb_filename)
-            gps_coords = get_gps_metadata(rgb_path)
-            if gps_coords:
-                lat_exif, lng_exif = gps_coords
-
-        for p in final_panels:
-            p["gps_lat"] = lat_exif
-            p["gps_lng"] = lng_exif
-
-        n_faulty = sum(1 for p in final_panels if p["status"] == "faulty")
-        n_healthy = sum(1 for p in final_panels if p["status"] == "healthy")
-        logger.info(f"  → Panel faulty: {n_faulty}, healthy: {n_healthy}")
-
-        # ── BƯỚC 5 (debug): Lưu ảnh annotated ──
-        try:
-            orig_img = cv2.imread(img_path)
-            if orig_img is not None:
-                # Vẽ result.plot() cho debug YOLO raw
-                annotated_raw = yolo_result.plot()
-                cv2.imwrite(os.path.join(results_dir, "raw_" + filename), annotated_raw)
-
-                # Vẽ custom annotation với refined polygon
-                annotated_custom = draw_custom_annotation(orig_img, final_panels)
-                cv2.imwrite(os.path.join(results_dir, filename), annotated_custom)
-        except Exception as e:
-            logger.warning(f"  → Không thể lưu ảnh annotated: {e}")
-
-        # ── BƯỚC 6: Lưu Image vào DB ──
-        db_image = models.Image(
-            batch_id=new_batch.id,
-            filename=filename,
-            image_type="Thermal",
-            path=os.path.join(results_dir, filename).replace("\\", "/")
-        )
-        db.add(db_image)
-        db.flush()
-
-        # ── BƯỚC 7: Lưu panel và AI Result vào DB ──
-        for p in final_panels:
-            local_id = p.get("local_id", f"R00_C00")
-            center = p.get("center", [0, 0])
-
-            db_panel = db.query(models.Panel).filter(models.Panel.local_id == local_id).first()
-            if not db_panel:
-                db_panel = models.Panel(
-                    local_id=local_id,
-                    x_coord=center[0],
-                    y_coord=center[1],
-                )
-                db.add(db_panel)
-                db.flush()
-            else:
-                db_panel.x_coord = center[0]
-                db_panel.y_coord = center[1]
-
-            # Defect types string or JSON representing the panel data
-            import json
-            defect_str = json.dumps({
-                "bbox": _to_list(p.get("bbox") or p.get("box", [])),
-                "polygon": _to_list(p.get("polygon", [])),
-                "defects": _serialize_defects(p.get("defects", [])),
-                "row": p.get("row", 0),
-                "col": p.get("col", 0),
-                "status": p.get("status", "healthy"),
-                "total_panel_loss": p.get("total_panel_loss", 0.0),
-                "worst_severity": p.get("worst_severity", "healthy"),
-                "recommendation": p.get("recommendation", "Không cần xử lý"),
-                "confidence": p.get("confidence", 0.0),
-                "gps_lat": lat_exif,
-                "gps_lng": lng_exif,
-            })
-
-            db_ai_result = models.AiResult(
-                image_id=db_image.id,
-                panel_id=db_panel.id,
-                defect_type=defect_str,
-                loss_pct=p.get("total_panel_loss", 0.0),
-                confidence=p.get("confidence", 0.0),
-            )
-            db.add(db_ai_result)
-
-        final_report.append({
-            "filename": filename,
-            "rgb_image": thermal_to_rgb.get(filename),
-            "image_width": img_w,
-            "image_height": img_h,
-            "total_panels": len(final_panels),
-            "panels": _serialize_panels(final_panels),
-        })
-
-    db.commit()
-
-    # ── Auto-generate report PDF (Chạy ngầm dưới nền) ──
-    ai_results = db.query(models.AiResult).join(models.Image).filter(
-        models.Image.batch_id == new_batch.id
-    ).all()
-    if ai_results:
-        report_name = f"Report_Batch_{new_batch.id}.pdf"
-        report_path = os.path.join("data", report_name)
-        background_tasks.add_task(ReportGenerator.generate_inspection_report, new_batch.id, ai_results, report_path)
-        db_report = models.Report(batch_id=new_batch.id, file_path=report_path)
-        db.add(db_report)
-        db.commit()
-
-    logger.info(f"[analyze-all] Hoàn tất! Batch ID: {new_batch.id}, {len(final_report)} ảnh.")
-
-    # ── Kết thúc progress tracker ──
-    progress_state["running"] = False
-    progress_state["done"] = True
-    progress_state["step"] = "Hoàn tất!"
+    # Khởi chạy background task
+    background_tasks.add_task(
+        run_analysis_pipeline_task,
+        new_batch.id,
+        thermal_files,
+        list(processed_images),
+        thermal_to_rgb,
+        raw_dir,
+        precalib_dir,
+        results_dir,
+        panel_power or 600.0
+    )
 
     return {
-        "message": "AI đã phân tích và lưu dữ liệu thành công!",
+        "message": "Bắt đầu phân tích AI...",
         "batch_id": new_batch.id,
-        "data": final_report,
     }
 
 
@@ -657,7 +860,15 @@ def _serialize_panels(panels: List) -> List:
             "confidence":   p.get("confidence", 0.0),
             "bbox":         _to_list(p.get("bbox") or p.get("box", [])),
             "box":          _to_list(p.get("bbox") or p.get("box", [])),  # backward compat
-            "polygon":      _to_list(p.get("polygon", [])),
+            "polygon":      _to_list(p.get("outer_polygon") or p.get("polygon", [])),
+            # V62 line-snap polygon data
+            "outer_polygon":   _to_list(p.get("outer_polygon") or p.get("polygon", [])),
+            "inner_polygon":   _to_list(p.get("inner_polygon", [])),
+            "calc_polygon":    _to_list(p.get("calc_polygon") or p.get("inner_polygon", [])),
+            "geometry_source": p.get("geometry_source", "yolo_fallback"),
+            "snap_source":      p.get("snap_source", ""),
+            "outer_area":      p.get("outer_area", p.get("area", 0.0)),
+            "inner_area":      p.get("inner_area", p.get("area", 0.0)),
             "area":         p.get("area", 0.0),
             "center":       _to_list(p.get("center", [0, 0])),
             "status":       p.get("status", "healthy"),
@@ -683,6 +894,7 @@ def _serialize_defects(defects: List) -> List:
     result = []
     for d in defects:
         result.append({
+            # ── Core YOLO fields (không thay đổi) ──
             "class_name":        d.get("class_name", ""),
             "confidence":        d.get("confidence", 0.0),
             "bbox":              _to_list(d.get("bbox") or d.get("box", [])),
@@ -700,6 +912,18 @@ def _serialize_defects(defects: List) -> List:
             # Backward compat
             "type": d.get("class_name", ""),
             "loss": d.get("area_ratio_percent", 0.0),
+            # ── Thermal Validation fields (Relative Spatial-Thermal Contrast) ──
+            "thermal_validation_status":     d.get("thermal_validation_status", "not_run"),
+            "thermal_validation_score":      d.get("thermal_validation_score"),
+            "rule_class":                    d.get("rule_class"),
+            "final_class_suggestion":        d.get("final_class_suggestion"),
+            "relative_hot_delta":            d.get("relative_hot_delta"),
+            "relative_dark_delta":           d.get("relative_dark_delta"),
+            "blue_suppression":              d.get("blue_suppression"),
+            "tni":                           d.get("tni"),
+            "area_ratio_inner":              d.get("area_ratio_inner"),
+            "severity_by_relative_contrast": d.get("severity_by_relative_contrast"),
+            "suggested_review_status":       d.get("suggested_review_status"),
         })
     return result
 
@@ -1057,4 +1281,342 @@ def update_batch_metadata(req: UpdateBatchMetadataRequest, background_tasks: Bac
         "device": batch.device,
         "scope": batch.scope,
         "panel_power": batch.panel_power
+    }
+
+
+# ================================
+# --- ANOMALY DEFECT MANUAL REVIEW ---
+# ================================
+class ReviewItemRequest(BaseModel):
+    review_status: str
+    review_note: Optional[str] = ""
+
+@app.get("/api/v1/review/items")
+def get_review_items(batch_id: Optional[int] = None, db: Session = Depends(get_db)):
+    if batch_id is None:
+        latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
+        if not latest_batch:
+            return {"batch_id": None, "total": 0, "items": []}
+        batch_id = latest_batch.id
+    else:
+        batch = db.query(models.UploadBatch).filter(models.UploadBatch.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+    # Get images of the batch, sorted by filename
+    images = db.query(models.Image).filter(models.Image.batch_id == batch_id).order_by(models.Image.filename).all()
+    image_to_index = {img.id: idx + 1 for idx, img in enumerate(images)}
+
+    ai_results = db.query(models.AiResult).join(models.Image).filter(models.Image.batch_id == batch_id).all()
+    
+    items = []
+    import json
+    import re
+
+    def parse_local_id(local_id):
+        if not local_id:
+            return (0, 0, 0)
+        b = re.search(r"B(\d+)", local_id)
+        r = re.search(r"R(\d+)", local_id)
+        c = re.search(r"C(\d+)", local_id)
+        block = int(b.group(1)) if b else 0
+        row = int(r.group(1)) if r else 0
+        col = int(c.group(1)) if c else 0
+        return (block, row, col)
+
+    for r in ai_results:
+        if not r.defect_type or not r.defect_type.startswith("{"):
+            continue
+        try:
+            panel_detail = json.loads(r.defect_type)
+        except Exception:
+            continue
+        
+        defects = panel_detail.get("defects", [])
+        if not defects:
+            continue
+            
+        panel_info = db.query(models.Panel).filter(models.Panel.id == r.panel_id).first()
+        if not panel_info:
+            continue
+            
+        img = r.image
+        img_idx = image_to_index.get(img.id, 1)
+
+        row_val, col_val = 0, 0
+        if panel_info.local_id:
+            m = re.match(r"R(\d+)_C(\d+)", panel_info.local_id)
+            if m:
+                row_val = int(m.group(1))
+                col_val = int(m.group(2))
+                
+        raw_polygon = panel_detail.get("polygon", [])
+        outer_polygon = panel_detail.get("outer_polygon") or raw_polygon
+        inner_polygon = panel_detail.get("inner_polygon", [])
+        calc_polygon = panel_detail.get("calc_polygon") or inner_polygon
+        
+        items.append({
+            "review_item_id": f"{img.filename}::{panel_info.local_id}",
+            "filename": img.filename,
+            "image_index": img_idx,
+            "image_url": f"/data/precalib/{img.filename}",
+            "annotated_image_url": f"/data/results/{img.filename}",
+            "local_id": panel_info.local_id,
+            "row": panel_detail.get("row", row_val),
+            "col": panel_detail.get("col", col_val),
+            "panel": {
+                "polygon": outer_polygon,
+                "outer_polygon": outer_polygon,
+                "inner_polygon": inner_polygon,
+                "calc_polygon": calc_polygon,
+                "bbox": panel_detail.get("bbox", []),
+                "geometry_source": panel_detail.get("geometry_source", "unknown"),
+            },
+            "defects": defects,
+            "review_status": panel_detail.get("review_status", "unreviewed"),
+            "review_label": panel_detail.get("review_label", "Chưa duyệt"),
+            "review_note": panel_detail.get("review_note", ""),
+            "include_in_report": panel_detail.get("include_in_report", True),
+        })
+
+    items.sort(key=lambda x: (x["image_index"], x["filename"], parse_local_id(x["local_id"])))
+    
+    return {
+        "batch_id": batch_id,
+        "total": len(items),
+        "items": items
+    }
+
+@app.post("/api/v1/review/items/{review_item_id}")
+def update_review_item(
+    review_item_id: str,
+    req: ReviewItemRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    if "::" not in review_item_id:
+        raise HTTPException(status_code=400, detail="Invalid review_item_id format. Expected 'filename::local_id'")
+        
+    filename, local_id = review_item_id.split("::", 1)
+    
+    latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
+    if not latest_batch:
+        raise HTTPException(status_code=404, detail="No batches found")
+        
+    db_image = db.query(models.Image).filter(
+        models.Image.batch_id == latest_batch.id,
+        models.Image.filename == filename
+    ).first()
+    
+    if not db_image:
+        raise HTTPException(status_code=404, detail=f"Image {filename} not found in latest batch")
+        
+    db_panel = db.query(models.Panel).filter(models.Panel.local_id == local_id).first()
+    if not db_panel:
+        raise HTTPException(status_code=404, detail=f"Panel {local_id} not found")
+        
+    db_result = db.query(models.AiResult).filter(
+        models.AiResult.image_id == db_image.id,
+        models.AiResult.panel_id == db_panel.id
+    ).first()
+    
+    if not db_result:
+        raise HTTPException(status_code=404, detail=f"AI result not found for panel {local_id} in image {filename}")
+        
+    if not db_result.defect_type or not db_result.defect_type.startswith("{"):
+        raise HTTPException(status_code=400, detail="AI result is not in JSON format")
+        
+    import json
+    try:
+        panel_detail = json.loads(db_result.defect_type)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI result JSON: {e}")
+        
+    status = req.review_status
+    if status not in ["unreviewed", "confirmed_defect", "needs_review", "false_positive"]:
+        raise HTTPException(status_code=400, detail="Invalid review_status value")
+        
+    labels = {
+        "unreviewed": "Chưa duyệt",
+        "confirmed_defect": "Đúng có lỗi",
+        "needs_review": "Xem xét",
+        "false_positive": "Không phải lỗi"
+    }
+    
+    panel_detail["review_status"] = status
+    panel_detail["review_label"] = labels[status]
+    panel_detail["review_note"] = req.review_note or ""
+    panel_detail["include_in_report"] = (status != "false_positive")
+    
+    db_result.defect_type = json.dumps(panel_detail)
+    db.commit()
+    
+    ai_results = db.query(models.AiResult).join(models.Image).filter(
+        models.Image.batch_id == latest_batch.id
+    ).all()
+    
+    if ai_results:
+        report_name = f"Report_Batch_{latest_batch.id}.pdf"
+        report_path = os.path.join("data", report_name)
+        
+        background_tasks.add_task(ReportGenerator.generate_inspection_report, latest_batch.id, ai_results, report_path)
+        
+        db_report = db.query(models.Report).filter(models.Report.batch_id == latest_batch.id).first()
+        if not db_report:
+            db_report = models.Report(batch_id=latest_batch.id, file_path=report_path)
+            db.add(db_report)
+        else:
+            db_report.file_path = report_path
+        db.commit()
+        
+    return {
+        "ok": True,
+        "review_item_id": review_item_id,
+        "review_status": status,
+        "review_label": labels[status],
+        "include_in_report": panel_detail["include_in_report"]
+    }
+
+# ================================
+# --- REVIEW SYNC ENDPOINT ---
+# ================================
+class ReviewSyncRequest(BaseModel):
+    batch_id: Optional[int] = None
+
+@app.post("/api/v1/review/sync")
+def sync_review(req: ReviewSyncRequest, db: Session = Depends(get_db)):
+    """
+    Đồng bộ review status:
+    1. Chuẩn hóa include_in_report theo rule:
+       - false_positive → include_in_report = False
+       - confirmed_defect / needs_review / unreviewed → include_in_report = True
+    2. Tính lại summary cho batch.
+    3. Commit DB.
+    """
+    import json as _json
+
+    if req.batch_id is None:
+        latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
+        if not latest_batch:
+            raise HTTPException(status_code=404, detail="No batch found")
+        batch_id = latest_batch.id
+    else:
+        batch_id = req.batch_id
+        latest_batch = db.query(models.UploadBatch).filter(models.UploadBatch.id == batch_id).first()
+        if not latest_batch:
+            raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+
+    ai_results = db.query(models.AiResult).join(models.Image).filter(
+        models.Image.batch_id == batch_id
+    ).all()
+
+    summary = {
+        "total_ai_detected": 0,
+        "confirmed_defect": 0,
+        "needs_review": 0,
+        "false_positive": 0,
+        "unreviewed": 0,
+        "included_in_report": 0,
+        "excluded_from_report": 0,
+    }
+
+    for r in ai_results:
+        if not r.defect_type or not r.defect_type.startswith("{"):
+            continue
+        try:
+            panel_detail = _json.loads(r.defect_type)
+        except Exception:
+            continue
+
+        defects = panel_detail.get("defects", [])
+        if not defects:
+            continue
+
+        summary["total_ai_detected"] += 1
+
+        status = panel_detail.get("review_status", "unreviewed")
+
+        # Chuẩn hóa include_in_report
+        if status == "false_positive":
+            include = False
+        else:
+            include = True
+
+        panel_detail["include_in_report"] = include
+        r.defect_type = _json.dumps(panel_detail)
+
+        # Đếm summary
+        if status in ("confirmed_defect", "needs_review", "unreviewed", "false_positive"):
+            summary[status] += 1
+        else:
+            summary["unreviewed"] += 1
+
+        if include:
+            summary["included_in_report"] += 1
+        else:
+            summary["excluded_from_report"] += 1
+
+    db.commit()
+    logger.info(f"[review/sync] Batch {batch_id}: {summary}")
+
+    return {
+        "ok": True,
+        "batch_id": batch_id,
+        "summary": summary,
+        "message": "Review synchronized"
+    }
+
+
+@app.get("/api/v1/review/summary")
+def get_review_summary(batch_id: Optional[int] = None, db: Session = Depends(get_db)):
+    if batch_id is None:
+        latest_batch = db.query(models.UploadBatch).order_by(models.UploadBatch.id.desc()).first()
+        if not latest_batch:
+            return {
+                "batch_id": None,
+                "total_review_items": 0,
+                "unreviewed": 0,
+                "confirmed_defect": 0,
+                "needs_review": 0,
+                "false_positive": 0
+            }
+        batch_id = latest_batch.id
+    else:
+        batch = db.query(models.UploadBatch).filter(models.UploadBatch.id == batch_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+    ai_results = db.query(models.AiResult).join(models.Image).filter(models.Image.batch_id == batch_id).all()
+    
+    counts = {
+        "unreviewed": 0,
+        "confirmed_defect": 0,
+        "needs_review": 0,
+        "false_positive": 0
+    }
+    
+    import json
+    for r in ai_results:
+        if not r.defect_type or not r.defect_type.startswith("{"):
+            continue
+        try:
+            panel_detail = json.loads(r.defect_type)
+        except Exception:
+            continue
+            
+        defects = panel_detail.get("defects", [])
+        if not defects:
+            continue
+            
+        status = panel_detail.get("review_status", "unreviewed")
+        if status in counts:
+            counts[status] += 1
+        else:
+            counts["unreviewed"] += 1
+            
+    total = sum(counts.values())
+    return {
+        "batch_id": batch_id,
+        "total_review_items": total,
+        **counts
     }

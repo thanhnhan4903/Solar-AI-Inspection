@@ -1,0 +1,70 @@
+Created At: 2026-06-05T13:35:53Z
+Completed At: 2026-06-05T13:35:53Z
+File Path: `file:///c:/Solar_Inspection_Project/datn_be/scratch/edge_grid_full_image_DJI_0029.py`
+Total Lines: 742
+Total Bytes: 31995
+Showing lines 540 to 650
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+540:         a_avg = np.mean(all_slopes) if all_slopes else 0.0
+541:         
+542:         # Oriented slope: m_perp = -a_avg
+543:         m_perp = -a_avg
+544:         vertical_angle_deg = np.degrees(np.arctan(1.0 / a_avg if a_avg != 0 else 9999))
+545:         horizontal_angle_deg = np.degrees(np.arctan(m_perp))
+546:         
+547:         # Detect initial horizontal gap anchors (y-coordinates)
+548:         raw_horiz_gaps = detect_horizontal_gap_lines(gray, b["panels"])
+549:         
+550:         # 2. Build family of parallel oriented lines and snap them to the local 1D profile valleys
+551:         x_mid = (x_min_roi + x_max_roi) / 2.0
+552:         snapped_horiz_gaps = []
+553:         
+554:         for y, x_start, x_end in raw_horiz_gaps:
+555:             y_snap_anchor, _, sup_ratio, mean_off, max_off, _, sup_pts, is_good = evaluate_and_snap_oriented_line(
+556:                 gray, y, x_mid, m_perp, x_start, x_end, n_samples=20, max_offset=3
+557:             )
+558:             snapped_horiz_gaps.append({
+559:                 "y_snap": y_snap_anchor,
+560:                 "is_good": is_good,
+561:                 "support_ratio": sup_ratio,
+562:                 "mean_offset": mean_off,
+563:                 "support_pts": sup_pts,
+564:                 "x_start": x_start,
+565:                 "x_end": x_end
+566:             })
+567:             
+568:         # 3. Fit evenly-spaced Pitch Grid
+569:         # Get good snapped anchors
+570:         good_y_snaps = [g["y_snap"] for g in snapped_horiz_gaps if g["is_good"]]
+571:         if len(good_y_snaps) >= 2:
+572: 
+<truncated 2564 bytes>
+23:                 x_e = int(round(a * ye + b))
+624:                 color = (0, 255, 0) if not diag["fallback_used"] else (0, 165, 255)
+625:                 cv2.line(img_support, (x_s, int(ys)), (x_e, int(ye)), color, 2)
+626:                 for pt in diag["support_points"]:
+627:                     cv2.circle(img_support, (int(round(pt[0])), pt[1]), 1, (255, 0, 255), -1)
+628:             draw_polyline(img_snap, boundaries[bkey], (180, 0, 0) if "divider" not in bkey else (255, 255, 0), 2)
+629:             
+630:         # --- DRAW ON IMAGE 2: LINES ---
+631:         for g in snapped_horiz_gaps:
+632:             y_snap_anchor = g["y_snap"]
+633:             y_start_draw = int(round(get_oriented_line_y_at_x(m_perp, x_mid, y_snap_anchor, x_min_roi)))
+634:             y_end_draw = int(round(get_oriented_line_y_at_x(m_perp, x_mid, y_snap_anchor, x_max_roi)))
+635:             cv2.line(img_lines, (x_min_roi, y_start_draw), (x_max_roi, y_end_draw), (0, 255, 255), 2)
+636:         draw_polyline(img_lines, boundaries["left_outer"], (180, 0, 0), 2)
+637:         draw_polyline(img_lines, boundaries["right_outer"], (180, 0, 0), 2)
+638:         if "middle_divider" in boundaries:
+639:             draw_polyline(img_lines, boundaries["middle_divider"], (255, 255, 0), 2)
+640:             
+641:         # --- DRAW ON IMAGE 3: PANELS (Original) ---
+642:         draw_polyline(img_panels, boundaries["left_outer"], (180, 0, 0), 2)
+643:         draw_polyline(img_panels, boundaries["right_outer"], (180, 0, 0), 2)
+644:         if "middle_divider" in boundaries:
+645:             draw_polyline(img_panels, boundaries["middle_divider"], (180, 0, 0), 2)
+646:             
+647:         for row_idx in range(len(raw_horiz_gaps) - 1):
+648:             y_t = raw_horiz_gaps[row_idx][0]
+649:             y_b = raw_horiz_gaps[row_idx + 1][0]
+650:             if n_cols == 1:
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

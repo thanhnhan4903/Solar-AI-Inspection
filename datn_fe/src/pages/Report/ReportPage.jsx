@@ -47,22 +47,34 @@ const LOCATION_MAP = {
     "lower": "Dưới"
 };
 
+const REVIEW_STATUS_LABEL = {
+    "confirmed_defect": { label: "Đúng có lỗi", color: "#ef4444", bg: "rgba(239,68,68,0.1)" },
+    "needs_review":     { label: "Xem xét",     color: "#f59e0b", bg: "rgba(245,158,11,0.1)" },
+    "unreviewed":       { label: "Chưa duyệt",  color: "#94a3b8", bg: "rgba(148,163,184,0.1)" },
+    "false_positive":   { label: "Không phải lỗi", color: "#64748b", bg: "rgba(100,116,139,0.1)" },
+};
+
 export default function ReportPage({ data, batchId }) {
     const [isDownloading, setIsDownloading] = useState(false);
 
     // 1. Lọc tất cả tấm pin
     const allPanels = data?.flatMap(img => img.panels.map(p => ({ ...p, imageFilename: img.filename, rgbImage: img.rgb_image }))) || [];
-    const faultyPanels = allPanels.filter(p => p.status === "faulty" || p.total_panel_loss > 0);
+    // Loại false_positive ra khỏi danh sách lỗi chính
+    const faultyPanels = allPanels.filter(p =>
+        (p.status === "faulty" || p.total_panel_loss > 0) &&
+        p.review_status !== "false_positive" &&
+        p.include_in_report !== false
+    );
     const totalPanels = allPanels.length;
     const totalFaults = faultyPanels.length;
 
-    // Tính tổng công suất hao hụt (W)
+    // Tính tổng công suất hao hụt (W) - chỉ tính panel hợp lệ (không phải false_positive)
     const totalPowerLossW = faultyPanels.reduce((sum, p) => sum + (p.total_panel_loss || 0), 0);
 
     // Tỉ lệ sức khỏe (%)
     const healthRate = totalPanels > 0 ? ((totalPanels - totalFaults) / totalPanels * 100).toFixed(1) : "100.0";
 
-    // 2. Thống kê 5 loại lỗi
+    // 2. Thống kê 5 loại lỗi - chỉ từ panel hợp lệ
     const stats = {
         "hotspot_single_cell": 0,
         "hotspot_multi_cell": 0,
@@ -71,7 +83,7 @@ export default function ReportPage({ data, batchId }) {
         "crack": 0
     };
 
-    allPanels.forEach(p => {
+    faultyPanels.forEach(p => {
         if (p.defects) {
             p.defects.forEach(d => {
                 const cname = d.class_name || d.type || "";
@@ -257,18 +269,38 @@ export default function ReportPage({ data, batchId }) {
                                             </div>
                                         </div>
                                         
-                                        <span style={{ 
-                                            background: `${SEVERITY_COLORS[p.worst_severity] || "#94a3b8"}15`,
-                                            border: `1px solid ${SEVERITY_COLORS[p.worst_severity] || "#94a3b8"}30`,
-                                            color: SEVERITY_COLORS[p.worst_severity] || "#94a3b8",
-                                            padding: "4px 12px",
-                                            borderRadius: 20,
-                                            fontSize: 12,
-                                            fontWeight: 700,
-                                            textTransform: "uppercase"
-                                        }}>
-                                            {SEVERITY_MAP[p.worst_severity] || "Không rõ"}
-                                        </span>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                            <span style={{ 
+                                                background: `${SEVERITY_COLORS[p.worst_severity] || "#94a3b8"}15`,
+                                                border: `1px solid ${SEVERITY_COLORS[p.worst_severity] || "#94a3b8"}30`,
+                                                color: SEVERITY_COLORS[p.worst_severity] || "#94a3b8",
+                                                padding: "4px 12px",
+                                                borderRadius: 20,
+                                                fontSize: 12,
+                                                fontWeight: 700,
+                                                textTransform: "uppercase"
+                                            }}>
+                                                {SEVERITY_MAP[p.worst_severity] || "Không rõ"}
+                                            </span>
+                                            {/* Review status badge */}
+                                            {(() => {
+                                                const rs = p.review_status || "unreviewed";
+                                                const rsInfo = REVIEW_STATUS_LABEL[rs] || REVIEW_STATUS_LABEL["unreviewed"];
+                                                return (
+                                                    <span style={{
+                                                        background: rsInfo.bg,
+                                                        border: `1px solid ${rsInfo.color}40`,
+                                                        color: rsInfo.color,
+                                                        padding: "4px 10px",
+                                                        borderRadius: 20,
+                                                        fontSize: 11,
+                                                        fontWeight: 700,
+                                                    }}>
+                                                        {rsInfo.label}
+                                                    </span>
+                                                );
+                                            })()}
+                                        </div>
                                     </div>
 
                                     {/* Nội dung chi tiết */}
