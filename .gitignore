@@ -1,5 +1,3 @@
-update_github.bat
-
 # Environment
 .env
 .env.*
@@ -27,6 +25,9 @@ dist/
 
 # Temporary / research files
 datn_be/scratch/
+debug_pipeline.py
+scratch_test.py
+scratch_to_app_engine_migration_report.md
 
 # Data
 data/
