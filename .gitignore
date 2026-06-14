@@ -1,1 +1,30 @@
 update_github.bat
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+
+# Scratch / temporary files
+datn_be/scratch/
+
+# AI generated helper files
+bundle_project_for_gemini.py
+project_context_for_gemini.md
+
+# Test images
+data/precalib/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
