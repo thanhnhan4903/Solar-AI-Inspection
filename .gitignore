@@ -27,7 +27,10 @@ dist/
 
 # Temporary / research files
 datn_be/scratch/
-data/precalib/
+
+# Data
+data/
+datn_be/data/
 
 # AI helper files
 bundle_project_for_gemini.py
