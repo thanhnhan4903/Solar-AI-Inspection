@@ -15,6 +15,9 @@ TIMES_REGULAR = os.path.join(FONT_DIR, "times.ttf")
 TIMES_BOLD    = os.path.join(FONT_DIR, "timesbd.ttf")
 TIMES_ITALIC  = os.path.join(FONT_DIR, "timesi.ttf")
 
+# Company logo path (absolute) - replace placeholder images
+LOGO_PATH = r"D:/DATN/abc/logo cty.png"
+
 _USE_TIMES = os.path.exists(TIMES_REGULAR) and os.path.exists(TIMES_BOLD)
 
 
@@ -45,7 +48,7 @@ class CustomPDF(FPDF):
 
     def header(self):
         if self.page_no() > 1:
-            logo_path = "data/epc_solar.png"
+            logo_path = LOGO_PATH
             if os.path.exists(logo_path):
                 # Căn lề phải: logo kết thúc ở x=190
                 self.image(logo_path, x=155, y=8, w=35)
@@ -105,7 +108,7 @@ class ReportGenerator:
         # ─────────────────────────────────────────
         pdf.add_page()
 
-        logo_path = "data/epc_solar.png"
+        logo_path = LOGO_PATH
         if os.path.exists(logo_path):
             # Căn giữa logo trên trang bìa (printable width là 155mm, tâm là 112.5)
             pdf.image(logo_path, x=92.5, y=30, w=40)
@@ -519,12 +522,17 @@ class ReportGenerator:
                     h=30
                 )
                 
-                # Bổ sung nhãn ảnh
+                # Frame image label boxes with light gray border
+                pdf.set_draw_color(225, 228, 232)
+                pdf.set_line_width(0.15)
+                # Thermal image label frame
+                pdf.rect(35, image_y + 30.5, 73, 5, style='D')
                 pdf.set_xy(35, image_y + 30.5)
                 pdf._f("I", 8)
-                pdf.set_text_color(100, 116, 139)
+                pdf.set_text_color(0, 0, 0)
                 pdf.cell(73, 4, "Ảnh nhiệt (Có nhãn)", align="C")
-                
+                # RGB image label frame
+                pdf.rect(116, image_y + 30.5, 73, 5, style='D')
                 pdf.set_xy(116, image_y + 30.5)
                 pdf.cell(73, 4, "Ảnh quang học (RGB)", align="C", new_x="LMARGIN", new_y="NEXT")
                 
@@ -564,20 +572,17 @@ class ReportGenerator:
                 y0 = pdf.get_y()
                 x = x0
 
+                # Ensure light gray border and thin line width for each cell
+                pdf.set_draw_color(225, 228, 232)
+                pdf.set_line_width(0.15)
+                # Use bold font for cell text
+                pdf._f("B", 10)
+                # Set text color for table rows (same as label text)
+                pdf.set_text_color(0, 0, 0)
                 for txt, w in zip(cols, widths):
-
                     pdf.rect(x, y0, w, row_h)
-
                     pdf.set_xy(x + 1, y0 + 1)
-
-                    pdf.multi_cell(
-                        w - 2,
-                        line_h,
-                        str(txt),
-                        border=0,
-                        align="C"
-                    )
-
+                    pdf.multi_cell(w - 2, line_h, str(txt), border=0, align="C")
                     x += w
                     pdf.set_xy(x, y0)
 
@@ -601,14 +606,16 @@ class ReportGenerator:
                 rec = "Cần thay thế"
             pdf._f("B", 11)
 
-            pdf.set_draw_color(0, 0, 0)
-            pdf.set_line_width(0.6)
-
+            # Use light gray border and thinner line for table headers
+            pdf.set_draw_color(225, 228, 232)
+            pdf.set_line_width(0.15)
+            # Column width definitions for defect detail table
             COL1 = 40
             COL2 = 35
             COL3 = 25
             COL4 = 55
-
+            # Set text color to match label frames (soft gray-blue)
+            pdf.set_text_color(100, 116, 139)
             pdf.cell(COL1, 10, "Lỗi phát hiện", 1, 0, "C")
             pdf.cell(COL2, 10, "Mức độ & độ tin cậy", 1, 0, "C")
             pdf.cell(COL3, 10, "Hao hụt", 1, 0, "C")
