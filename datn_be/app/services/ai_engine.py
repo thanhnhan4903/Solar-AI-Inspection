@@ -19,7 +19,7 @@ from app.services.panel_processor import process_yolo_predictions
 # Panel cần độ chắc chắn cao hơn vì là nền tảng định vị.
 # Defect dùng threshold thấp hơn để không bỏ sót lỗi nhỏ.
 PANEL_CONF_THRESHOLD = 0.85
-DEFECT_CONF_THRESHOLD = 0.25
+DEFECT_CONF_THRESHOLD = 0.20
 
 # Class ID của 'panel' trong dataset
 PANEL_CLASS_NAME = "panel"
