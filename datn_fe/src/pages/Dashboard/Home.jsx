@@ -18,6 +18,7 @@ import {
     Zap,
     RefreshCw,
     Settings,
+    Image,
 } from "lucide-react";
 import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
@@ -1301,6 +1302,12 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     marginBottom: 24,
                 }}
             >
+                <KpiCard
+                    icon={<Image size={20} />}
+                    label="SỐ HÌNH ĐƯỢC QUÉT"
+                    value={data?.length || 0}
+                    accent={colors.purple}
+                />
                 <KpiCard
                     icon={<LayoutGrid size={20} />}
                     label="TỔNG SỐ TẤM PIN"

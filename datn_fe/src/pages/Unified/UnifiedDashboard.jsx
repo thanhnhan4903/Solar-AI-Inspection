@@ -9,7 +9,7 @@ import {
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
-    Battery, Wifi, Compass, Navigation, Activity, Search, Thermometer, Map as MapIcon, X, Maximize2, ShieldAlert
+    Battery, Wifi, Compass, Navigation, Activity, Search, Thermometer, Map as MapIcon, X, Maximize2, ShieldAlert, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import DefectReviewModal from '../../components/DefectReviewModal';
 
@@ -112,6 +112,7 @@ const polygonFromBBox = (bbox) => {
 };
 
 export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, batchId, onRefresh }) {
+    const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isReviewOpen, setIsReviewOpen] = useState(false);
     const PANEL_RATED_POWER_W = 400; // Công suất định mức tấm pin 400W
     const translateDefect = (cls) => {
@@ -732,7 +733,40 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
 
             {/* Left Sidebar */}
             {viewMode === 'monitor' && (
-                <div className="unified-overlay sidebar-left glass-panel" style={{ zIndex: 1000 }}>
+                <div 
+                    className="unified-overlay sidebar-left glass-panel" 
+                    style={{ 
+                        zIndex: 1000,
+                        transform: isSidebarOpen ? 'translateX(0)' : 'translateX(calc(-100% - 24px))',
+                        transition: 'transform 0.4s cubic-bezier(0.16, 1, 0.3, 1)'
+                    }}
+                >
+                    {/* Toggle Button */}
+                    <button 
+                        onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                        style={{
+                            position: 'absolute',
+                            right: -32,
+                            top: 24,
+                            width: 32,
+                            height: 48,
+                            background: 'rgba(10, 15, 25, 0.95)',
+                            border: '1px solid rgba(255, 255, 255, 0.12)',
+                            borderLeft: 'none',
+                            borderRadius: '0 8px 8px 0',
+                            color: '#38bdf8',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            zIndex: 1001,
+                            backdropFilter: 'blur(16px)',
+                            boxShadow: '12px 0 24px rgba(0, 0, 0, 0.4)'
+                        }}
+                    >
+                        {isSidebarOpen ? <ChevronLeft size={20} /> : <ChevronRight size={20} />}
+                    </button>
+
                     <h2 className="text-xl font-bold mb-6 flex items-center gap-2 text-white">
                         <MapIcon className="text-sky-400" size={24} />
                         Bản đồ toàn cảnh

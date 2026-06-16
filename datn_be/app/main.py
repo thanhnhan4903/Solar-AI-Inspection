@@ -987,6 +987,96 @@ async def update_ai_model(file: UploadFile = File(...)):
 
 
 # ================================
+# --- KHỐI 7: LẤY ẢNH CẮT THEO TỌA ĐỘ (PANEL IMAGE) ---
+# ================================
+@app.get("/api/v1/panel-image")
+def get_panel_image(
+    filename: str,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    polygon: str = None
+):
+    import cv2
+    import os
+    from fastapi.responses import Response
+
+    path_thermal = os.path.join("data/results", filename)
+    path_raw = os.path.join("data/raw", filename)
+    
+    img_path = None
+    is_rgb = False
+    
+    if os.path.exists(path_thermal):
+        img_path = path_thermal
+    elif os.path.exists(path_raw):
+        img_path = path_raw
+        is_rgb = True
+    else:
+        return Response(status_code=404)
+        
+    img = cv2.imread(img_path)
+    if img is None:
+        return Response(status_code=404)
+        
+    h_img, w_img = img.shape[:2]
+    
+    w_t, h_t = 640, 512
+    
+    scale_x = w_img / w_t if is_rgb else 1.0
+    scale_y = h_img / h_t if is_rgb else 1.0
+    
+    crop_w_t = int(w_t * 0.5)
+    crop_h_t = int(h_t * 0.5)
+    
+    cx_t = (x1 + x2) / 2
+    cy_t = (y1 + y2) / 2
+    
+    if is_rgb:
+        cx_r = int(cx_t * scale_x)
+        cy_r = int(cy_t * scale_y)
+        crop_w_r = int(crop_w_t * scale_x)
+        crop_h_r = int(crop_h_t * scale_y)
+        
+        x1_crop = max(0, cx_r - crop_w_r // 2)
+        y1_crop = max(0, cy_r - crop_h_r // 2)
+        x2_crop = min(w_img, cx_r + crop_w_r // 2)
+        y2_crop = min(h_img, cy_r + crop_h_r // 2)
+        
+        crop_img = img[y1_crop:y2_crop, x1_crop:x2_crop]
+        
+        if crop_img is not None and crop_img.size > 0:
+            x1_r = int(x1 * scale_x)
+            y1_r = int(y1 * scale_y)
+            x2_r = int(x2 * scale_x)
+            y2_r = int(y2 * scale_y)
+            
+            box_x1 = x1_r - x1_crop
+            box_y1 = y1_r - y1_crop
+            box_x2 = x2_r - x1_crop
+            box_y2 = y2_r - y1_crop
+            
+            cv2.rectangle(crop_img, (box_x1, box_y1), (box_x2, box_y2), (0, 255, 0), 2)
+    else:
+        x1_crop = max(0, int(cx_t - crop_w_t // 2))
+        y1_crop = max(0, int(cy_t - crop_h_t // 2))
+        x2_crop = min(w_img, int(cx_t + crop_w_t // 2))
+        y2_crop = min(h_img, int(cy_t + crop_h_t // 2))
+        
+        crop_img = img[y1_crop:y2_crop, x1_crop:x2_crop]
+        
+    if crop_img is None or crop_img.size == 0:
+        return Response(status_code=404)
+        
+    ret, buf = cv2.imencode('.jpg', crop_img)
+    if not ret:
+        return Response(status_code=500)
+        
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+
+# ================================
 # --- KHỐI 8: GIS MOCK DATA ---
 # ================================
 @app.get("/api/v1/mock-gis")
