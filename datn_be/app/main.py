@@ -983,66 +983,7 @@ async def update_ai_model(file: UploadFile = File(...)):
         return {"error": f"Lỗi khi load model: {str(e)}"}
 
 
-# ================================
-# --- KHỐI 7: LẤY ẢNH TỪNG TẤM PIN ---
-# ================================
-@app.get("/api/v1/panel-image")
-async def get_panel_image(filename: str, x1: float, y1: float, x2: float, y2: float, polygon: str = None):
-    # Dùng ảnh precalib — cùng loại với ảnh dùng cho AI inference
-    img_path = os.path.join("data/precalib", filename)
-    if not os.path.exists(img_path):
-        img_path = os.path.join("data/raw", filename)
-        if not os.path.exists(img_path):
-            return {"error": "Image not found"}
-        
-    img = cv2.imread(img_path)
-    if img is None:
-        return {"error": "Could not read image"}
-        
-    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-    h, w = img.shape[:2]
-    
-    crop_w = int(w * 0.5)
-    crop_h = int(h * 0.5)
-    cx = (x1 + x2) // 2
-    cy = (y1 + y2) // 2
-    
-    cx1 = max(0, cx - crop_w // 2)
-    cy1 = max(0, cy - crop_h // 2)
-    cx2 = min(w, cx + crop_w // 2)
-    cy2 = min(h, cy + crop_h // 2)
-    
-    if cx2 - cx1 < crop_w:
-        if cx1 == 0: cx2 = min(w, cx1 + crop_w)
-        if cx2 == w: cx1 = max(0, cx2 - crop_w)
-    if cy2 - cy1 < crop_h:
-        if cy1 == 0: cy2 = min(h, cy1 + crop_h)
-        if cy2 == h: cy1 = max(0, cy2 - crop_h)
-        
-    cropped_img = img[cy1:cy2, cx1:cx2].copy()
-    
-    box_x1 = max(0, x1 - cx1)
-    box_y1 = max(0, y1 - cy1)
-    box_x2 = min(cx2 - cx1, x2 - cx1)
-    box_y2 = min(cy2 - cy1, y2 - cy1)
-    
-    if polygon:
-        try:
-            pts = [float(v) for v in polygon.split(",")]
-            poly_pts = np.array(pts, dtype=np.float32).reshape((-1, 2))
-            epsilon = 0.02 * cv2.arcLength(poly_pts, True)
-            approx = cv2.approxPolyDP(poly_pts, epsilon, True)
-            approx = approx.reshape(-1, 2)
-            approx[:, 0] -= cx1
-            approx[:, 1] -= cy1
-            cv2.polylines(cropped_img, [np.int32(approx)], isClosed=True, color=(0, 255, 0), thickness=2)
-        except Exception:
-            cv2.rectangle(cropped_img, (box_x1, box_y1), (box_x2, box_y2), (0, 255, 0), 2)
-    else:
-        cv2.rectangle(cropped_img, (box_x1, box_y1), (box_x2, box_y2), (0, 255, 0), 2)
-    
-    _, buffer = cv2.imencode('.jpg', cropped_img)
-    return Response(content=buffer.tobytes(), media_type="image/jpeg")
+
 
 
 # ================================

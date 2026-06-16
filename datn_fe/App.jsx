@@ -6,8 +6,6 @@ import { colors } from "./src/constants/theme";
 // Pages
 import Login from "./src/pages/Login";
 import Home from "./src/pages/Dashboard/Home";
-import PanelPage from "./src/pages/Panel/PanelPage";
-import PanelDetail from "./src/pages/Panel/PanelDetail";
 import UnifiedDashboard from "./src/pages/Unified/UnifiedDashboard";
 import ReportPage from "./src/pages/Report/ReportPage";
 // import UploadBatchPage from "./src/pages/Upload/UploadBatchPage";
@@ -94,28 +92,6 @@ export default function App() {
                     />
                 )}
 
-                {page === "panel" && (
-                    <PanelPage 
-                        data={aiResults} 
-                        onSelect={(p) => { setSelectedPanel(p); navigate("detail"); }} 
-                        onNavigate={navigate} 
-                    />
-                )}
-
-                {page === "detail" && (
-                    <PanelDetail 
-                        panel={selectedPanel} 
-                        data={aiResults}
-                        panelPower={currentPanelPower}
-                        onSelect={(p) => setSelectedPanel(p)}
-                        onBack={() => navigate("panel")} 
-                        onViewOnMap={(img) => {
-                            setMapFocusTarget(img.filename);
-                            setPage("ops");
-                            setActivePage("ops");
-                        }}
-                    />
-                )}
 
                 {page === "report" && <ReportPage data={aiResults} batchId={currentBatchId} />}
 

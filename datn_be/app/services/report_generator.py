@@ -1,9 +1,13 @@
 # app/services/report_generator.py
 import os
-import cv2
+
 import json
 import re
 import datetime
+import tempfile
+import shutil
+import cv2
+import numpy as np
 from fpdf import FPDF
 from app.services.registration import RegistrationService
 
@@ -15,8 +19,8 @@ TIMES_REGULAR = os.path.join(FONT_DIR, "times.ttf")
 TIMES_BOLD    = os.path.join(FONT_DIR, "timesbd.ttf")
 TIMES_ITALIC  = os.path.join(FONT_DIR, "timesi.ttf")
 
-# Company logo path (absolute) - replace placeholder images
-LOGO_PATH = r"D:/DATN/abc/logo cty.png"
+LOGO_PATH = "D:/DATN/abc/datn_fe/src/assets/epc_solar_logo.png"
+
 
 _USE_TIMES = os.path.exists(TIMES_REGULAR) and os.path.exists(TIMES_BOLD)
 
@@ -47,19 +51,23 @@ class CustomPDF(FPDF):
         self.set_font(self._font_name, style=style, size=size)
 
     def header(self):
+        # Render header on all pages except cover
         if self.page_no() > 1:
-            logo_path = LOGO_PATH
-            if os.path.exists(logo_path):
-                # Căn lề phải: logo kết thúc ở x=190
-                self.image(logo_path, x=155, y=8, w=35)
-            self.set_y(12)
-            self._f("I", 9)
+            # Add italic text on the left
+            self.set_y(15)
+            self._f("I", 10)
             self.set_text_color(148, 163, 184)
-            self.cell(0, 5, "SOLAR AI PV INSPECTION REPORT", new_x="LMARGIN", new_y="NEXT", align="L")
-            self.set_draw_color(226, 232, 240)
-            # Dòng kẻ ngang từ lề trái (35) sang lề phải (190)
-            self.line(35, 19, 190, 19)
+            self.cell(0, 10, "SOLAR AI PV INSPECTION REPORT", align="L")
+            
+            # Add EPC Solar logo aligned to the right margin
+            if os.path.exists(LOGO_PATH):
+                self.image(LOGO_PATH, x=160, y=10, w=30)
+            
+            # Draw a subtle separator line below header
             self.set_y(25)
+            self.set_draw_color(226, 232, 240)
+            self.line(35, 23, 190, 23)
+            self.set_y(30)
 
     def footer(self):
         if self.page_no() > 1:
@@ -108,13 +116,11 @@ class ReportGenerator:
         # ─────────────────────────────────────────
         pdf.add_page()
 
-        logo_path = LOGO_PATH
-        if os.path.exists(logo_path):
-            # Căn giữa logo trên trang bìa (printable width là 155mm, tâm là 112.5)
-            pdf.image(logo_path, x=92.5, y=30, w=40)
-            pdf.ln(50)
-        else:
-            pdf.ln(30)
+        # Thêm logo ở vị trí trung tâm phía trên trang bìa
+        if os.path.exists(LOGO_PATH):
+            pdf.image(LOGO_PATH, x=77.5, y=30, w=55)
+        pdf.set_y(75)
+
 
         pdf._f("B", 22)
         pdf.set_text_color(15, 23, 42)
@@ -380,8 +386,8 @@ class ReportGenerator:
         pdf.write(7.5, "Danh sách chi tiết dưới đây mô tả vị trí, tọa độ GPS, mức độ hao hụt công suất và hình ảnh nhiệt/RGB tương ứng của từng tấm pin mặt trời được xác định là có bất thường hoặc bị lỗi trong quá trình quét bằng thiết bị bay không người lái.")
         pdf.ln(12)
 
-        temp_dir = "data/temp_crop"
-        os.makedirs(temp_dir, exist_ok=True)
+        # Thư mục tạm lưu ảnh đã cắt để chèn vào PDF
+        temp_dir = tempfile.mkdtemp()
 
         VI_DEFECT_MAP = {
             "hotspot_single_cell": "Hotspot single cell",
@@ -688,13 +694,11 @@ class ReportGenerator:
 
             pdf.ln(5)
 
-        # Xóa file tạm
         try:
-            for f in os.listdir(temp_dir):
-                os.remove(os.path.join(temp_dir, f))
-            os.rmdir(temp_dir)
+            shutil.rmtree(temp_dir)
         except Exception:
             pass
+
 
         pdf.output(output_path)
         return output_path

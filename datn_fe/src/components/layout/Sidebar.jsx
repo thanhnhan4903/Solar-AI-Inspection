@@ -5,7 +5,6 @@ import epcLogo from "../../assets/epc_solar_logo.png";
 
 const NAV = [
     { key: "home", icon: BarChart3, label: "Bảng điều khiển" },
-    { key: "panel", icon: Grid3X3, label: "Hình ảnh" },
     { key: "ops", icon: Map, label: "Bản đồ phân tích" },
     { key: "report", icon: BarChart3, label: "Báo cáo" },
 ];
