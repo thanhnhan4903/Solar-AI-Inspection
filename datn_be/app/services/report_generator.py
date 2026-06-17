@@ -1,6 +1,5 @@
 # app/services/report_generator.py
 import os
-
 import json
 import re
 import datetime
@@ -8,30 +7,146 @@ import tempfile
 import shutil
 import cv2
 import numpy as np
+import logging
 from fpdf import FPDF
 from app.services.registration import RegistrationService
+
+logger = logging.getLogger("solar_ai")
+
 
 # ─────────────────────────────────────────
 # Font paths — Times New Roman trên Windows (luôn có mặt)
 # ─────────────────────────────────────────
-FONT_DIR = "C:/Windows/Fonts"
-TIMES_REGULAR = os.path.join(FONT_DIR, "times.ttf")
-TIMES_BOLD    = os.path.join(FONT_DIR, "timesbd.ttf")
-TIMES_ITALIC  = os.path.join(FONT_DIR, "timesi.ttf")
+def find_font(font_name):
+    paths = [
+        os.path.join("C:/Windows/Fonts", font_name),
+        os.path.join("C:/windows/fonts", font_name),
+        os.path.join("c:/windows/fonts", font_name.lower()),
+        os.path.join("C:/Windows/Fonts", font_name.lower()),
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
 
-LOGO_PATH = "D:/DATN/abc/datn_fe/src/assets/epc_solar_logo.png"
-
+TIMES_REGULAR = find_font("times.ttf") or "C:/Windows/Fonts/times.ttf"
+TIMES_BOLD    = find_font("timesbd.ttf") or "C:/Windows/Fonts/timesbd.ttf"
+TIMES_ITALIC  = find_font("timesi.ttf") or "C:/Windows/Fonts/timesi.ttf"
 
 _USE_TIMES = os.path.exists(TIMES_REGULAR) and os.path.exists(TIMES_BOLD)
 
+# ─────────────────────────────────────────
+# Tìm kiếm logo và ảnh bản đồ toàn cảnh
+# ─────────────────────────────────────────
+def find_asset(filename):
+    possible_paths = [
+        os.path.join("c:/Solar_Inspection_Project/datn_fe/src/assets", filename),
+        os.path.join("../datn_fe/src/assets", filename),
+        os.path.join("datn_fe/src/assets", filename),
+        os.path.join("app/assets", filename),
+        filename
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+LOGO_PATH = find_asset("epc_solar_logo.png") or "datn_fe/src/assets/epc_solar_logo.png"
+AERIAL_PATH = find_asset("solar_farm_aerial.png") or "datn_fe/src/assets/solar_farm_aerial.png"
+
+# ─────────────────────────────────────────
+# Các bản dịch tiếng Việt
+# ─────────────────────────────────────────
+VI_DEFECT_MAP = {
+    "hotspot_single_cell": "Điểm nóng đơn bào (hotspot_single_cell)",
+    "hotspot_multi_cell":  "Điểm nóng đa bào (hotspot_multi_cell)",
+    "shading":             "Bóng che (shading)",
+    "soiling":             "Bám bẩn (soiling)",
+    "crack":               "Vết nứt (crack)",
+}
+
+VI_SEVERITY_MAP = {
+    "very_minor": "Rất nhẹ",
+    "minor":      "Nhẹ",
+    "moderate":   "Cần theo dõi",
+    "severe":     "Ưu tiên bảo trì",
+    "replace":    "Cần thay thế"
+}
+
+VI_LOC_MAP = {
+    "top-left": "Góc trên bên trái",
+    "top-center": "Phía trên trung tâm",
+    "top-middle": "Phía trên trung tâm",
+    "top": "Phía trên trung tâm",
+    "top-right": "Góc trên bên phải",
+    "middle-left": "Giữa bên trái",
+    "left": "Giữa bên trái",
+    "middle-center": "Chính giữa",
+    "center": "Chính giữa",
+    "middle": "Chính giữa",
+    "middle-right": "Giữa bên phải",
+    "right": "Giữa bên phải",
+    "bottom-left": "Góc dưới bên trái",
+    "bottom-center": "Phía dưới trung tâm",
+    "bottom-middle": "Phía dưới trung tâm",
+    "bottom": "Phía dưới trung tâm",
+    "bottom-right": "Góc dưới bên phải",
+}
+
+def translate_location(loc_str):
+    if not loc_str:
+        return "Chính giữa"
+    loc_str = str(loc_str).lower().strip()
+    return VI_LOC_MAP.get(loc_str, loc_str.capitalize())
+
+def translate_rec(rec_str):
+    if not rec_str:
+        return "Kiểm tra"
+    rec_str = str(rec_str).lower().strip()
+    rec_map = {
+        "check": "Kiểm tra",
+        "replace": "Cần thay thế",
+        "monitor": "Theo dõi",
+        "none": "Không cần xử lý",
+    }
+    return rec_map.get(rec_str, rec_str.capitalize())
+
+def clean_val(val, default="Chưa cập nhật"):
+    if val is None:
+        return default
+    val_str = str(val).strip()
+    if not val_str or val_str.lower() in ["none", "null", "undefined", "+không có ghi chú", "không có ghi chú"]:
+        return default
+    return val_str
 
 def safe(text):
-    """Đảm bảo text là string, không cần strip dấu nữa vì font hỗ trợ Unicode."""
     if text is None:
         return ""
     if not isinstance(text, str):
         text = str(text)
     return text
+
+def get_wrapped_lines(pdf, text, max_width):
+    if not text:
+        return []
+    paragraphs = text.split("\n")
+    all_lines = []
+    for para in paragraphs:
+        words = para.split(" ")
+        current_line = ""
+        for word in words:
+            if not word:
+                continue
+            test_line = current_line + " " + word if current_line else word
+            if pdf.get_string_width(test_line) <= max_width:
+                current_line = test_line
+            else:
+                if current_line:
+                    all_lines.append(current_line)
+                current_line = word
+        if current_line:
+            all_lines.append(current_line)
+    return all_lines
 
 
 class CustomPDF(FPDF):
@@ -51,19 +166,15 @@ class CustomPDF(FPDF):
         self.set_font(self._font_name, style=style, size=size)
 
     def header(self):
-        # Render header on all pages except cover
         if self.page_no() > 1:
-            # Add italic text on the left
             self.set_y(15)
             self._f("I", 10)
             self.set_text_color(148, 163, 184)
-            self.cell(0, 10, "SOLAR AI PV INSPECTION REPORT", align="L")
+            self.cell(0, 10, "BÁO CÁO KIỂM TRA ĐIỆN MẶT TRỜI BẰNG AI", align="L")
             
-            # Add EPC Solar logo aligned to the right margin
-            if os.path.exists(LOGO_PATH):
+            if LOGO_PATH and os.path.exists(LOGO_PATH):
                 self.image(LOGO_PATH, x=160, y=10, w=30)
             
-            # Draw a subtle separator line below header
             self.set_y(25)
             self.set_draw_color(226, 232, 240)
             self.line(35, 23, 190, 23)
@@ -74,20 +185,526 @@ class CustomPDF(FPDF):
             self.set_y(-15)
             self._f("I", 9)
             self.set_text_color(148, 163, 184)
-            # Đánh số trang ở chân trang
-            self.cell(0, 10, f"Page {self.page_no()}", align="C")
+            self.cell(0, 10, f"Trang {self.page_no()}", align="C")
 
 
 class ReportGenerator:
     @staticmethod
+    def _build_pdf_content(pdf, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, toc_page_numbers=None):
+        """
+        Dựng layout báo cáo PDF. Hàm này sẽ được chạy 2 lần (Two-pass):
+        - Lần 1: Không có toc_page_numbers (để đo vị trí trang thực tế của các phần).
+        - Lần 2: Có toc_page_numbers để vẽ trang mục lục với số trang chính xác.
+        """
+        # Cấu hình lề
+        pdf.set_margins(left=35, top=25, right=20)
+        pdf.set_auto_page_break(auto=True, margin=25)
+        
+        # ─────────────────────────────────────────
+        # TRANG BÌA (Page 1)
+        # ─────────────────────────────────────────
+        pdf.add_page()
+        if LOGO_PATH and os.path.exists(LOGO_PATH):
+            pdf.image(LOGO_PATH, x=77.5, y=30, w=55)
+        pdf.set_y(75)
+
+        pdf._f("B", 22)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 12, "BÁO CÁO KIỂM TRA ĐIỆN MẶT TRỜI", new_x="LMARGIN", new_y="NEXT", align="C")
+
+        pdf._f("B", 12)
+        pdf.set_text_color(14, 165, 233)
+        pdf.cell(0, 8, "PHÂN TÍCH ẢNH NHIỆT UAV BẰNG AI", new_x="LMARGIN", new_y="NEXT", align="C")
+        pdf.ln(10)
+        
+        # Grid thông tin dự án
+        pdf.set_xy(35, 100)
+        pdf.set_draw_color(226, 232, 240)
+        pdf.set_line_width(0.15)
+        
+        for label, val in metadata_fields:
+            cleaned_val = clean_val(val)
+            val_lines = get_wrapped_lines(pdf, cleaned_val, 101)
+            row_h = max(1, len(val_lines)) * 7.5
+            
+            y0 = pdf.get_y()
+            # Cột nhãn (Label)
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.rect(35, y0, 50, row_h, "D")
+            pdf.set_xy(35 + 2, y0 + (row_h - 7.5) / 2)
+            pdf.cell(46, 7.5, safe(label), border=0)
+            
+            # Cột giá trị (Value)
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.rect(85, y0, 105, row_h, "D")
+            
+            for i, line in enumerate(val_lines):
+                pdf.set_xy(85 + 2, y0 + i * 7.5)
+                pdf.cell(101, 7.5, safe(line), border=0)
+                
+            pdf.set_xy(35, y0 + row_h)
+            
+        pdf.set_xy(0, 260)
+        pdf._f("I", 10)
+        pdf.set_text_color(148, 163, 184)
+        pdf.cell(0, 10, "Bảo mật - EPC Solar JSC", align="C", new_x="LMARGIN", new_y="NEXT")
+
+        # ─────────────────────────────────────────
+        # TRANG 2: MỤC LỤC
+        # ─────────────────────────────────────────
+        pdf.add_page()
+        pdf.set_xy(35, 25)
+        pdf._f("B", 16)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, "MỤC LỤC", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(5)
+        
+        pdf.set_x(35 + 12.7)
+        pdf._f("", 14)
+        pdf.set_text_color(51, 65, 85)
+        pdf.write(7.5, "Mục lục dưới đây tóm tắt cấu trúc chính của báo cáo kết quả kiểm tra nhiệt tấm pin mặt trời để phục vụ công tác tra cứu nhanh.")
+        pdf.ln(15)
+        
+        sec_1_p = toc_page_numbers.get('sec_1', "") if toc_page_numbers else ""
+        sec_2_p = toc_page_numbers.get('sec_2', "") if toc_page_numbers else ""
+        sec_3_p = toc_page_numbers.get('sec_3', "") if toc_page_numbers else ""
+        sec_4_p = toc_page_numbers.get('sec_4', "") if toc_page_numbers else ""
+        
+        toc_items = [
+            ("1. Tóm tắt báo cáo", sec_1_p),
+            ("2. Tổng quan kết quả phân tích", sec_2_p),
+            ("3. Bản đồ tổng thể và phân bố lỗi", sec_3_p),
+            ("4. Danh sách chi tiết các tấm pin lỗi", sec_4_p),
+        ]
+        
+        for title, page_num in toc_items:
+            pdf.set_x(35)
+            pdf._f("", 14)
+            pdf.set_text_color(51, 65, 85)
+            pdf.cell(115, 7.5, title)
+            
+            pdf._f("", 14)
+            pdf.set_text_color(148, 163, 184)
+            pdf.cell(30, 7.5, " . . . . . . . . . . . . . . . . . . . .", align="R")
+            
+            pdf._f("B", 14)
+            pdf.set_text_color(15, 23, 42)
+            page_str = str(page_num) if page_num else ""
+            pdf.cell(10, 7.5, page_str, align="R", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(2)
+
+        # ─────────────────────────────────────────
+        # TRANG 3: TÓM TẮT & TỔNG QUAN KẾT QUẢ PHÂN TÍCH
+        # ─────────────────────────────────────────
+        pdf.add_page()
+        sec_1_page = pdf.page_no()
+        sec_2_page = pdf.page_no()
+        
+        pdf.set_xy(35, 25)
+        pdf._f("B", 16)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, "1. Tóm tắt báo cáo", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        
+        pdf.set_x(35 + 12.7)
+        pdf._f("", 14)
+        pdf.set_text_color(51, 65, 85)
+        pdf.write(7.5, "Báo cáo này trình bày kết quả phân tích tự động hệ thống điện mặt trời bằng công nghệ AI. Dưới đây là các chỉ số thống kê tổng hợp về số lượng tấm pin, tỷ lệ lỗi và mức độ suy hao công suất phát hiện trong đợt kiểm tra.")
+        pdf.ln(15)
+        
+        pdf._f("B", 16)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, "2. Tổng quan kết quả phân tích", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(5)
+        
+        # Tính toán thống kê
+        total_panels = len(data_list)
+        total_faulty = len(faulty_panels)
+        healthy_count = total_panels - total_faulty
+        health_rate = round(healthy_count / total_panels * 100, 1) if total_panels > 0 else 100.0
+        fault_rate = round(total_faulty / total_panels * 100, 1) if total_panels > 0 else 0.0
+        
+        total_power_loss_w = 0.0
+        stats_defects = {
+            "hotspot_single_cell": 0,
+            "hotspot_multi_cell": 0,
+            "shading": 0,
+            "crack": 0
+        }
+        
+        for p, p_detail in faulty_panels:
+            total_power_loss_w += p_detail.get("total_panel_loss", 0.0)
+            for d in p_detail.get("defects", []):
+                cname = d.get("class_name", "")
+                cname_lower = cname.lower() if isinstance(cname, str) else str(cname).lower()
+                if "hotspot_single" in cname_lower or "single_cell" in cname_lower or "single-cell" in cname_lower:
+                    stats_defects["hotspot_single_cell"] += 1
+                elif "hotspot_multi" in cname_lower or "multi_cell" in cname_lower or "multicell" in cname_lower or "multi-cell" in cname_lower:
+                    stats_defects["hotspot_multi_cell"] += 1
+                elif "crack" in cname_lower or "nut" in cname_lower:
+                    stats_defects["crack"] += 1
+                elif any(k in cname_lower for k in ["shading", "shadow", "shade", "soil", "soiling", "dirt"]):
+                    stats_defects["shading"] += 1
+                    
+        # Vẽ các card thống kê
+        pdf.set_fill_color(248, 250, 252)
+        pdf.rect(35, 75, 73, 40, "F")
+        pdf.set_xy(40, 79)
+        pdf._f("B", 10)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(63, 5, "TỔNG SỐ TẤM PIN ĐÃ QUÉT", new_x="LMARGIN", new_y="NEXT")
+        pdf._f("B", 20)
+        pdf.set_text_color(14, 165, 233)
+        pdf.set_x(40)
+        pdf.cell(63, 12, str(total_panels), new_x="LMARGIN", new_y="NEXT")
+        pdf._f("", 10)
+        pdf.set_text_color(71, 85, 105)
+        pdf.set_x(40)
+        pdf.cell(63, 5, f"Bình thường: {healthy_count} ({health_rate}%)", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_fill_color(248, 250, 252)
+        pdf.rect(117, 75, 73, 40, "F")
+        pdf.set_xy(122, 79)
+        pdf._f("B", 10)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(63, 5, "TẤM PIN BẤT THƯỜNG / LỖI", new_x="LMARGIN", new_y="NEXT")
+        pdf._f("B", 20)
+        pdf.set_text_color(239, 68, 68)
+        pdf.set_x(122)
+        pdf.cell(63, 12, str(total_faulty), new_x="LMARGIN", new_y="NEXT")
+        pdf._f("", 10)
+        pdf.set_text_color(71, 85, 105)
+        pdf.set_x(122)
+        pdf.cell(63, 5, f"Tỷ lệ lỗi: {fault_rate}%", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_fill_color(248, 250, 252)
+        pdf.rect(35, 122, 155, 30, "F")
+        pdf.set_xy(40, 126)
+        pdf._f("B", 10)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(145, 5, "TỔNG HAO HỤT CÔNG SUẤT DỰ TÍNH", new_x="LMARGIN", new_y="NEXT")
+        pdf._f("B", 20)
+        pdf.set_text_color(245, 158, 11)
+        pdf.set_x(40)
+        pdf.cell(145, 12, f"{round(total_power_loss_w / 1000, 2)} kW", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(12)
+        
+        # Bảng phân phối loại lỗi
+        pdf.set_xy(35, 160)
+        pdf._f("B", 12)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, "Phân loại lỗi phát hiện", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+        pdf.set_fill_color(15, 23, 42)
+        pdf.set_text_color(255, 255, 255)
+        pdf._f("B", 10)
+        pdf.cell(80, 8.5, " Loại lỗi", border=1, align="L", fill=True)
+        pdf.cell(35, 8.5, "Số lượng", border=1, align="C", fill=True)
+        pdf.cell(40, 8.5, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_text_color(15, 23, 42)
+        pdf._f("", 10)
+
+        defect_mapping_list = [
+            ("hotspot_single_cell", "Điểm nóng đơn bào (hotspot_single_cell)", stats_defects.get("hotspot_single_cell", 0)),
+            ("hotspot_multi_cell",  "Điểm nóng đa bào (hotspot_multi_cell)",  stats_defects.get("hotspot_multi_cell", 0)),
+            ("crack",               "Vết nứt (crack)",               stats_defects.get("crack", 0)),
+            ("shading",             "Bóng che (shading)",             stats_defects.get("shading", 0)),
+        ]
+
+        sum_defects = sum(stats_defects.values())
+
+        for idx_row, (key, label_name, count) in enumerate(defect_mapping_list):
+            if idx_row % 2 == 0:
+                pdf.set_fill_color(248, 250, 252)
+            else:
+                pdf.set_fill_color(255, 255, 255)
+            ratio = round(count / sum_defects * 100, 1) if sum_defects > 0 else 0.0
+            pdf.cell(80, 8.5, f" {label_name}", border=1, align="L", fill=True)
+            pdf.cell(35, 8.5, str(count), border=1, align="C", fill=True)
+            pdf.cell(40, 8.5, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+
+        # ─────────────────────────────────────────
+        # TRANG 4: BẢN ĐỒ TỔNG THỂ VÀ PHÂN BỐ LỖI
+        # ─────────────────────────────────────────
+        pdf.add_page()
+        sec_3_page = pdf.page_no()
+        
+        pdf.set_xy(35, 25)
+        pdf._f("B", 16)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, "3. Bản đồ tổng thể và phân bố lỗi", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        
+        pdf.set_x(35 + 12.7)
+        pdf._f("", 14)
+        pdf.set_text_color(51, 65, 85)
+        pdf.write(7.5, "Dưới đây là hình ảnh bản đồ nhiệt toàn cảnh của khu vực quét điện mặt trời. Bản đồ cung cấp cái nhìn tổng quan về vị trí phân bố các tấm pin lỗi phục vụ hiệu quả cho công tác lập kế hoạch O&M.")
+        pdf.ln(12)
+        
+        if AERIAL_PATH and os.path.exists(AERIAL_PATH):
+            y_img = pdf.get_y()
+            pdf.image(AERIAL_PATH, x=35, y=y_img, w=155)
+            
+            try:
+                temp_img = cv2.imread(AERIAL_PATH)
+                if temp_img is not None:
+                    h_i, w_i = temp_img.shape[:2]
+                    img_aspect = h_i / w_i
+                    scaled_h = 155 * img_aspect
+                    
+                    pdf.set_xy(35, y_img + scaled_h + 3)
+                    pdf._f("I", 9)
+                    pdf.set_text_color(71, 85, 105)
+                    pdf.cell(155, 5, "Hình 3.1: Bản đồ nhiệt toàn cảnh hệ thống pin mặt trời", align="C", new_x="LMARGIN", new_y="NEXT")
+                    pdf.ln(5)
+            except Exception:
+                pdf.ln(90)
+        else:
+            pdf._f("I", 10)
+            pdf.set_text_color(239, 68, 68)
+            pdf.cell(155, 10, "[Không tìm thấy ảnh bản đồ toàn cảnh]", align="C", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(5)
+
+        # ─────────────────────────────────────────
+        # TRANG 5+: DANH SÁCH CHI TIẾT CÁC TẤM PIN LỖI
+        # ─────────────────────────────────────────
+        pdf.add_page()
+        sec_4_page = pdf.page_no()
+        
+        pdf.set_xy(35, 25)
+        pdf._f("B", 16)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 10, "4. Danh sách chi tiết các tấm pin lỗi", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        
+        pdf.set_x(35 + 12.7)
+        pdf._f("", 14)
+        pdf.set_text_color(51, 65, 85)
+        pdf.write(7.5, "Phần dưới đây trình bày thông tin chi tiết từng tấm pin bị lỗi, bao gồm các thông số ghi nhận O&M, hình ảnh nhiệt phóng to được định vị làm nổi bật lỗi tương ứng, ảnh quang học bối cảnh và bảng dữ liệu chi tiết của lỗi.")
+        pdf.ln(12)
+
+        def draw_defect_row_local(pdf, columns_data):
+            widths = [35, 40, 25, 30, 25]
+            cell_lines = []
+            for txt, w in zip(columns_data, widths):
+                cell_lines.append(get_wrapped_lines(pdf, str(txt), w - 4))
+                
+            max_lines = max(len(lines) for lines in cell_lines)
+            line_h = 5
+            row_h = max_lines * line_h + 4
+            
+            if pdf.get_y() + row_h > 265:
+                pdf.add_page()
+                
+            y0 = pdf.get_y()
+            x0 = pdf.l_margin
+            
+            pdf.set_draw_color(226, 232, 240)
+            pdf.set_line_width(0.15)
+            
+            x = x0
+            pdf._f("", 9)
+            pdf.set_text_color(15, 23, 42)
+            for idx, lines in enumerate(cell_lines):
+                w = widths[idx]
+                pdf.rect(x, y0, w, row_h)
+                
+                y_text = y0 + 2 + (row_h - 4 - len(lines) * line_h) / 2
+                for line_idx, line in enumerate(lines):
+                    pdf.set_xy(x + 2, y_text + line_idx * line_h)
+                    pdf.cell(w - 4, line_h, safe(line), border=0, align="C")
+                x += w
+                
+            pdf.set_xy(x0, y0 + row_h)
+
+        for idx, (p, p_detail) in enumerate(faulty_panels):
+            defects = p_detail.get("defects", [])
+            if not defects:
+                continue
+                
+            local_id = p.panel.local_id
+            row = p_detail.get("row", 0)
+            col = p_detail.get("col", 0)
+            
+            lat = p_detail.get("gps_lat")
+            lng = p_detail.get("gps_lng")
+            if lat is None or lng is None:
+                lat = round(10.8231 + row * 0.00015, 6)
+                lng = round(106.6297 + col * 0.00025, 6)
+            else:
+                lat = round(lat, 6)
+                lng = round(lng, 6)
+            gps_str = f"{lat}, {lng}"
+            
+            if pdf.get_y() > 210:
+                pdf.add_page()
+                
+            # Thanh tiêu đề block tấm pin
+            pdf.set_fill_color(241, 245, 249)
+            pdf.set_draw_color(203, 213, 225)
+            pdf.set_line_width(0.15)
+            pdf._f("B", 12)
+            pdf.set_text_color(15, 23, 42)
+            pdf.cell(0, 8, f" Tấm pin lỗi: {local_id} (Hàng {row}, Cột {col}) | GPS: {gps_str}", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(2)
+            
+            # Khối thông tin O&M duyệt lỗi
+            status_val = p_detail.get("review_status", "unreviewed")
+            status_label = {
+                "unreviewed": "Chưa duyệt",
+                "confirmed_defect": "Đã xác nhận",
+                "needs_review": "Cần kiểm tra lại",
+                "false_positive": "Bỏ qua"
+            }.get(status_val, "Chưa duyệt")
+
+            priority_val = p_detail.get("maintenance_priority", "medium")
+            priority_label = {
+                "low": "Thấp",
+                "medium": "Trung bình",
+                "high": "Cao",
+                "urgent": "Khẩn cấp"
+            }.get(priority_val, "Trung bình")
+
+            reviewer = clean_val(p_detail.get("reviewer_name"))
+            reviewed_at = clean_val(p_detail.get("reviewed_at"))
+            notes = clean_val(p_detail.get("review_note"), "Không có ghi chú")
+            
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(45, 5, "Trạng thái duyệt:")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.cell(40, 5, status_label)
+            
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(30, 5, "Người duyệt:")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.cell(40, 5, reviewer, new_x="LMARGIN", new_y="NEXT")
+            
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(45, 5, "Ưu tiên xử lý:")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.cell(40, 5, priority_label)
+            
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(30, 5, "Thời gian duyệt:")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.cell(40, 5, reviewed_at, new_x="LMARGIN", new_y="NEXT")
+            
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.cell(45, 5, "Ghi chú kỹ sư:")
+            pdf._f("", 10)
+            pdf.set_text_color(51, 65, 85)
+            pdf.multi_cell(110, 5, notes, align="L")
+            pdf.ln(3)
+            
+            # Chi tiết từng lỗi trong tấm pin
+            for d_idx, d in enumerate(defects):
+                if pdf.get_y() > 210:
+                    pdf.add_page()
+                    
+                if len(defects) > 1:
+                    pdf._f("B", 11)
+                    pdf.set_text_color(14, 165, 233)
+                    pdf.cell(0, 6, f" Chi tiết lỗi #{d_idx + 1}: {VI_DEFECT_MAP.get(d.get('class_name'), d.get('class_name'))}", new_x="LMARGIN", new_y="NEXT")
+                    pdf.ln(1)
+                    
+                defect_crops = cropped_images.get(idx, {}).get(d_idx, {})
+                temp_thermal_path = defect_crops.get("thermal", "")
+                temp_rgb_path = defect_crops.get("rgb", "")
+                crop_success = os.path.exists(temp_thermal_path) and os.path.exists(temp_rgb_path)
+
+                image_y = pdf.get_y() + 1
+                if crop_success:
+                    IMG_W = 73
+                    pdf.image(temp_thermal_path, x=35, y=image_y, w=IMG_W, h=30)
+                    pdf.image(temp_rgb_path, x=117, y=image_y, w=IMG_W, h=30)
+                    
+                    pdf.set_draw_color(226, 232, 240)
+                    pdf.set_line_width(0.15)
+                    
+                    # Chú thích ảnh nhiệt
+                    pdf.rect(35, image_y + 30.5, IMG_W, 5, style='D')
+                    pdf.set_xy(35, image_y + 30.5)
+                    pdf._f("I", 8)
+                    pdf.set_text_color(71, 85, 105)
+                    pdf.cell(IMG_W, 4, "Ảnh nhiệt phóng to vùng lỗi", align="C")
+                    
+                    # Chú thích ảnh RGB
+                    pdf.rect(117, image_y + 30.5, IMG_W, 5, style='D')
+                    pdf.set_xy(117, image_y + 30.5)
+                    pdf.cell(IMG_W, 4, "Ảnh quang học bối cảnh", align="C", new_x="LMARGIN", new_y="NEXT")
+                    
+                    pdf.set_y(image_y + 37)
+                else:
+                    pdf.ln(2)
+                    
+                # Bảng thông số chi tiết lỗi
+                pdf.ln(1)
+                pdf.set_xy(35, pdf.get_y())
+                pdf._f("B", 10)
+                pdf.set_fill_color(30, 41, 59)
+                pdf.set_text_color(255, 255, 255)
+                pdf.set_draw_color(226, 232, 240)
+                pdf.set_line_width(0.15)
+                
+                pdf.cell(35, 8.5, "Loại lỗi", 1, 0, "C", fill=True)
+                pdf.cell(40, 8.5, "Mức độ & Khuyến nghị", 1, 0, "C", fill=True)
+                pdf.cell(25, 8.5, "Hao hụt", 1, 0, "C", fill=True)
+                pdf.cell(30, 8.5, "Tỷ lệ diện tích", 1, 0, "C", fill=True)
+                pdf.cell(25, 8.5, "Vị trí", 1, 1, "C", fill=True)
+                
+                raw_cname = d.get("class_name") or d.get("type", "")
+                defect_type_str = VI_DEFECT_MAP.get(raw_cname, raw_cname)
+                
+                severity_str = VI_SEVERITY_MAP.get(d.get("severity", "minor"), "Nhẹ")
+                rec_str = translate_rec(d.get("recommendation", "Kiểm tra"))
+                severity_rec_str = f"{severity_str}\n({rec_str})"
+                
+                loss_val = p_detail.get("total_panel_loss", 0.0)
+                loss_pct_calc = round((loss_val / panel_power) * 100, 1) if panel_power > 0 else 0.0
+                power_loss_str = f"{loss_val:.1f} W\n({loss_pct_calc:.1f}%)"
+                
+                area_ratio = d.get("area_ratio_percent")
+                if area_ratio is not None:
+                    area_ratio_str = f"{round(area_ratio, 2)}% diện tích\ntấm pin"
+                else:
+                    area_ratio_str = "Chưa cập nhật"
+                    
+                loc_val = d.get("location_in_panel", "center")
+                location_str = translate_location(loc_val)
+                
+                draw_defect_row_local(
+                    pdf,
+                    [
+                        defect_type_str,
+                        severity_rec_str,
+                        power_loss_str,
+                        area_ratio_str,
+                        location_str
+                    ]
+                )
+                pdf.ln(5)
+                
+        return sec_1_page, sec_2_page, sec_3_page, sec_4_page
+
+    @staticmethod
     def generate_inspection_report(batch_id, data_list, output_path):
         """
-        Tạo báo cáo kiểm tra PDF tuân thủ quy chuẩn:
-        - Khổ giấy A4, Font Times New Roman.
-        - Nội dung chính: Size 14, Giãn dòng 1.5 (khoảng 7.5mm).
-        - Tiêu đề chương: Size 16, Bold.
-        - Căn lề: Trái 3.5cm, Phải 2.0cm, Trên 2.5cm, Dưới 2.5cm.
+        Khởi tạo tiến trình tạo báo cáo qua hai bước (Two-pass Rendering).
         """
+        # Khớp ảnh Thermal và RGB
         pairs = RegistrationService.match_thermal_rgb("data/raw")
         thermal_to_rgb = {p['thermal']: p['rgb'] for p in pairs}
 
@@ -126,136 +743,8 @@ class ReportGenerator:
         device       = batch.device      if (batch and batch.device)       else "DJI Matrice 300 RTK + Zenmuse H20T"
         panel_power  = batch.panel_power if (batch and batch.panel_power)  else 600.0
 
-        pdf = CustomPDF()
-        # Áp dụng căn lề: Trái 35mm, Trên 25mm, Phải 20mm, Dưới 25mm
-        pdf.set_margins(left=35, top=25, right=20)
-        pdf.set_auto_page_break(auto=True, margin=25)
-
-        # ─────────────────────────────────────────
-        # TRANG BÌA
-        # ─────────────────────────────────────────
-        pdf.add_page()
-
-        # Thêm logo ở vị trí trung tâm phía trên trang bìa
-        if os.path.exists(LOGO_PATH):
-            pdf.image(LOGO_PATH, x=77.5, y=30, w=55)
-        pdf.set_y(75)
-
-
-        pdf._f("B", 22)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 12, "BÁO CÁO KIỂM TRA ĐIỆN MẶT TRỜI AI", new_x="LMARGIN", new_y="NEXT", align="C")
-
-        pdf._f("B", 12)
-        pdf.set_text_color(14, 165, 233)
-        pdf.cell(0, 8, "TỰ ĐỘNG PHÁT HIỆN & CHẨN ĐOÁN LỖI TẤM PIN", new_x="LMARGIN", new_y="NEXT", align="C")
-        pdf.ln(15)
-
-        # Hộp thông tin căn giữa theo lề mới
-        pdf.set_fill_color(248, 250, 252)
-        pdf.set_draw_color(226, 232, 240)
-        pdf.rect(35, 95, 155, 135, "DF")
-
-        metadata_fields = [
-            ("Tên dự án:",       project_name),
-            ("Vị trí:",          location),
-            ("Thời gian quét:",  scan_time),
-            ("Đơn vị thực hiện:", operator),
-            ("Thiết bị bay:",    device),
-            ("Phạm vi quét:",    scope_str),
-            ("Công suất tấm pin:", f"{panel_power} W"),
-            ("Công suất hệ thống:", system_capacity),
-            ("Người phụ trách:", supervisor),
-            ("Loại dữ liệu:",    data_type),
-            ("Model AI sử dụng:", ai_model),
-            ("Phiên bản hệ thống:", system_version),
-            ("Ghi chú:",         notes),
-        ]
-
-        y_offset = 98
-        for label, val in metadata_fields:
-            pdf.set_xy(42, y_offset)
-            pdf._f("B", 10)
-            pdf.set_text_color(71, 85, 105)
-            pdf.cell(45, 6, safe(label))
-            pdf._f("", 10)
-            pdf.set_text_color(15, 23, 42)
-            pdf.cell(100, 6, safe(str(val)), new_x="LMARGIN", new_y="NEXT")
-            y_offset += 9
-
-        pdf.set_xy(0, 255)
-        pdf._f("I", 10)
-        pdf.set_text_color(148, 163, 184)
-        pdf.cell(0, 10, "Bảo mật - EPC Solar JSC", align="C", new_x="LMARGIN", new_y="NEXT")
-
-        # ─────────────────────────────────────────
-        # TRANG 2: MỤC LỤC (TABLE OF CONTENTS)
-        # ─────────────────────────────────────────
-        pdf.add_page()
-        pdf.set_xy(35, 25)
-        pdf._f("B", 16)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, "MỤC LỤC", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(5)
-
-        # Đoạn văn giới thiệu mục lục có thụt lề
-        pdf.set_x(35 + 12.7)
-        pdf._f("", 14)
-        pdf.set_text_color(51, 65, 85)
-        pdf.write(7.5, "Mục lục dưới đây tóm tắt toàn bộ cấu trúc các chương mục chính của báo cáo kết quả quét nhiệt lỗi tấm pin mặt trời để phục vụ công tác tra cứu nhanh.")
-        pdf.ln(15)
-
-        toc_items = [
-            ("1. Tóm tắt dự án (Executive Summary)", 3),
-            ("2. Phân tích phân bổ các loại lỗi (Defect Distribution)", 3),
-            ("3. Nhật ký chi tiết lỗi tấm pin (Detailed Anomalies Log)", 4),
-        ]
-
-        for title, page_num in toc_items:
-            pdf.set_x(35)
-            pdf._f("", 14)
-            pdf.set_text_color(51, 65, 85)
-            pdf.cell(125, 7.5, title)
-            
-            pdf._f("", 14)
-            pdf.set_text_color(148, 163, 184)
-            pdf.cell(20, 7.5, " . . . . . . . . .", align="R")
-            
-            pdf._f("B", 14)
-            pdf.set_text_color(15, 23, 42)
-            pdf.cell(10, 7.5, str(page_num), align="R", new_x="LMARGIN", new_y="NEXT")
-            pdf.ln(2)
-
-        # ─────────────────────────────────────────
-        # TRANG 3: TÓM TẮT
-        # ─────────────────────────────────────────
-        pdf.add_page()
-
-        pdf.set_xy(35, 25)
-        pdf._f("B", 16)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, "1. Tóm tắt dự án", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-
-        # Đoạn văn giới thiệu có thụt lề đầu dòng 1.27cm và giãn dòng 1.5 (line height 7.5mm)
-        pdf.set_x(35 + 12.7)
-        pdf._f("", 14)
-        pdf.set_text_color(51, 65, 85)
-        pdf.write(7.5, "Báo cáo này trình bày kết quả phân tích tự động hệ thống điện mặt trời bằng công nghệ AI. Dưới đây là các chỉ số thống kê tổng hợp về số lượng tấm pin, tỷ lệ lỗi và mức độ suy hao công suất phát hiện trong đợt kiểm tra.")
-        pdf.ln(12)
-
-        total_panels = len(data_list)
+        # Phân loại tấm pin lỗi
         faulty_panels = []
-        healthy_count = 0
-        total_power_loss_w = 0.0
-
-        stats_defects = {
-            "hotspot_single_cell": 0,
-            "hotspot_multi_cell": 0,
-            "shading": 0,
-            "crack": 0
-        }
-
         for p in data_list:
             panel_detail = {}
             is_faulty = False
@@ -299,514 +788,183 @@ class ReportGenerator:
 
             if is_faulty:
                 faulty_panels.append((p, panel_detail))
-                total_power_loss_w += panel_detail.get("total_panel_loss", 0.0)
-                for d in panel_detail.get("defects", []):
-                    cname = d.get("class_name", "")
-                    cname_lower = cname.lower() if isinstance(cname, str) else str(cname).lower()
-                    if "hotspot_single" in cname_lower or "single_cell" in cname_lower or "single-cell" in cname_lower:
-                        stats_defects["hotspot_single_cell"] += 1
-                    elif "hotspot_multi" in cname_lower or "multi_cell" in cname_lower or "multicell" in cname_lower or "multi-cell" in cname_lower:
-                        stats_defects["hotspot_multi_cell"] += 1
-                    elif "crack" in cname_lower or "nut" in cname_lower:
-                        stats_defects["crack"] += 1
-                    elif any(k in cname_lower for k in ["shading", "shadow", "shade", "soil", "soiling", "dirt"]):
-                        stats_defects["shading"] += 1
-            else:
-                healthy_count += 1
-
-        total_faulty = len(faulty_panels)
-        health_rate = round((total_panels - total_faulty) / total_panels * 100, 1) if total_panels > 0 else 100.0
-
-        # --- Grid thống kê (Khổ 155mm lề mới) ---
-        # Card 1: TOTAL SCANNED PANELS
-        pdf.set_fill_color(248, 250, 252)
-        pdf.rect(35, 75, 73, 40, "F")
-        pdf.set_xy(40, 79)
-        pdf._f("B", 10)
-        pdf.set_text_color(100, 116, 139)
-        pdf.cell(63, 5, "TỔNG SỐ TẤM PIN ĐÃ QUÉT", new_x="LMARGIN", new_y="NEXT")
-        pdf._f("B", 20)
-        pdf.set_text_color(14, 165, 233)
-        pdf.set_x(40)
-        pdf.cell(63, 12, str(total_panels), new_x="LMARGIN", new_y="NEXT")
-        pdf._f("", 10)
-        pdf.set_text_color(71, 85, 105)
-        pdf.set_x(40)
-        pdf.cell(63, 5, f"Bình thường: {total_panels - total_faulty} ({health_rate}%)", new_x="LMARGIN", new_y="NEXT")
-
-        # Card 2: ANOMALOUS / FAULTY PANELS
-        pdf.set_fill_color(248, 250, 252)
-        pdf.rect(117, 75, 73, 40, "F")
-        pdf.set_xy(122, 79)
-        pdf._f("B", 10)
-        pdf.set_text_color(100, 116, 139)
-        pdf.cell(63, 5, "TẤM PIN BẤT THƯỜNG / LỖI", new_x="LMARGIN", new_y="NEXT")
-        pdf._f("B", 20)
-        pdf.set_text_color(239, 68, 68)
-        pdf.set_x(122)
-        pdf.cell(63, 12, str(total_faulty), new_x="LMARGIN", new_y="NEXT")
-        pdf._f("", 10)
-        pdf.set_text_color(71, 85, 105)
-        pdf.set_x(122)
-        fault_rate = round(total_faulty / total_panels * 100, 1) if total_panels > 0 else 0.0
-        pdf.cell(63, 5, f"Tỷ lệ lỗi: {fault_rate}%", new_x="LMARGIN", new_y="NEXT")
-
-        # Card 3: TOTAL ESTIMATED POWER LOSS
-        pdf.set_fill_color(248, 250, 252)
-        pdf.rect(35, 122, 73, 40, "F")
-        pdf.set_xy(40, 126)
-        pdf._f("B", 10)
-        pdf.set_text_color(100, 116, 139)
-        pdf.cell(63, 5, "TỔNG HAO HỤT CÔNG SUẤT DỰ TÍNH", new_x="LMARGIN", new_y="NEXT")
-        pdf._f("B", 20)
-        pdf.set_text_color(245, 158, 11)
-        pdf.set_x(40)
-        pdf.cell(63, 12, f"{round(total_power_loss_w / 1000, 2)} kW", new_x="LMARGIN", new_y="NEXT")
-        pdf._f("", 10)
-        pdf.set_text_color(71, 85, 105)
-        pdf.set_x(40)
-        avg_loss = round(total_power_loss_w / total_faulty, 1) if total_faulty > 0 else 0.0
-        pdf.cell(63, 5, f"Hao hụt trung bình: {avg_loss} W / lỗi", new_x="LMARGIN", new_y="NEXT")
-
-        # --- Bảng phân loại lỗi (Tiêu đề chương 16 Bold, căn lề 3.5cm) ---
-        pdf.set_xy(35, 172)
-        pdf._f("B", 16)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, "2. Phân loại lỗi phát hiện", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(3)
-
-        pdf.set_fill_color(15, 23, 42)
-        pdf.set_text_color(255, 255, 255)
-        pdf._f("B", 12)
-        pdf.cell(75, 8.5, "Loại lỗi", border=1, align="L", fill=True)
-        pdf.cell(30, 8.5, "Số lượng", border=1, align="C", fill=True)
-        pdf.cell(50, 8.5, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
-
-        pdf.set_text_color(15, 23, 42)
-        pdf._f("", 12)
-
-        defect_mapping_list = [
-            ("hotspot_single_cell", "hotspot_single_cell", stats_defects.get("hotspot_single_cell", 0)),
-            ("hotspot_multi_cell",  "hotspot_multi_cell",  stats_defects.get("hotspot_multi_cell", 0)),
-            ("crack",               "crack",               stats_defects.get("crack", 0)),
-            ("shading",             "shading",             stats_defects.get("shading", 0)),
-        ]
-
-        sum_defects = sum(stats_defects.values())
-
-        for index, (key, label_name, count) in enumerate(defect_mapping_list):
-            if index % 2 == 0:
-                pdf.set_fill_color(248, 250, 252)
-            else:
-                pdf.set_fill_color(255, 255, 255)
-            ratio = round(count / sum_defects * 100, 1) if sum_defects > 0 else 0.0
-            pdf.cell(75, 8.5, f" {label_name}", border=1, align="L", fill=True)
-            pdf.cell(30, 8.5, str(count), border=1, align="C", fill=True)
-            pdf.cell(50, 8.5, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
-
-        # ─────────────────────────────────────────
-        # PHẦN 3: DANH SÁCH CHI TIẾT CÁC LỖI
-        # ─────────────────────────────────────────
-        pdf.add_page()
-        pdf._f("B", 16)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, "3. Nhật ký chi tiết lỗi tấm pin", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-
-        # Đoạn văn giới thiệu có thụt lề đầu dòng 1.27cm và giãn dòng 1.5 (line height 7.5mm)
-        pdf.set_x(35 + 12.7)
-        pdf._f("", 14)
-        pdf.set_text_color(51, 65, 85)
-        pdf.write(7.5, "Danh sách chi tiết dưới đây mô tả vị trí, tọa độ GPS, mức độ hao hụt công suất và hình ảnh nhiệt/RGB tương ứng của từng tấm pin mặt trời được xác định là có bất thường hoặc bị lỗi trong quá trình quét bằng thiết bị bay không người lái.")
-        pdf.ln(12)
 
         # Thư mục tạm lưu ảnh đã cắt để chèn vào PDF
         temp_dir = tempfile.mkdtemp()
-
-        VI_DEFECT_MAP = {
-            "hotspot_single_cell": "Hotspot single cell",
-            "hotspot_multi_cell":  "Hotspot multi cell",
-            "shading":             "Shading",
-            "soiling":             "Soiling",
-            "crack":               "Crack",
-        }
-
-        VI_SEVERITY_MAP = {
-            "very_minor": "Rất nhẹ",
-            "minor":      "Nhẹ",
-            "moderate":   "Cần theo dõi",
-            "severe":     "Ưu tiên bảo trì",
-            "replace":    "Cần thay thế"
-        }
-
-        VI_LOC_MAP = {
-            "center": "Trung tâm",
-            "top-left": "Trên - Trái",
-            "top-center": "Trên - Giữa",
-            "top-right": "Trên - Phải",
-            "middle-left": "Giữa - Trái",
-            "middle-center": "Giữa - Trung tâm",
-            "middle-right": "Giữa - Phải",
-            "bottom-left": "Dưới - Trái",
-            "bottom-center": "Dưới - Giữa",
-            "bottom-right": "Dưới - Phải",
-        }
-
+        
+        # ─────────────────────────────────────────
+        # Bước tiền xử lý: Cắt toàn bộ ảnh nhiệt zoom lỗi & ảnh RGB bối cảnh
+        # ─────────────────────────────────────────
+        cropped_images = {}
         for idx, (p, p_detail) in enumerate(faulty_panels):
-            # Mỗi khối cần khoảng 115mm chiều cao bao gồm O&M block, nếu không đủ thì ngắt trang tự động
-            if pdf.get_y() > 160:
-              pdf.add_page()
-
-            pdf._f("B", 13)
-            pdf.set_text_color(15, 23, 42)
-            pdf.set_fill_color(241, 245, 249)
-
+            defects = p_detail.get("defects", [])
             local_id = p.panel.local_id
-            row = p_detail.get("row", 0)
-            col = p_detail.get("col", 0)
-
-            lat = p_detail.get("gps_lat")
-            lng = p_detail.get("gps_lng")
-            if lat is None or lng is None:
-                lat = round(10.8231 + row * 0.00015, 6)
-                lng = round(106.6297 + col * 0.00025, 6)
-            else:
-                lat = round(lat, 6)
-                lng = round(lng, 6)
-
-            pdf.cell(
-                0, 7.5,
-                f" Anomalous Panel {local_id} (Row {row}, Col {col}) | GPS: {lat}, {lng}",
-                border=1, align="L", fill=True, new_x="LMARGIN", new_y="NEXT"
-            )
-
-            # Lấy thông tin O&M duyệt lỗi
-            status_val = p_detail.get("review_status", "unreviewed")
-            status_label = {
-                "unreviewed": "Chưa duyệt",
-                "confirmed_defect": "Đã xác nhận",
-                "needs_review": "Cần kiểm tra lại",
-                "false_positive": "Bỏ qua"
-            }.get(status_val, "Chưa duyệt")
-
-            priority_val = p_detail.get("maintenance_priority", "medium")
-            priority_label = {
-                "low": "Thấp",
-                "medium": "Trung bình",
-                "high": "Cao",
-                "urgent": "Khẩn cấp"
-            }.get(priority_val, "Trung bình")
-
-            reviewer = p_detail.get("reviewer_name") or "Chưa cập nhật"
-            reviewed_at = p_detail.get("reviewed_at") or "Chưa cập nhật"
-            notes = p_detail.get("review_note") or "Không có ghi chú"
-
-            pdf.ln(2)
-            pdf._f("B", 10)
-            pdf.set_text_color(71, 85, 105)
-            pdf.write(5, "Trạng thái duyệt: ")
-            pdf._f("", 10)
-            pdf.set_text_color(15, 23, 42)
-            pdf.write(5, f"{status_label}  |  ")
-
-            pdf._f("B", 10)
-            pdf.set_text_color(71, 85, 105)
-            pdf.write(5, "Ưu tiên xử lý: ")
-            pdf._f("", 10)
-            pdf.set_text_color(15, 23, 42)
-            pdf.write(5, f"{priority_label}  |  ")
-
-            pdf._f("B", 10)
-            pdf.set_text_color(71, 85, 105)
-            pdf.write(5, "Người duyệt: ")
-            pdf._f("", 10)
-            pdf.set_text_color(15, 23, 42)
-            pdf.write(5, f"{reviewer}  |  ")
-
-            pdf._f("B", 10)
-            pdf.set_text_color(71, 85, 105)
-            pdf.write(5, "Thời gian duyệt: ")
-            pdf._f("", 10)
-            pdf.set_text_color(15, 23, 42)
-            pdf.write(5, f"{reviewed_at}\n")
-
-            pdf._f("B", 10)
-            pdf.set_text_color(71, 85, 105)
-            pdf.write(5, "Ghi chú kỹ sư: ")
-            pdf._f("", 10)
-            pdf.set_text_color(51, 65, 85)
-            pdf.write(5, f"{notes}\n")
-            pdf.ln(2)
-
-            pdf._f("", 12)
-            pdf.set_text_color(51, 65, 85)
-
-            # Cắt ảnh
+            
             thermal_filename = p.image.filename
             rgb_filename = thermal_to_rgb.get(thermal_filename)
             thermal_path = os.path.join("data/results", thermal_filename)
             rgb_path = os.path.join("data/raw", rgb_filename) if rgb_filename else None
-            bbox = p_detail.get("bbox", [])
-
-            crop_success = False
-            temp_thermal_path = ""
-            temp_rgb_path = ""
-
-            if bbox and len(bbox) == 4 and os.path.exists(thermal_path):
-                try:
-                    t_img = cv2.imread(thermal_path)
-                    if t_img is not None:
-                        h_t, w_t = t_img.shape[:2]
-                        x1, y1, x2, y2 = [int(v) for v in bbox]
-                        crop_w = int(w_t * 0.5)
-                        crop_h = int(h_t * 0.5)
-                        cx = (x1 + x2) // 2
-                        cy = (y1 + y2) // 2
-                        x1_t = max(0, cx - crop_w // 2)
-                        y1_t = max(0, cy - crop_h // 2)
-                        x2_t = min(w_t, cx + crop_w // 2)
-                        y2_t = min(h_t, cy + crop_h // 2)
-                        crop_t = t_img[y1_t:y2_t, x1_t:x2_t]
-                        if crop_t is not None and crop_t.size > 0:
-                            temp_thermal_path = os.path.join(temp_dir, f"t_{local_id}_{idx}.jpg")
-                            cv2.imwrite(temp_thermal_path, crop_t)
-
-                        if rgb_path and os.path.exists(rgb_path):
-                            r_img = cv2.imread(rgb_path)
-                            if r_img is not None:
-                                h_r, w_r = r_img.shape[:2]
-                                scale_x = w_r / w_t
-                                scale_y = h_r / h_t
-                                cx_r = int(cx * scale_x)
-                                cy_r = int(cy * scale_y)
-                                crop_w_r = int(crop_w * scale_x)
-                                crop_h_r = int(crop_h * scale_y)
-                                x1_r = max(0, cx_r - crop_w_r // 2)
-                                y1_r = max(0, cy_r - crop_h_r // 2)
-                                x2_r = min(w_r, cx_r + crop_w_r // 2)
-                                y2_r = min(h_r, cy_r + crop_h_r // 2)
-                                crop_r = r_img[y1_r:y2_r, x1_r:x2_r]
-                                if crop_r is not None and crop_r.size > 0:
-                                    r_pad_x = int((x1 - x1_t) * scale_x)
-                                    r_pad_y = int((y1 - y1_t) * scale_y)
-                                    r_w = int((x2 - x1) * scale_x)
-                                    r_h = int((y2 - y1) * scale_y)
-                                    cv2.rectangle(crop_r, (r_pad_x, r_pad_y), (r_pad_x + r_w, r_pad_y + r_h), (0, 255, 0), 2)
-                                    temp_rgb_path = os.path.join(temp_dir, f"r_{local_id}_{idx}.jpg")
-                                    cv2.imwrite(temp_rgb_path, crop_r)
-
-                        crop_success = os.path.exists(temp_thermal_path) and os.path.exists(temp_rgb_path)
-                except Exception:
-                    crop_success = False
-
-            # In ảnh kẹp song song ở trên trong lề mới (printable width 155mm)
-            image_y = pdf.get_y() + 2
-            if crop_success:
-                IMG_W = 70
-
-                pdf.image(
-                    temp_thermal_path,
-                    x=35,
-                    y=image_y,
-                    w=IMG_W,
-                    h=30
-                )
-
-                pdf.image(
-                    temp_rgb_path,
-                    x=120,
-                    y=image_y,
-                    w=IMG_W,
-                    h=30
-                )
+            
+            cropped_images[idx] = {}
+            for d_idx, d in enumerate(defects):
+                d_bbox = d.get("bbox") or d.get("box", [])
+                d_poly = d.get("polygon", [])
                 
-                # Frame image label boxes with light gray border
-                pdf.set_draw_color(225, 228, 232)
-                pdf.set_line_width(0.15)
-                # Thermal image label frame
-                pdf.rect(35, image_y + 30.5, 73, 5, style='D')
-                pdf.set_xy(35, image_y + 30.5)
-                pdf._f("I", 8)
-                pdf.set_text_color(0, 0, 0)
-                pdf.cell(73, 4, "Ảnh nhiệt đã chú thích", align="C")
-                # RGB image label frame
-                pdf.rect(116, image_y + 30.5, 73, 5, style='D')
-                pdf.set_xy(116, image_y + 30.5)
-                pdf.cell(73, 4, "Ảnh RGB / ảnh bối cảnh", align="C", new_x="LMARGIN", new_y="NEXT")
+                temp_thermal_path = ""
+                temp_rgb_path = ""
+                crop_success = False
                 
-                # Dịch chuyển y xuống dưới ảnh + nhãn
-                pdf.set_y(image_y + 36)
-            else:
-                pdf.ln(2)
-
-            # Vùng text chi tiết (Căn chữ Justify, Nội dung Size 14, Giãn dòng 1.5)
-            LABEL_W = 40
-            TEXT_W = pdf.w - pdf.l_margin - pdf.r_margin
-            text_x = pdf.l_margin
-
-            pdf.ln(1)
-
-            defects = p_detail.get("defects", [])
-            defect_types      = []
-            confidence_values = []
-            relative_positions = []
-
-            def draw_table_row(pdf, cols):
-
-                widths = [40, 35, 25, 55]
-                line_h = 6
-
-                max_lines = max(
-                    len(str(c).split("\n"))
-                    for c in cols
-                )
-
-                row_h = max_lines * line_h + 2
-
-                if pdf.get_y() + row_h > 260:
-                    pdf.add_page()
-
-                x0 = pdf.l_margin
-                y0 = pdf.get_y()
-                x = x0
-
-                # Ensure light gray border and thin line width for each cell
-                pdf.set_draw_color(225, 228, 232)
-                pdf.set_line_width(0.15)
-                # Use bold font for cell text
-                pdf._f("B", 10)
-                # Set text color for table rows (same as label text)
-                pdf.set_text_color(0, 0, 0)
-                for txt, w in zip(cols, widths):
-                    pdf.rect(x, y0, w, row_h)
-                    pdf.set_xy(x + 1, y0 + 1)
-                    pdf.multi_cell(w - 2, line_h, str(txt), border=0, align="C")
-                    x += w
-                    pdf.set_xy(x, y0)
-
-                pdf.set_xy(pdf.l_margin, y0 + row_h)
+                if os.path.exists(thermal_path):
+                    try:
+                        t_img = cv2.imread(thermal_path)
+                        if t_img is not None:
+                            h_t, w_t = t_img.shape[:2]
+                            
+                            # Xác định bbox của lỗi
+                            if d_bbox and len(d_bbox) == 4:
+                                dx1, dy1, dx2, dy2 = [int(v) for v in d_bbox]
+                            elif d_poly and len(d_poly) >= 3:
+                                xs = [int(pt[0]) for pt in d_poly]
+                                ys = [int(pt[1]) for pt in d_poly]
+                                dx1, dy1, dx2, dy2 = min(xs), min(ys), max(xs), max(ys)
+                            else:
+                                p_bbox = p_detail.get("bbox", [])
+                                if p_bbox and len(p_bbox) == 4:
+                                    dx1, dy1, dx2, dy2 = [int(v) for v in p_bbox]
+                                else:
+                                    dx1, dy1, dx2, dy2 = 0, 0, w_t, h_t
+                                    
+                            dw = dx2 - dx1
+                            dh = dy2 - dy1
+                            dcx = (dx1 + dx2) // 2
+                            dcy = (dy1 + dy2) // 2
+                            
+                            # Tính kích thước crop (3 lần kích thước lỗi, tối thiểu 150x120)
+                            crop_w = int(max(dw * 3, 150))
+                            crop_h = int(max(dh * 3, 120))
+                            crop_w = min(crop_w, w_t)
+                            crop_h = min(crop_h, h_t)
+                            
+                            x1_c = max(0, dcx - crop_w // 2)
+                            y1_c = max(0, dcy - crop_h // 2)
+                            x2_c = min(w_t, x1_c + crop_w)
+                            y2_c = min(h_t, y1_c + crop_h)
+                            
+                            if x2_c - x1_c < crop_w:
+                                x1_c = max(0, x2_c - crop_w)
+                            if y2_c - y1_c < crop_h:
+                                y1_c = max(0, y2_c - crop_h)
+                                
+                            t_drawn = t_img.copy()
+                            sev = d.get("severity", "minor").lower()
+                            color_map = {
+                                "very_minor": (0, 255, 255),
+                                "minor": (0, 255, 255),
+                                "moderate": (0, 165, 255),
+                                "severe": (0, 0, 255),
+                                "replace": (0, 0, 180)
+                            }
+                            bgr_color = color_map.get(sev, (0, 0, 255))
+                            
+                            # Vẽ viền màu nổi bật lỗi
+                            if d_poly and len(d_poly) >= 3:
+                                pts = np.array(d_poly, dtype=np.int32)
+                                cv2.polylines(t_drawn, [pts], isClosed=True, color=bgr_color, thickness=2)
+                            else:
+                                cv2.rectangle(t_drawn, (dx1, dy1), (dx2, dy2), bgr_color, 2)
+                                
+                            crop_t = t_drawn[y1_c:y2_c, x1_c:x2_c]
+                            if crop_t is not None and crop_t.size > 0:
+                                temp_thermal_path = os.path.join(temp_dir, f"t_{local_id}_{idx}_{d_idx}.jpg")
+                                cv2.imwrite(temp_thermal_path, crop_t)
+                                
+                            # Cắt ảnh RGB bối cảnh (tâm panel, có viền xanh lá)
+                            p_bbox = p_detail.get("bbox", [])
+                            if p_bbox and len(p_bbox) == 4 and rgb_path and os.path.exists(rgb_path):
+                                r_img = cv2.imread(rgb_path)
+                                if r_img is not None:
+                                    h_r, w_r = r_img.shape[:2]
+                                    px1, py1, px2, py2 = [int(v) for v in p_bbox]
+                                    pcx = (px1 + px2) // 2
+                                    pcy = (py1 + py2) // 2
+                                    
+                                    scale_x = w_r / w_t
+                                    scale_y = h_r / h_t
+                                    
+                                    crop_w_r = int(w_t * 0.5 * scale_x)
+                                    crop_h_r = int(h_t * 0.5 * scale_y)
+                                    
+                                    x1_r = max(0, int(pcx * scale_x) - crop_w_r // 2)
+                                    y1_r = max(0, int(pcy * scale_y) - crop_h_r // 2)
+                                    x2_r = min(w_r, x1_r + crop_w_r)
+                                    y2_r = min(h_r, y1_r + crop_h_r)
+                                    
+                                    r_drawn = r_img.copy()
+                                    rx1, ry1 = int(px1 * scale_x), int(py1 * scale_y)
+                                    rx2, ry2 = int(px2 * scale_x), int(py2 * scale_y)
+                                    cv2.rectangle(r_drawn, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+                                    
+                                    crop_r = r_drawn[y1_r:y2_r, x1_r:x2_r]
+                                    if crop_r is not None and crop_r.size > 0:
+                                        temp_rgb_path = os.path.join(temp_dir, f"r_{local_id}_{idx}_{d_idx}.jpg")
+                                        cv2.imwrite(temp_rgb_path, crop_r)
+                                        
+                            crop_success = os.path.exists(temp_thermal_path) and os.path.exists(temp_rgb_path)
+                    except Exception as e:
+                        logger.warning(f"Error cropping for defect {d_idx} on panel {local_id}: {e}")
+                        crop_success = False
                         
-            pdf.ln(5)
+                if crop_success:
+                    cropped_images[idx][d_idx] = {
+                        "thermal": temp_thermal_path,
+                        "rgb": temp_rgb_path
+                    }
 
-                        # ==================================================
-                        # BẢNG CHI TIẾT LỖI GIỐNG HÌNH 2
-                        # ==================================================
-            loss = p_detail.get("total_panel_loss", 0.0)
-            loss_pct_calc = (
-                round((loss / panel_power) * 100, 1)
-                if panel_power > 0 else 0.0
-            )
-            rec = p_detail.get("recommendation", "Kiểm tra")
+        metadata_fields = [
+            ("Tên dự án:",       project_name),
+            ("Vị trí dự án:",    location),
+            ("Thời gian quét:",  scan_time),
+            ("Đơn vị thực hiện:", operator),
+            ("Thiết bị bay:",    device),
+            ("Phạm vi quét:",    scope_str),
+            ("Công suất tấm pin:", f"{panel_power} W"),
+            ("Công suất hệ thống:", system_capacity),
+            ("Người phụ trách:", supervisor),
+            ("Loại dữ liệu:",    data_type),
+            ("Model AI sử dụng:", ai_model),
+            ("Phiên bản hệ thống:", system_version),
+            ("Ghi chú:",         notes),
+        ]
 
-            if rec == "Check":
-                rec = "Kiểm tra"
-            elif rec == "Replace":
-                rec = "Cần thay thế"
-            pdf._f("B", 11)
+        # ─────────────────────────────────────────
+        # PASS 1: Đo số trang thực tế của các phần
+        # ─────────────────────────────────────────
+        pdf1 = CustomPDF()
+        sec_1, sec_2, sec_3, sec_4 = ReportGenerator._build_pdf_content(
+            pdf1, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, toc_page_numbers=None
+        )
+        
+        toc_page_numbers = {
+            'sec_1': sec_1,
+            'sec_2': sec_2,
+            'sec_3': sec_3,
+            'sec_4': sec_4,
+        }
 
-            # Use light gray border and thinner line for table headers
-            pdf.set_draw_color(225, 228, 232)
-            pdf.set_line_width(0.15)
-            # Column width definitions for defect detail table
-            COL1 = 40
-            COL2 = 35
-            COL3 = 25
-            COL4 = 55
-            # Set text color to match label frames (soft gray-blue)
-            pdf.set_text_color(100, 116, 139)
-            pdf.cell(COL1, 10, "Lỗi phát hiện", 1, 0, "C")
-            pdf.cell(COL2, 10, "Mức độ & độ tin cậy", 1, 0, "C")
-            pdf.cell(COL3, 10, "Hao hụt", 1, 0, "C")
-            pdf.cell(COL4, 10, "Vị trí", 1, 1, "C")
+        # ─────────────────────────────────────────
+        # PASS 2: Xuất file PDF chính thức với số trang chuẩn
+        # ─────────────────────────────────────────
+        pdf2 = CustomPDF()
+        ReportGenerator._build_pdf_content(
+            pdf2, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, toc_page_numbers=toc_page_numbers
+        )
 
-            pdf._f("", 10)
-            for d in defects:
-                raw_cname = d.get("class_name", "") or d.get("type", "")
-                cname_lower = raw_cname.lower() if isinstance(raw_cname, str) else str(raw_cname).lower()
-                
-                if "hotspot_single" in cname_lower or "single_cell" in cname_lower or "single-cell" in cname_lower:
-                    defect_name = "hotspot_single_cell"
-                elif "hotspot_multi" in cname_lower or "multi_cell" in cname_lower or "multicell" in cname_lower or "multi-cell" in cname_lower:
-                    defect_name = "hotspot_multi_cell"
-                elif "crack" in cname_lower or "nut" in cname_lower:
-                    defect_name = "crack"
-                elif any(k in cname_lower for k in ["shading", "shadow", "shade", "soil", "soiling", "dirt"]):
-                    defect_name = "shading"
-                else:
-                    defect_name = raw_cname
+        pdf2.output(output_path)
 
-                conf_val = d.get("confidence")
-                if conf_val is not None:
-                    confidence = f"YOLO: {round(conf_val * 100, 1)}%"
-                else:
-                    confidence = "YOLO: Chưa có dữ liệu"
-
-                severity = VI_SEVERITY_MAP.get(
-                    d.get("severity", "minor"),
-                    "Nhẹ"
-                )
-
-                power_loss = f"{loss:.1f} W"
-
-                area_ratio = d.get("area_ratio_percent")
-                if area_ratio is not None:
-                    area_ratio_text = f"Tỷ lệ: {round(area_ratio, 2)}%"
-                else:
-                    area_ratio_text = "Tỷ lệ: Chưa có dữ liệu"
-
-                loc_val = d.get("location_in_panel", "center")
-                location = VI_LOC_MAP.get(loc_val, loc_val)
-
-                u = round(
-                    d.get("relative_position", {}).get("u", 0.5) if d.get("relative_position") else 0.5,
-                    2
-                )
-
-                v = round(
-                    d.get("relative_position", {}).get("v", 0.5) if d.get("relative_position") else 0.5,
-                    2
-                )
-
-                location_text = (
-                    f"{location}\n"
-                    f"(u:{u}, v:{v})"
-                )
-
-                draw_table_row(
-                    pdf,
-                    [
-                        defect_name,
-                        f"{severity}\n{confidence}\n{area_ratio_text}",
-                        power_loss,
-                        location_text
-                    ]
-                )
-            # Tính toán hao hụt và sản lượng hao hụt
-            loss = p_detail.get("total_panel_loss", 0.0)
-            loss_pct_calc = round((loss / panel_power) * 100, 1) if panel_power > 0 else 0.0
-            rec  = p_detail.get("recommendation", "Kiểm tra")
-            if rec == "Check":
-                rec = "Kiểm tra"
-            elif rec == "Replace":
-                rec = "Cần thay thế"
-            #print_row("Hao hụt công suất:",      f"{loss} W ({loss_pct_calc}% công suất tấm pin) | {rec}")
-            
-            # Giả định 4 giờ nắng đỉnh mỗi ngày và đơn giá điện tự tiêu thụ/phát thải trung bình là 2,000 VND / kWh
-            yearly_loss_kwh = (loss * 4.0 * 365) / 1000.0
-            yearly_cost_vnd = int(yearly_loss_kwh * 2000)
-            #print_row("Hao hụt sản lượng ước tính:", f"{round(yearly_loss_kwh, 1)} kWh/năm (Thiệt hại ước tính: {yearly_cost_vnd:,} VNĐ/năm)")
-            
-           # print_row("Vị trí tương đối:",   ", ".join(relative_positions) if relative_positions else "N/A")
-           #print_row("Ảnh nhiệt:",   thermal_filename)
-           #print_row("Ảnh quang học:",       rgb_filename or "Không khớp ảnh")
-
-            pdf.ln(5)
-
+        # Dọn dẹp thư mục tạm
         try:
             shutil.rmtree(temp_dir)
         except Exception:
             pass
 
-
-        pdf.output(output_path)
         return output_path
