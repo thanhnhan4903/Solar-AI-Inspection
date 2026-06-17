@@ -98,12 +98,32 @@ class ReportGenerator:
             except Exception:
                 pass
 
+        scope_str = batch.scope if (batch and batch.scope) else "Chưa xác định"
+        system_capacity = "Chưa xác định"
+        supervisor = "Chưa xác định"
+        notes = "Không có ghi chú"
+        data_type = "UAV thermal image"
+        ai_model = "YOLOv8-Solar-M300"
+        system_version = "O&M Suite v2.4"
+
+        if scope_str and scope_str.startswith("{"):
+            try:
+                scope_data = json.loads(scope_str)
+                scope_str = scope_data.get("s", "Chưa xác định") or "Chưa xác định"
+                system_capacity = scope_data.get("sc", "Chưa xác định") or "Chưa xác định"
+                supervisor = scope_data.get("sv", "Chưa xác định") or "Chưa xác định"
+                notes = scope_data.get("nt", "Không có ghi chú") or "Không có ghi chú"
+                data_type = scope_data.get("dt", "UAV thermal image") or "UAV thermal image"
+                ai_model = scope_data.get("am", "YOLOv8-Solar-M300") or "YOLOv8-Solar-M300"
+                system_version = scope_data.get("sys", "O&M Suite v2.4") or "O&M Suite v2.4"
+            except Exception:
+                pass
+
         project_name = batch.project_name if (batch and batch.project_name) else "Dự án kiểm tra điện mặt trời"
         location     = batch.location    if (batch and batch.location)     else "Chưa xác định"
         scan_time    = batch.scan_time   if (batch and batch.scan_time)    else datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         operator     = batch.operator    if (batch and batch.operator)     else "Đội ngũ kỹ thuật vận hành EPC Solar"
         device       = batch.device      if (batch and batch.device)       else "DJI Matrice 300 RTK + Zenmuse H20T"
-        scope        = batch.scope       if (batch and batch.scope)        else "Chưa xác định"
         panel_power  = batch.panel_power if (batch and batch.panel_power)  else 600.0
 
         pdf = CustomPDF()
@@ -134,7 +154,7 @@ class ReportGenerator:
         # Hộp thông tin căn giữa theo lề mới
         pdf.set_fill_color(248, 250, 252)
         pdf.set_draw_color(226, 232, 240)
-        pdf.rect(35, 110, 155, 95, "DF")
+        pdf.rect(35, 95, 155, 135, "DF")
 
         metadata_fields = [
             ("Tên dự án:",       project_name),
@@ -142,20 +162,26 @@ class ReportGenerator:
             ("Thời gian quét:",  scan_time),
             ("Đơn vị thực hiện:", operator),
             ("Thiết bị bay:",    device),
-            ("Phạm vi quét:",    scope),
+            ("Phạm vi quét:",    scope_str),
             ("Công suất tấm pin:", f"{panel_power} W"),
+            ("Công suất hệ thống:", system_capacity),
+            ("Người phụ trách:", supervisor),
+            ("Loại dữ liệu:",    data_type),
+            ("Model AI sử dụng:", ai_model),
+            ("Phiên bản hệ thống:", system_version),
+            ("Ghi chú:",         notes),
         ]
 
-        y_offset = 115
+        y_offset = 98
         for label, val in metadata_fields:
             pdf.set_xy(42, y_offset)
-            pdf._f("B", 11)
+            pdf._f("B", 10)
             pdf.set_text_color(71, 85, 105)
-            pdf.cell(45, 7, safe(label))
-            pdf._f("", 11)
+            pdf.cell(45, 6, safe(label))
+            pdf._f("", 10)
             pdf.set_text_color(15, 23, 42)
-            pdf.cell(100, 7, safe(str(val)), new_x="LMARGIN", new_y="NEXT")
-            y_offset += 10
+            pdf.cell(100, 6, safe(str(val)), new_x="LMARGIN", new_y="NEXT")
+            y_offset += 9
 
         pdf.set_xy(0, 255)
         pdf._f("I", 10)
@@ -227,7 +253,6 @@ class ReportGenerator:
             "hotspot_single_cell": 0,
             "hotspot_multi_cell": 0,
             "shading": 0,
-            "soiling": 0,
             "crack": 0
         }
 
@@ -240,12 +265,17 @@ class ReportGenerator:
                     try:
                         panel_detail = json.loads(p.defect_type)
                         review_status = panel_detail.get("review_status", "unreviewed")
-                        include_in_report = panel_detail.get("include_in_report", True)
-                        # false_positive hoặc include_in_report=False → không tính vào báo cáo chính
+                        if review_status == "false_positive":
+                            include_in_report = False
+                        elif review_status in ["confirmed_defect", "needs_review", "unreviewed"]:
+                            include_in_report = True
+                        else:
+                            include_in_report = panel_detail.get("include_in_report", True)
+
                         if review_status == "false_positive" or include_in_report is False:
                             is_faulty = False
-                        elif panel_detail.get("status") == "faulty":
-                            is_faulty = True
+                        else:
+                            is_faulty = len(panel_detail.get("defects", [])) > 0
                     except Exception:
                         pass
                 elif p.defect_type != "Healthy":
@@ -272,8 +302,15 @@ class ReportGenerator:
                 total_power_loss_w += panel_detail.get("total_panel_loss", 0.0)
                 for d in panel_detail.get("defects", []):
                     cname = d.get("class_name", "")
-                    if cname in stats_defects:
-                        stats_defects[cname] += 1
+                    cname_lower = cname.lower() if isinstance(cname, str) else str(cname).lower()
+                    if "hotspot_single" in cname_lower or "single_cell" in cname_lower or "single-cell" in cname_lower:
+                        stats_defects["hotspot_single_cell"] += 1
+                    elif "hotspot_multi" in cname_lower or "multi_cell" in cname_lower or "multicell" in cname_lower or "multi-cell" in cname_lower:
+                        stats_defects["hotspot_multi_cell"] += 1
+                    elif "crack" in cname_lower or "nut" in cname_lower:
+                        stats_defects["crack"] += 1
+                    elif any(k in cname_lower for k in ["shading", "shadow", "shade", "soil", "soiling", "dirt"]):
+                        stats_defects["shading"] += 1
             else:
                 healthy_count += 1
 
@@ -335,40 +372,37 @@ class ReportGenerator:
         pdf.set_xy(35, 172)
         pdf._f("B", 16)
         pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, "2. Phân tích phân bổ các loại lỗi", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 10, "2. Phân loại lỗi phát hiện", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(3)
 
         pdf.set_fill_color(15, 23, 42)
         pdf.set_text_color(255, 255, 255)
         pdf._f("B", 12)
-        pdf.cell(60, 8.5, "Loại lỗi", border=1, align="L", fill=True)
-        pdf.cell(45, 8.5, "Thuật ngữ tiếng Anh", border=1, align="C", fill=True)
-        pdf.cell(25, 8.5, "Số lượng", border=1, align="C", fill=True)
-        pdf.cell(25, 8.5, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(75, 8.5, "Loại lỗi", border=1, align="L", fill=True)
+        pdf.cell(30, 8.5, "Số lượng", border=1, align="C", fill=True)
+        pdf.cell(50, 8.5, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
 
         pdf.set_text_color(15, 23, 42)
         pdf._f("", 12)
 
         defect_mapping_list = [
-            ("hotspot_single_cell", "Hotspot single cell", "Hotspot single cell", stats_defects["hotspot_single_cell"]),
-            ("hotspot_multi_cell",  "Hotspot multi cell",  "Hotspot multi cell",  stats_defects["hotspot_multi_cell"]),
-            ("shading",             "Shading",             "Shading",             stats_defects["shading"]),
-            ("soiling",             "Soiling",             "Soiling",             stats_defects["soiling"]),
-            ("crack",               "Crack",               "Crack",               stats_defects["crack"]),
+            ("hotspot_single_cell", "hotspot_single_cell", stats_defects.get("hotspot_single_cell", 0)),
+            ("hotspot_multi_cell",  "hotspot_multi_cell",  stats_defects.get("hotspot_multi_cell", 0)),
+            ("crack",               "crack",               stats_defects.get("crack", 0)),
+            ("shading",             "shading",             stats_defects.get("shading", 0)),
         ]
 
         sum_defects = sum(stats_defects.values())
 
-        for index, (key, vi_name, en_name, count) in enumerate(defect_mapping_list):
+        for index, (key, label_name, count) in enumerate(defect_mapping_list):
             if index % 2 == 0:
                 pdf.set_fill_color(248, 250, 252)
             else:
                 pdf.set_fill_color(255, 255, 255)
             ratio = round(count / sum_defects * 100, 1) if sum_defects > 0 else 0.0
-            pdf.cell(60, 8.5, f" {vi_name}", border=1, align="L", fill=True)
-            pdf.cell(45, 8.5, en_name, border=1, align="C", fill=True)
-            pdf.cell(25, 8.5, str(count), border=1, align="C", fill=True)
-            pdf.cell(25, 8.5, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(75, 8.5, f" {label_name}", border=1, align="L", fill=True)
+            pdf.cell(30, 8.5, str(count), border=1, align="C", fill=True)
+            pdf.cell(50, 8.5, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
 
         # ─────────────────────────────────────────
         # PHẦN 3: DANH SÁCH CHI TIẾT CÁC LỖI
@@ -419,8 +453,8 @@ class ReportGenerator:
         }
 
         for idx, (p, p_detail) in enumerate(faulty_panels):
-            # Mỗi khối cần khoảng 100mm chiều cao, nếu không đủ thì ngắt trang tự động
-            if pdf.get_y() > 180:
+            # Mỗi khối cần khoảng 115mm chiều cao bao gồm O&M block, nếu không đủ thì ngắt trang tự động
+            if pdf.get_y() > 160:
               pdf.add_page()
 
             pdf._f("B", 13)
@@ -445,6 +479,64 @@ class ReportGenerator:
                 f" Anomalous Panel {local_id} (Row {row}, Col {col}) | GPS: {lat}, {lng}",
                 border=1, align="L", fill=True, new_x="LMARGIN", new_y="NEXT"
             )
+
+            # Lấy thông tin O&M duyệt lỗi
+            status_val = p_detail.get("review_status", "unreviewed")
+            status_label = {
+                "unreviewed": "Chưa duyệt",
+                "confirmed_defect": "Đã xác nhận",
+                "needs_review": "Cần kiểm tra lại",
+                "false_positive": "Bỏ qua"
+            }.get(status_val, "Chưa duyệt")
+
+            priority_val = p_detail.get("maintenance_priority", "medium")
+            priority_label = {
+                "low": "Thấp",
+                "medium": "Trung bình",
+                "high": "Cao",
+                "urgent": "Khẩn cấp"
+            }.get(priority_val, "Trung bình")
+
+            reviewer = p_detail.get("reviewer_name") or "Chưa cập nhật"
+            reviewed_at = p_detail.get("reviewed_at") or "Chưa cập nhật"
+            notes = p_detail.get("review_note") or "Không có ghi chú"
+
+            pdf.ln(2)
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.write(5, "Trạng thái duyệt: ")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.write(5, f"{status_label}  |  ")
+
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.write(5, "Ưu tiên xử lý: ")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.write(5, f"{priority_label}  |  ")
+
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.write(5, "Người duyệt: ")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.write(5, f"{reviewer}  |  ")
+
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.write(5, "Thời gian duyệt: ")
+            pdf._f("", 10)
+            pdf.set_text_color(15, 23, 42)
+            pdf.write(5, f"{reviewed_at}\n")
+
+            pdf._f("B", 10)
+            pdf.set_text_color(71, 85, 105)
+            pdf.write(5, "Ghi chú kỹ sư: ")
+            pdf._f("", 10)
+            pdf.set_text_color(51, 65, 85)
+            pdf.write(5, f"{notes}\n")
+            pdf.ln(2)
 
             pdf._f("", 12)
             pdf.set_text_color(51, 65, 85)
@@ -536,11 +628,11 @@ class ReportGenerator:
                 pdf.set_xy(35, image_y + 30.5)
                 pdf._f("I", 8)
                 pdf.set_text_color(0, 0, 0)
-                pdf.cell(73, 4, "Ảnh nhiệt (Có nhãn)", align="C")
+                pdf.cell(73, 4, "Ảnh nhiệt đã chú thích", align="C")
                 # RGB image label frame
                 pdf.rect(116, image_y + 30.5, 73, 5, style='D')
                 pdf.set_xy(116, image_y + 30.5)
-                pdf.cell(73, 4, "Ảnh quang học (RGB)", align="C", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(73, 4, "Ảnh RGB / ảnh bối cảnh", align="C", new_x="LMARGIN", new_y="NEXT")
                 
                 # Dịch chuyển y xuống dưới ảnh + nhãn
                 pdf.set_y(image_y + 36)
@@ -629,33 +721,49 @@ class ReportGenerator:
 
             pdf._f("", 10)
             for d in defects:
+                raw_cname = d.get("class_name", "") or d.get("type", "")
+                cname_lower = raw_cname.lower() if isinstance(raw_cname, str) else str(raw_cname).lower()
+                
+                if "hotspot_single" in cname_lower or "single_cell" in cname_lower or "single-cell" in cname_lower:
+                    defect_name = "hotspot_single_cell"
+                elif "hotspot_multi" in cname_lower or "multi_cell" in cname_lower or "multicell" in cname_lower or "multi-cell" in cname_lower:
+                    defect_name = "hotspot_multi_cell"
+                elif "crack" in cname_lower or "nut" in cname_lower:
+                    defect_name = "crack"
+                elif any(k in cname_lower for k in ["shading", "shadow", "shade", "soil", "soiling", "dirt"]):
+                    defect_name = "shading"
+                else:
+                    defect_name = raw_cname
 
-                defect_name = VI_DEFECT_MAP.get(
-                    d.get("class_name", ""),
-                    d.get("class_name", "")
-                )
-
-                confidence = f"{round(d.get('confidence',0)*100,1)}%"
+                conf_val = d.get("confidence")
+                if conf_val is not None:
+                    confidence = f"YOLO: {round(conf_val * 100, 1)}%"
+                else:
+                    confidence = "YOLO: Chưa có dữ liệu"
 
                 severity = VI_SEVERITY_MAP.get(
-                    d.get("severity","minor"),
+                    d.get("severity", "minor"),
                     "Nhẹ"
                 )
 
                 power_loss = f"{loss:.1f} W"
 
-                location = d.get(
-                    "location_in_panel",
-                    "center"
-                )
+                area_ratio = d.get("area_ratio_percent")
+                if area_ratio is not None:
+                    area_ratio_text = f"Tỷ lệ: {round(area_ratio, 2)}%"
+                else:
+                    area_ratio_text = "Tỷ lệ: Chưa có dữ liệu"
+
+                loc_val = d.get("location_in_panel", "center")
+                location = VI_LOC_MAP.get(loc_val, loc_val)
 
                 u = round(
-                    d.get("relative_position", {}).get("u", 0.5),
+                    d.get("relative_position", {}).get("u", 0.5) if d.get("relative_position") else 0.5,
                     2
                 )
 
                 v = round(
-                    d.get("relative_position", {}).get("v", 0.5),
+                    d.get("relative_position", {}).get("v", 0.5) if d.get("relative_position") else 0.5,
                     2
                 )
 
@@ -668,7 +776,7 @@ class ReportGenerator:
                     pdf,
                     [
                         defect_name,
-                        f"{severity}\n{confidence}",
+                        f"{severity}\n{confidence}\n{area_ratio_text}",
                         power_loss,
                         location_text
                     ]

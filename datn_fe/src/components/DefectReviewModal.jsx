@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
     X, ChevronLeft, ChevronRight, Check, AlertTriangle, AlertCircle, Trash2, Save
 } from 'lucide-react';
-import api from '../api';
+import api, { fetchReviewItems, updateReviewItem, syncReview } from '../api';
 
 export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh }) {
     const [items, setItems] = useState([]);
@@ -14,6 +14,9 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
     // Form fields for current item
     const [selectedStatus, setSelectedStatus] = useState('unreviewed');
     const [reviewNote, setReviewNote] = useState('');
+    const [maintenancePriority, setMaintenancePriority] = useState('medium');
+    const [reviewerName, setReviewerName] = useState('');
+    const [reviewedAt, setReviewedAt] = useState('');
 
     // Sync state
     const [syncing, setSyncing] = useState(false);
@@ -24,7 +27,7 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
         if (isOpen && batchId) {
             setLoading(true);
             setHasFetchError(false);
-            api.get(`/review/items?batch_id=${batchId}`)
+            fetchReviewItems(batchId)
                 .then(res => {
                     const fetchedItems = res.data.items || [];
                     setItems(fetchedItems);
@@ -32,6 +35,9 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                     if (fetchedItems.length > 0) {
                         setSelectedStatus(fetchedItems[0].review_status || 'unreviewed');
                         setReviewNote(fetchedItems[0].review_note || '');
+                        setMaintenancePriority(fetchedItems[0].maintenance_priority || 'medium');
+                        setReviewerName(fetchedItems[0].reviewer_name || '');
+                        setReviewedAt(fetchedItems[0].reviewed_at || '');
                     }
                     setLoading(false);
                 })
@@ -65,6 +71,9 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                 }
             }
             setReviewNote(currentItem.review_note || '');
+            setMaintenancePriority(currentItem.maintenance_priority || 'medium');
+            setReviewerName(currentItem.reviewer_name || '');
+            setReviewedAt(currentItem.reviewed_at || '');
         }
     }, [currentIndex, items]);
 
@@ -74,11 +83,21 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
         if (items.length === 0) return;
         const currentItem = items[currentIndex];
         
+        let currentTimestamp = reviewedAt;
+        if (selectedStatus !== 'unreviewed' && !currentTimestamp) {
+            currentTimestamp = new Date().toLocaleString('vi-VN');
+        } else if (selectedStatus === 'unreviewed') {
+            currentTimestamp = '';
+        }
+        
         setSaving(true);
         try {
-            await api.post(`/review/items/${currentItem.review_item_id}`, {
+            await updateReviewItem(currentItem.review_item_id, {
                 review_status: selectedStatus,
-                review_note: reviewNote
+                review_note: reviewNote,
+                maintenance_priority: maintenancePriority,
+                reviewer_name: reviewerName || 'Chưa cập nhật',
+                reviewed_at: currentTimestamp
             });
             
             // Update local items array
@@ -86,9 +105,13 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
             updatedItems[currentIndex] = {
                 ...currentItem,
                 review_status: selectedStatus,
-                review_note: reviewNote
+                review_note: reviewNote,
+                maintenance_priority: maintenancePriority,
+                reviewer_name: reviewerName || 'Chưa cập nhật',
+                reviewed_at: currentTimestamp
             };
             setItems(updatedItems);
+            setReviewedAt(currentTimestamp);
             
             if (!silent) {
                 // Trigger global refresh so map & sidebar counters update
@@ -133,7 +156,7 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
             await handleSave(true);
 
             // 2. Gọi backend sync
-            await api.post('/review/sync', { batch_id: batchId });
+            await syncReview(batchId);
 
             // 3. Dispatch event để refresh tất cả trang
             window.dispatchEvent(new Event('review-sync-completed'));
@@ -403,7 +426,7 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                         ĐÁNH GIÁ THỦ CÔNG (CHỌN 1 TRẠNG THÁI)
                                     </div>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                        {/* Đúng có lỗi */}
+                                        {/* Đã xác nhận */}
                                         <button 
                                             onClick={() => setSelectedStatus('confirmed_defect')}
                                             style={{
@@ -418,14 +441,14 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                                 <AlertCircle size={16} style={{ color: '#ef4444' }} />
                                                 <div>
-                                                    <div style={{ fontWeight: 600, fontSize: 14 }}>Đúng có lỗi</div>
+                                                    <div style={{ fontWeight: 600, fontSize: 14 }}>Đã xác nhận</div>
                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>Xác nhận tấm pin có bất thường nhiệt này</div>
                                                 </div>
                                             </div>
                                             {selectedStatus === 'confirmed_defect' && <Check size={16} style={{ color: '#ef4444' }} />}
                                         </button>
 
-                                        {/* Xem xét */}
+                                        {/* Cần kiểm tra lại */}
                                         <button 
                                             onClick={() => setSelectedStatus('needs_review')}
                                             style={{
@@ -440,14 +463,14 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                                 <AlertTriangle size={16} style={{ color: '#f59e0b' }} />
                                                 <div>
-                                                    <div style={{ fontWeight: 600, fontSize: 14 }}>Xem xét</div>
+                                                    <div style={{ fontWeight: 600, fontSize: 14 }}>Cần kiểm tra lại</div>
                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>Cần khảo sát hiện trường thực tế để xác nhận</div>
                                                 </div>
                                             </div>
                                             {selectedStatus === 'needs_review' && <Check size={16} style={{ color: '#f59e0b' }} />}
                                         </button>
 
-                                        {/* Không phải lỗi */}
+                                        {/* Bỏ qua */}
                                         <button 
                                             onClick={() => setSelectedStatus('false_positive')}
                                             style={{
@@ -462,12 +485,51 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                                 <Trash2 size={16} style={{ color: '#94a3b8' }} />
                                                 <div>
-                                                    <div style={{ fontWeight: 600, fontSize: 14 }}>Không phải lỗi (False Positive)</div>
+                                                    <div style={{ fontWeight: 600, fontSize: 14 }}>Bỏ qua (False Positive)</div>
                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>AI nhận nhầm (phản xạ nhiệt, bụi bẩn, bóng che...)</div>
                                                 </div>
                                             </div>
                                             {selectedStatus === 'false_positive' && <Check size={16} style={{ color: '#94a3b8' }} />}
                                         </button>
+                                    </div>
+                                </div>
+
+                                {/* O&M fields: Priority & Reviewer */}
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                                    <div>
+                                        <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
+                                            ƯU TIÊN XỬ LÝ
+                                        </label>
+                                        <select
+                                            value={maintenancePriority}
+                                            onChange={(e) => setMaintenancePriority(e.target.value)}
+                                            style={{
+                                                width: '100%', backgroundColor: '#1e293b',
+                                                border: '1px solid #334155', borderRadius: 12, padding: '10px 14px',
+                                                color: '#cbd5e1', fontSize: 13, outline: 'none'
+                                            }}
+                                        >
+                                            <option value="low">Thấp</option>
+                                            <option value="medium">Trung bình</option>
+                                            <option value="high">Cao</option>
+                                            <option value="urgent">Khẩn cấp</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
+                                            NGƯỜI DUYỆT
+                                        </label>
+                                        <input 
+                                            type="text"
+                                            value={reviewerName}
+                                            onChange={(e) => setReviewerName(e.target.value)}
+                                            placeholder="Tên kỹ sư duyệt"
+                                            style={{
+                                                width: '100%', backgroundColor: '#1e293b',
+                                                border: '1px solid #334155', borderRadius: 12, padding: '10px 14px',
+                                                color: '#cbd5e1', fontSize: 13, outline: 'none', boxSizing: 'border-box'
+                                            }}
+                                        />
                                     </div>
                                 </div>
 

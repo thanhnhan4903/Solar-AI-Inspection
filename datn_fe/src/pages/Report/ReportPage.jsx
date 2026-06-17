@@ -1,10 +1,12 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { AlertTriangle, Zap, Download, LayoutGrid, ShieldAlert, Award, MapPin, Eye, Percent, CheckCircle } from "lucide-react";
 import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { KpiCard } from "../../components/ui/KpiCard";
 import { SolarCard, CardHeader } from "../../components/ui/SolarCard";
 import { ActionButton } from "../../components/ui/ActionButton";
+import { downloadReportUrl } from "../../api";
+import { normalizePanel, computeInspectionSummary } from "../../utils/inspectionData";
 
 const DEFECT_NAME_MAP = {
     "hotspot_single_cell": "Điểm nóng đơn cell (Single Hotspot)",
@@ -57,49 +59,64 @@ const REVIEW_STATUS_LABEL = {
 export default function ReportPage({ data, batchId }) {
     const [isDownloading, setIsDownloading] = useState(false);
 
-    // 1. Lọc tất cả tấm pin
-    const allPanels = data?.flatMap(img => img.panels.map(p => ({ ...p, imageFilename: img.filename, rgbImage: img.rgb_image }))) || [];
-    // Loại false_positive ra khỏi danh sách lỗi chính
-    const faultyPanels = allPanels.filter(p =>
-        (p.status === "faulty" || p.total_panel_loss > 0) &&
-        p.review_status !== "false_positive" &&
-        p.include_in_report !== false
-    );
-    const totalPanels = allPanels.length;
-    const totalFaults = faultyPanels.length;
+    useEffect(() => {
+        const handler = () => {
+            console.log("Review synced, ReportPage updated via props");
+        };
+        window.addEventListener("review-sync-completed", handler);
+        return () => window.removeEventListener("review-sync-completed", handler);
+    }, []);
 
-    // Tính tổng công suất hao hụt (W) - chỉ tính panel hợp lệ (không phải false_positive)
-    const totalPowerLossW = faultyPanels.reduce((sum, p) => sum + (p.total_panel_loss || 0), 0);
+    // 1. Lọc tất cả tấm pin và chuẩn hóa
+    const allPanels = data?.flatMap(img => (img.panels || []).map(p => {
+        const normalizedP = normalizePanel(p);
+        return {
+            ...normalizedP,
+            imageFilename: img.filename,
+            rgbImage: img.rgb_image
+        };
+    })) || [];
 
-    // Tỉ lệ sức khỏe (%)
-    const healthRate = totalPanels > 0 ? ((totalPanels - totalFaults) / totalPanels * 100).toFixed(1) : "100.0";
+    const summary = computeInspectionSummary(data || []);
+    const totalPanels = summary.total_panels;
+    const totalFaults = summary.faulty_panels;
+    const totalPowerLossW = summary.total_power_loss_w;
+    const healthRate = summary.normal_panel_ratio_percent.toFixed(1);
 
-    // 2. Thống kê 5 loại lỗi - chỉ từ panel hợp lệ
+    const faultyPanels = allPanels.filter(p => p.status === "faulty");
+
+    // 2. Thống kê 4 loại lỗi - chỉ từ panel hợp lệ
     const stats = {
         "hotspot_single_cell": 0,
         "hotspot_multi_cell": 0,
-        "shading": 0,
-        "soiling": 0,
-        "crack": 0
+        "crack": 0,
+        "shading": 0
     };
 
     faultyPanels.forEach(p => {
         if (p.defects) {
             p.defects.forEach(d => {
-                const cname = d.class_name || d.type || "";
-                if (stats[cname] !== undefined) {
-                    stats[cname]++;
+                const cname = (d.class_name || d.type || "").toLowerCase();
+                if (cname.includes("single")) {
+                    stats["hotspot_single_cell"]++;
+                } else if (cname.includes("multi")) {
+                    stats["hotspot_multi_cell"]++;
+                } else if (cname.includes("crack")) {
+                    stats["crack"]++;
+                } else if (cname.includes("shading") || cname.includes("soil") || cname.includes("soiling") || cname.includes("dirt") || cname.includes("shade") || cname.includes("shadow")) {
+                    stats["shading"]++;
+                } else {
+                    stats["shading"]++; // fallback
                 }
             });
         }
     });
 
     const defectRows = [
-        { label: "Điểm nóng đơn cell", key: "hotspot_single_cell", value: stats.hotspot_single_cell, color: colors.danger },
-        { label: "Điểm nóng đa cụm", key: "hotspot_multi_cell", value: stats.hotspot_multi_cell, color: "#dc2626" },
-        { label: "Bóng che khuất", key: "shading", value: stats.shading, color: "#06b6d4" },
-        { label: "Bụi bẩn bám tụ", key: "soiling", value: stats.soiling, color: colors.warning },
-        { label: "Vết nứt vật lý", key: "crack", value: stats.crack, color: "#a855f7" },
+        { label: "hotspot_single_cell", key: "hotspot_single_cell", value: stats.hotspot_single_cell, color: colors.danger },
+        { label: "hotspot_multi_cell", key: "hotspot_multi_cell", value: stats.hotspot_multi_cell, color: "#dc2626" },
+        { label: "crack", key: "crack", value: stats.crack, color: "#a855f7" },
+        { label: "shading", key: "shading", value: stats.shading, color: "#06b6d4" },
     ];
 
     const sumDefects = Object.values(stats).reduce((a, b) => a + b, 0);
@@ -108,8 +125,7 @@ export default function ReportPage({ data, batchId }) {
         if (!batchId) return alert("Vui lòng tải ảnh drone và chạy phân tích AI ở Trang chủ trước!");
         setIsDownloading(true);
         try {
-            // Chạy hiệu ứng tải xuống cao cấp
-            window.open(`http://127.0.0.1:8000/api/v1/download-report/${batchId}`, "_blank");
+            window.open(downloadReportUrl(batchId), "_blank");
         } catch (error) {
             console.error(error);
         } finally {
@@ -173,9 +189,9 @@ export default function ReportPage({ data, batchId }) {
                 />
             </div>
 
-            {/* Phân loại 5 nhóm lỗi */}
+            {/* Phân loại lỗi phát hiện */}
             <SolarCard style={{ marginBottom: 24, borderRadius: 16, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)", border: "1px solid #f1f5f9" }}>
-                <CardHeader title="Phân Loại Chi Tiết 5 Nhóm Lỗi (AI Classification)" />
+                <CardHeader title="Phân loại lỗi phát hiện (AI Classification)" />
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, padding: "0 24px 24px" }}>
                     {/* Danh sách lỗi dạng progress bar */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -313,8 +329,8 @@ export default function ReportPage({ data, batchId }) {
                                                     <span style={{ fontSize: 16, fontWeight: 700, color: colors.danger }}>{p.total_panel_loss} W</span>
                                                 </div>
                                                 <div style={{ background: "#f8fafc", borderRadius: 8, padding: "10px 14px", border: "1px solid #f1f5f9" }}>
-                                                    <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, display: "block", textTransform: "uppercase" }}>Độ tin cậy AI</span>
-                                                    <span style={{ fontSize: 16, fontWeight: 700, color: "#0ea5e9" }}>{((p.confidence || 0) * 100).toFixed(0)}%</span>
+                                                    <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, display: "block", textTransform: "uppercase" }}>Độ tin cậy YOLO (Panel)</span>
+                                                    <span style={{ fontSize: 16, fontWeight: 700, color: "#0ea5e9" }}>{p.confidence != null ? `${(p.confidence * 100).toFixed(1)}%` : "Chưa có dữ liệu"}</span>
                                                 </div>
                                             </div>
 
@@ -324,8 +340,18 @@ export default function ReportPage({ data, batchId }) {
                                                     {p.defects?.map((d, di) => (
                                                         <div key={di} style={{ borderBottom: di < p.defects.length - 1 ? "1px solid #e2e8f0" : "none", paddingBottom: 6 }}>
                                                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                                                                <span style={{ fontSize: 13, fontWeight: 700, color: "#1e293b" }}>{DEFECT_NAME_MAP[d.class_name] || d.class_name || d.type}</span>
-                                                                <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>AI: {((d.confidence || 0) * 100).toFixed(0)}%</span>
+                                                                {(() => {
+                                                                    const cname = (d.class_name || d.type || "").toLowerCase();
+                                                                    let displayName = "shading";
+                                                                    if (cname.includes("single")) displayName = "hotspot_single_cell";
+                                                                    else if (cname.includes("multi")) displayName = "hotspot_multi_cell";
+                                                                    else if (cname.includes("crack")) displayName = "crack";
+                                                                    else if (cname.includes("shading") || cname.includes("soil") || cname.includes("soiling") || cname.includes("dirt") || cname.includes("shade") || cname.includes("shadow")) displayName = "shading";
+                                                                    return <span style={{ fontSize: 13, fontWeight: 700, color: "#1e293b" }}>{displayName}</span>;
+                                                                })()}
+                                                                <span style={{ fontSize: 12, fontWeight: 600, color: "#64748b" }}>
+                                                                    Độ tin cậy YOLO: {d.confidence != null ? `${(d.confidence * 100).toFixed(1)}%` : "Chưa có dữ liệu"}
+                                                                </span>
                                                             </div>
                                                             <div style={{ display: "flex", gap: 12, fontSize: 12, color: "#64748b", marginTop: 2 }}>
                                                                 <span>Vị trí trong tấm: <b style={{ color: "#3b82f6" }}>{LOCATION_MAP[d.location_in_panel] || d.location_in_panel}</b></span>
@@ -350,7 +376,7 @@ export default function ReportPage({ data, batchId }) {
                                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                                                 {/* Ảnh nhiệt Crop */}
                                                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                                    <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", textAlign: "center" }}>Ảnh Nhiệt (Annotated)</span>
+                                                    <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", textAlign: "center" }}>Ảnh nhiệt đã chú thích</span>
                                                     <div style={{ border: "2px solid #fee2e2", borderRadius: 8, overflow: "hidden", aspectRatio: "5/4", background: "#000" }}>
                                                         {hasBbox ? (
                                                             <img 
@@ -367,7 +393,7 @@ export default function ReportPage({ data, batchId }) {
 
                                                 {/* Ảnh RGB Crop */}
                                                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                                    <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", textAlign: "center" }}>Ảnh Quang Học (RGB)</span>
+                                                    <span style={{ fontSize: 11, fontWeight: 600, color: "#64748b", textTransform: "uppercase", textAlign: "center" }}>Ảnh RGB / ảnh bối cảnh</span>
                                                     <div style={{ border: "2px solid #dcfce7", borderRadius: 8, overflow: "hidden", aspectRatio: "5/4", background: "#000" }}>
                                                         {hasBbox && p.rgbImage ? (
                                                             <img 

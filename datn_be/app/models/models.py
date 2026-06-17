@@ -26,7 +26,7 @@ class UploadBatch(Base):
     scan_time = Column(String(255), nullable=True)
     operator = Column(String(255), nullable=True)
     device = Column(String(255), nullable=True)
-    scope = Column(String(255), nullable=True)
+    scope = Column(Text, nullable=True)
     panel_power = Column(Float, default=600.0)
     
     user = relationship("User", back_populates="batches")

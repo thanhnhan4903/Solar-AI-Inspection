@@ -24,7 +24,18 @@ import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { KpiCard } from "../../components/ui/KpiCard";
 import { ActionButton } from "../../components/ui/ActionButton";
-import axios from "axios";
+import { 
+    fetchLatestBatch, 
+    analyzeAll, 
+    getAnalyzeProgress, 
+    uploadDroneData, 
+    processThermal, 
+    updateBatchMetadata, 
+    reanalyze, 
+    resetSystem, 
+    updateAiModel 
+} from "../../api";
+import { computeInspectionSummary } from "../../utils/inspectionData";
 import solarFarmAerial from "../../assets/solar_farm_aerial.png";
 
 const API = "http://127.0.0.1:8000";
@@ -90,71 +101,36 @@ function AnomalyBarChart({ data }) {
     );
 }
 
+const formatPercent = (value) => {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n)) return "0.00%";
+    return `${n.toFixed(2)}%`;
+};
+
 // ─────────────────────────────────────────
 // AI Progress Modal
 // ─────────────────────────────────────────
-function AIProgressModal({ onComplete, onFailed }) {
-    const [progress, setProgress] = useState({ current: 0, total: 0, filename: "", step: "Khởi động...", done: false, running: false });
-    const [startTime] = useState(Date.now());
-    const [elapsedSeconds, setElapsedSeconds] = useState(0);
-
-    const hasStartedRef = useRef(false);
-    const elapsedSecondsRef = useRef(0);
-    elapsedSecondsRef.current = elapsedSeconds;
-
-    React.useEffect(() => {
-        const timer = setInterval(() => {
-            setElapsedSeconds(Math.round((Date.now() - startTime) / 1000));
-        }, 1000);
-        return () => clearInterval(timer);
-    }, [startTime]);
-
-    React.useEffect(() => {
-        const interval = setInterval(async () => {
-            try {
-                const res = await axios.get(`${API}/api/v1/analyze-progress`);
-                setProgress(res.data);
-                
-                if (res.data.running) {
-                    hasStartedRef.current = true;
-                }
-
-                if (res.data.done && !res.data.running) {
-                    if (hasStartedRef.current || elapsedSecondsRef.current > 5) {
-                        clearInterval(interval);
-                        if (res.data.step && res.data.step.startsWith("Thất bại")) {
-                            if (onFailed) onFailed(res.data.step);
-                        } else {
-                            if (onComplete) onComplete();
-                        }
-                    }
-                }
-            } catch (_) {}
-        }, 2000);
-        return () => clearInterval(interval);
-    }, [onComplete, onFailed]);
-
-    const pct = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+function AIProgressModal({ progress, onClose }) {
+    const pct = progress.percent;
 
     // Tính toán thời gian chờ đợi còn lại (ETA) chuyên nghiệp và ổn định
     let etaText = "Đang tính...";
-    if (progress.total > 0) {
-        if (progress.current === progress.total) {
-            etaText = progress.done ? "Hoàn tất!" : "Đang hoàn tất lưu trữ...";
-        } else {
-            const timePerImage = progress.current > 0 ? (elapsedSeconds / progress.current) : 5.0;
-            const clampedTime = Math.max(1.5, Math.min(15.0, timePerImage));
-            const remainingImages = progress.total - progress.current;
-            const remainingSeconds = Math.round(clampedTime * remainingImages);
-            
-            if (remainingSeconds <= 0) {
-                etaText = "Sắp hoàn thành...";
-            } else {
-                const m = Math.floor(remainingSeconds / 60);
-                const s = remainingSeconds % 60;
-                etaText = m > 0 ? `${m}m ${s}s` : `${s}s`;
-            }
-        }
+    const { status, percent, etaSeconds } = progress;
+    if (
+        status === "running" &&
+        percent > 5 &&
+        percent < 99 &&
+        etaSeconds !== null &&
+        Number.isFinite(etaSeconds) &&
+        etaSeconds > 0
+    ) {
+        const m = Math.floor(etaSeconds / 60);
+        const s = Math.round(etaSeconds % 60);
+        etaText = m > 0 ? `${m}m ${s}s` : `${s}s`;
+    } else if (status === "completed") {
+        etaText = "Hoàn tất!";
+    } else if (status === "error") {
+        etaText = "Thất bại";
     }
 
     return (
@@ -165,9 +141,11 @@ function AIProgressModal({ onComplete, onFailed }) {
         }}>
             <div style={{
                 background: "linear-gradient(145deg, #0f172a, #1e293b)",
-                border: "1px solid rgba(14,165,233,0.35)",
+                border: progress.status === "error" ? "1px solid rgba(239,68,68,0.35)" : "1px solid rgba(14,165,233,0.35)",
                 borderRadius: 24,
-                boxShadow: "0 0 80px rgba(14,165,233,0.15), 0 30px 60px rgba(0,0,0,0.6)",
+                boxShadow: progress.status === "error"
+                    ? "0 0 80px rgba(239,68,68,0.15), 0 30px 60px rgba(0,0,0,0.6)"
+                    : "0 0 80px rgba(14,165,233,0.15), 0 30px 60px rgba(0,0,0,0.6)",
                 width: "min(520px, 92vw)",
                 padding: "40px 44px",
                 display: "flex", flexDirection: "column", alignItems: "center", gap: 28,
@@ -186,23 +164,23 @@ function AIProgressModal({ onComplete, onFailed }) {
                         />
                         <defs>
                             <linearGradient id="aiGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                                <stop offset="0%" stopColor="#0EA5E9" />
-                                <stop offset="100%" stopColor="#6366F1" />
+                                <stop offset="0%" stopColor={progress.status === "error" ? "#ef4444" : "#0EA5E9"} />
+                                <stop offset="100%" stopColor={progress.status === "error" ? "#b91c1c" : "#6366F1"} />
                             </linearGradient>
                         </defs>
                     </svg>
                     <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <span style={{ fontSize: 15, fontWeight: 800, color: "#0EA5E9" }}>{pct}%</span>
+                        <span style={{ fontSize: 15, fontWeight: 800, color: progress.status === "error" ? "#ef4444" : "#0EA5E9" }}>{formatPercent(pct)}</span>
                     </div>
                 </div>
 
                 {/* Title */}
                 <div style={{ textAlign: "center" }}>
                     <h3 style={{ margin: "0 0 6px 0", color: "#F8FAFC", fontSize: 20, fontWeight: 700, letterSpacing: "-0.3px" }}>
-                        Đang phân tích AI...
+                        {progress.status === "error" ? "Lỗi phân tích AI" : "Đang phân tích AI..."}
                     </h3>
-                    <p style={{ margin: 0, color: "#64748B", fontSize: 13 }}>
-                        {progress.step}
+                    <p style={{ margin: 0, color: progress.status === "error" ? "#ef4444" : "#64748B", fontSize: 13 }}>
+                        {progress.status === "error" ? (progress.error || progress.stage) : progress.stage}
                     </p>
                 </div>
 
@@ -210,9 +188,8 @@ function AIProgressModal({ onComplete, onFailed }) {
                 <div style={{ width: "100%" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                         <span style={{ fontSize: 12, color: "#94A3B8" }}>
-                            {progress.current > 0 ? `Ảnh ${progress.current} / ${progress.total}` : "Chuẩn bị..."}
+                            {progress.totalImages > 0 ? `Ảnh ${progress.processedImages} / ${progress.totalImages}` : "Chuẩn bị..."}
                         </span>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#0EA5E9" }}>{pct}%</span>
                     </div>
                     <div style={{ height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 10, overflow: "hidden", position: "relative" }}>
                         {/* Shimmer bg */}
@@ -225,7 +202,9 @@ function AIProgressModal({ onComplete, onFailed }) {
                         {/* Fill */}
                         <div style={{
                             height: "100%", width: `${pct}%`,
-                            background: "linear-gradient(90deg, #0EA5E9, #6366F1)",
+                            background: progress.status === "error"
+                                ? "linear-gradient(90deg, #ef4444, #b91c1c)"
+                                : "linear-gradient(90deg, #0EA5E9, #6366F1)",
                             borderRadius: 10,
                             transition: "width 0.5s ease",
                             position: "relative",
@@ -234,10 +213,10 @@ function AIProgressModal({ onComplete, onFailed }) {
                     {/* Time metrics */}
                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
                         <span style={{ fontSize: 11, color: "#64748B" }}>
-                            Đã chạy: <b style={{ color: "#CBD5E1" }}>{elapsedSeconds}s</b>
+                            Đã chạy: <b style={{ color: "#CBD5E1" }}>{progress.elapsedSeconds}s</b>
                         </span>
                         <span style={{ fontSize: 11, color: "#64748B" }}>
-                            Còn lại (ước tính): <b style={{ color: "#f59e0b" }}>{etaText}</b>
+                            Còn lại (ước tính): <b style={{ color: progress.status === "error" ? "#ef4444" : "#f59e0b" }}>{etaText}</b>
                         </span>
                     </div>
                 </div>
@@ -245,8 +224,8 @@ function AIProgressModal({ onComplete, onFailed }) {
                 {/* Current file */}
                 {progress.filename && (
                     <div style={{
-                        background: "rgba(14,165,233,0.08)",
-                        border: "1px solid rgba(14,165,233,0.2)",
+                        background: progress.status === "error" ? "rgba(239,68,68,0.08)" : "rgba(14,165,233,0.08)",
+                        border: progress.status === "error" ? "1px solid rgba(239,68,68,0.2)" : "1px solid rgba(14,165,233,0.2)",
                         borderRadius: 10, padding: "10px 18px",
                         width: "100%", boxSizing: "border-box",
                     }}>
@@ -257,6 +236,28 @@ function AIProgressModal({ onComplete, onFailed }) {
                             {progress.filename}
                         </div>
                     </div>
+                )}
+
+                {/* Error Close Button */}
+                {progress.status === "error" && (
+                    <button
+                        onClick={onClose}
+                        style={{
+                            marginTop: 8,
+                            padding: "10px 24px",
+                            borderRadius: 10,
+                            background: "linear-gradient(135deg, #ef4444, #b91c1c)",
+                            border: "none",
+                            color: "#fff",
+                            fontSize: 14,
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            boxShadow: "0 4px 15px rgba(239,68,68,0.4)",
+                            transition: "all 0.2s",
+                        }}
+                    >
+                        Đóng
+                    </button>
                 )}
 
                 <style>{`
@@ -795,6 +796,90 @@ function ProjectMetadataModal({
                             />
                         </div>
                     </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        {/* Công suất hệ thống */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Công suất hệ thống</label>
+                            <input 
+                                type="text" 
+                                value={metadata.systemCapacity || ""} 
+                                onChange={(e) => onChange("systemCapacity", e.target.value)}
+                                placeholder="Ví dụ: 1.2 MWp"
+                                style={inputStyle}
+                            />
+                        </div>
+
+                        {/* Người phụ trách */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Người phụ trách</label>
+                            <input 
+                                type="text" 
+                                value={metadata.supervisor || ""} 
+                                onChange={(e) => onChange("supervisor", e.target.value)}
+                                placeholder="Ví dụ: Nguyễn Văn A"
+                                style={inputStyle}
+                            />
+                        </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        {/* Loại dữ liệu */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Loại dữ liệu</label>
+                            <input 
+                                type="text" 
+                                value={metadata.dataType || ""} 
+                                onChange={(e) => onChange("dataType", e.target.value)}
+                                placeholder="Mặc định: UAV thermal image"
+                                style={inputStyle}
+                            />
+                        </div>
+
+                        {/* Model AI sử dụng */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Model AI sử dụng</label>
+                            <input 
+                                type="text" 
+                                value={metadata.aiModel || ""} 
+                                onChange={(e) => onChange("aiModel", e.target.value)}
+                                placeholder="Mặc định: YOLOv8-Solar-M300"
+                                style={inputStyle}
+                            />
+                        </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                        {/* Phiên bản hệ thống */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Phiên bản hệ thống</label>
+                            <input 
+                                type="text" 
+                                value={metadata.systemVersion || ""} 
+                                onChange={(e) => onChange("systemVersion", e.target.value)}
+                                placeholder="Mặc định: O&M Suite v2.4"
+                                style={inputStyle}
+                            />
+                        </div>
+
+                        {/* Spacer */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }} />
+                    </div>
+
+                    {/* Ghi chú */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Ghi chú</label>
+                        <textarea 
+                            value={metadata.notes || ""} 
+                            onChange={(e) => onChange("notes", e.target.value)}
+                            placeholder="Nhập ghi chú thêm..."
+                            style={{
+                                ...inputStyle,
+                                height: 60,
+                                resize: "none"
+                            }}
+                        />
+                    </div>
                 </div>
 
                 {/* Footer Buttons */}
@@ -847,17 +932,87 @@ const inputStyle = {
     width: "100%"
 };
 
+function computeEtaFallback(elapsedSeconds, percent) {
+    if (!Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0) return null;
+    if (!Number.isFinite(percent) || percent <= 5 || percent >= 99) return null;
+
+    const totalEstimated = elapsedSeconds / (percent / 100);
+    const eta = totalEstimated - elapsedSeconds;
+
+    if (!Number.isFinite(eta) || eta <= 0) return null;
+    return eta;
+}
+
+function normalizeProgress(raw, elapsedSeconds) {
+    const status = raw?.status || (raw?.running ? "running" : "idle");
+
+    const total = Number(raw?.total_images || raw?.total || 0);
+    const processed = Number(raw?.processed_images || raw?.processed || 0);
+
+    let percent = Number(raw?.percent ?? raw?.progress ?? 0);
+
+    if (!Number.isFinite(percent)) percent = 0;
+
+    if (percent <= 1 && percent > 0) {
+        percent = percent * 100;
+    }
+
+    percent = Math.max(0, Math.min(100, percent));
+
+    // Nếu backend báo completed thì UI bắt buộc hiển thị 100%
+    if (status === "completed") {
+        percent = 100;
+    }
+
+    // Nếu backend vẫn running thì không được hiển thị 100%
+    // để tránh cảm giác “xong rồi nhưng còn chạy”
+    if (status === "running" && percent >= 100) {
+        percent = 99;
+    }
+
+    let eta = raw?.eta_seconds ?? null;
+    if (eta === null || !Number.isFinite(eta) || eta <= 0) {
+        eta = computeEtaFallback(elapsedSeconds, percent);
+    }
+
+    return {
+        status,
+        percent,
+        totalImages: total,
+        processedImages: processed,
+        stage: raw?.current_stage || raw?.stage || raw?.message || "Đang xử lý...",
+        message: raw?.message || "",
+        elapsedSeconds: elapsedSeconds,
+        etaSeconds: eta,
+        error: raw?.error || null,
+        filename: raw?.filename || "",
+    };
+}
+
 // ─────────────────────────────────────────
 // Home Page
 // ─────────────────────────────────────────
 export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
     const [isUploading, setIsUploading] = useState(false);
-    const [isRunningAI, setIsRunningAI] = useState(false);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [analysisProgress, setAnalysisProgress] = useState({
+        status: "idle",
+        percent: 0,
+        stage: "Chưa bắt đầu",
+        processedImages: 0,
+        totalImages: 0,
+        elapsedSeconds: 0,
+        etaSeconds: null,
+        message: "",
+        error: null,
+        filename: "",
+    });
     const [isResetting, setIsResetting] = useState(false);
     const [isUpdatingModel, setIsUpdatingModel] = useState(false);
     const [isReanalyzing, setIsReanalyzing] = useState(false);
     const [statusText, setStatusText] = useState("");
     const [qualityData, setQualityData] = useState(null);
+    const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
 
     const [projectMetadata, setProjectMetadata] = useState({
         projectName: "",
@@ -866,7 +1021,13 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
         operator: "",
         device: "",
         scope: "",
-        panelPower: 600
+        panelPower: 600,
+        systemCapacity: "",
+        supervisor: "",
+        notes: "",
+        dataType: "UAV thermal image",
+        aiModel: "YOLOv8-Solar-M300",
+        systemVersion: "O&M Suite v2.4"
     });
     const [showMetadataModal, setShowMetadataModal] = useState(false);
     const [isSavingMetadata, setIsSavingMetadata] = useState(false);
@@ -874,24 +1035,48 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
     const fileInputRef = useRef(null);
     const folderInputRef = useRef(null);
     const modelInputRef = useRef(null);
+    const uploadMenuRef = useRef(null);
 
-    const allPanels = data?.flatMap((img) => img.panels || []) || [];
-    const totalPanels = allPanels.length;
-    // Loại false_positive ra khỏi danh sách lỗi chính (sau khi review sync)
-    const faultyPanels = allPanels.filter((p) =>
-        (p.total_panel_loss > 0 || p.status === "faulty") &&
-        p.review_status !== "false_positive" &&
-        p.include_in_report !== false
-    );
-    const totalFaults = faultyPanels.length;
-    const estimatedLoss = faultyPanels.reduce((sum, p) => sum + Number(p.total_panel_loss || 0), 0);
-    const healthyRate = totalPanels > 0 ? ((totalPanels - totalFaults) / totalPanels) * 100 : 0;
+    const progressTimerRef = useRef(null);
+    const analysisStartTimeRef = useRef(null);
+
+    React.useEffect(() => {
+        return () => {
+            if (progressTimerRef.current) {
+                clearInterval(progressTimerRef.current);
+            }
+        };
+    }, []);
+
+    React.useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target)) {
+                setUploadMenuOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => {
+            document.removeEventListener("mousedown", handleClickOutside);
+        };
+    }, []);
+
+    const summary = computeInspectionSummary(data || []);
+    const totalPanels = summary.total_panels;
+    const totalFaults = summary.faulty_panels;
+    const estimatedLoss = summary.total_power_loss_w;
+    const healthyRate = summary.normal_panel_ratio_percent;
 
     const defectCounts = {};
-    allPanels.forEach((p) => {
-        (p.defects || []).forEach((d) => {
-            const name = (d.class_name || d.type || "unknown").replace(/_/g, " ");
-            defectCounts[name] = (defectCounts[name] || 0) + 1;
+    (data || []).forEach((img) => {
+        (img.panels || []).forEach((p) => {
+            const reviewStatus = p.review_status || "unreviewed";
+            const include = reviewStatus === "false_positive" ? false : (p.include_in_report !== undefined ? p.include_in_report : true);
+            if (include) {
+                (p.defects || []).forEach((d) => {
+                    const name = (d.class_name || d.type || "unknown").replace(/_/g, " ");
+                    defectCounts[name] = (defectCounts[name] || 0) + 1;
+                });
+            }
         });
     });
 
@@ -900,12 +1085,11 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
         .slice(0, 8)
         .map(([label, value]) => ({ label, value }));
 
-    // Tự động tải Metadata khi batchId thay đổi
     React.useEffect(() => {
         const loadMetadata = async () => {
             if (batchId) {
                 try {
-                    const res = await axios.get(`${API}/api/v1/latest-batch`);
+                    const res = await fetchLatestBatch();
                     if (res.data) {
                         setProjectMetadata({
                             projectName: res.data.project_name || "",
@@ -914,7 +1098,13 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                             operator: res.data.operator || "",
                             device: res.data.device || "",
                             scope: res.data.scope || "",
-                            panelPower: res.data.panel_power || 600
+                            panelPower: res.data.panel_power || 600,
+                            systemCapacity: res.data.system_capacity || "",
+                            supervisor: res.data.supervisor || "",
+                            notes: res.data.notes || "",
+                            dataType: res.data.data_type || "UAV thermal image",
+                            aiModel: res.data.ai_model || "YOLOv8-Solar-M300",
+                            systemVersion: res.data.system_version || "O&M Suite v2.4"
                         });
                     }
                 } catch (e) {
@@ -928,11 +1118,45 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     operator: "",
                     device: "",
                     scope: "",
-                    panelPower: 600
+                    panelPower: 600,
+                    systemCapacity: "",
+                    supervisor: "",
+                    notes: "",
+                    dataType: "UAV thermal image",
+                    aiModel: "YOLOv8-Solar-M300",
+                    systemVersion: "O&M Suite v2.4"
                 });
             }
         };
         loadMetadata();
+    }, [batchId]);
+
+    React.useEffect(() => {
+        const handler = () => {
+            if (batchId) {
+                fetchLatestBatch().then(res => {
+                    if (res.data) {
+                        setProjectMetadata({
+                            projectName: res.data.project_name || "",
+                            location: res.data.location || "",
+                            scanTime: res.data.scan_time || "",
+                            operator: res.data.operator || "",
+                            device: res.data.device || "",
+                            scope: res.data.scope || "",
+                            panelPower: res.data.panel_power || 600,
+                            systemCapacity: res.data.system_capacity || "",
+                            supervisor: res.data.supervisor || "",
+                            notes: res.data.notes || "",
+                            dataType: res.data.data_type || "UAV thermal image",
+                            aiModel: res.data.ai_model || "YOLOv8-Solar-M300",
+                            systemVersion: res.data.system_version || "O&M Suite v2.4"
+                        });
+                    }
+                }).catch(console.error);
+            }
+        };
+        window.addEventListener("review-sync-completed", handler);
+        return () => window.removeEventListener("review-sync-completed", handler);
     }, [batchId]);
 
     const handleMetadataChange = (key, value) => {
@@ -952,7 +1176,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
 
         setIsSavingMetadata(true);
         try {
-            const res = await axios.post(`${API}/api/v1/update-batch-metadata`, {
+            const res = await updateBatchMetadata({
                 batch_id: batchId,
                 project_name: projectMetadata.projectName,
                 location: projectMetadata.location,
@@ -960,7 +1184,13 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                 operator: projectMetadata.operator,
                 device: projectMetadata.device,
                 scope: projectMetadata.scope,
-                panel_power: parseFloat(projectMetadata.panelPower) || 600
+                panel_power: parseFloat(projectMetadata.panelPower) || 600,
+                system_capacity: projectMetadata.systemCapacity,
+                supervisor: projectMetadata.supervisor,
+                notes: projectMetadata.notes,
+                data_type: projectMetadata.dataType,
+                ai_model: projectMetadata.aiModel,
+                system_version: projectMetadata.systemVersion
             });
             
             if (res.data.error) {
@@ -969,7 +1199,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                 alert("✅ Cập nhật cấu hình và tính toán lại hao hụt thành công!");
                 setShowMetadataModal(false);
                 // Cập nhật lại state chính của React
-                const latestRes = await axios.get(`${API}/api/v1/latest-batch`);
+                const latestRes = await fetchLatestBatch();
                 if (latestRes.data && onAnalysisComplete) {
                     onAnalysisComplete(latestRes.data.data, latestRes.data.batch_id, latestRes.data.panel_power);
                 }
@@ -993,10 +1223,10 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             const formData = new FormData();
             files.forEach((file) => formData.append("files", file));
 
-            await axios.post(`${API}/api/v1/upload-drone-data`, formData);
+            await uploadDroneData(formData);
 
             setStatusText("Đang tiền xử lý & kiểm tra chất lượng...");
-            const res = await axios.get(`${API}/api/v1/process-thermal`);
+            const res = await processThermal();
 
             setQualityData(res.data);
             // Mở popup nhập metadata dự án trước khi bấm chạy AI!
@@ -1011,9 +1241,73 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
         }
     };
 
+    const startPolling = () => {
+        if (progressTimerRef.current) {
+            clearInterval(progressTimerRef.current);
+        }
+
+        progressTimerRef.current = setInterval(async () => {
+            try {
+                const elapsed = analysisStartTimeRef.current ? Math.round((Date.now() - analysisStartTimeRef.current) / 1000) : 0;
+                const res = await getAnalyzeProgress();
+                const raw = res.data;
+                const progress = normalizeProgress(raw, elapsed);
+
+                setAnalysisProgress(progress);
+
+                if (progress.status === "completed") {
+                    if (progressTimerRef.current) {
+                        clearInterval(progressTimerRef.current);
+                    }
+                    setAnalysisProgress(prev => ({
+                        ...prev,
+                        percent: 100,
+                        stage: "Hoàn tất phân tích. Đang cập nhật dữ liệu...",
+                    }));
+
+                    try {
+                        const latestRes = await fetchLatestBatch();
+                        if (latestRes.data && onAnalysisComplete) {
+                            onAnalysisComplete(latestRes.data.data, latestRes.data.batch_id, latestRes.data.panel_power);
+                        }
+                    } catch (err) {
+                        console.error("Error fetching latest batch data:", err);
+                    }
+
+                    setTimeout(() => {
+                        setIsAnalyzing(false);
+                        setQualityData(null);
+                        setShowMetadataModal(false);
+                    }, 1000);
+                } else if (progress.status === "error") {
+                    if (progressTimerRef.current) {
+                        clearInterval(progressTimerRef.current);
+                    }
+                }
+            } catch (err) {
+                console.error("Polling error:", err);
+            }
+        }, 1000);
+    };
+
     // Bước 2: Người dùng xác nhận trong modal, sau đó chạy AI
     const handleRunAI = async () => {
-        setIsRunningAI(true);
+        setIsAnalyzing(true);
+        setAnalysisProgress({
+            status: "running",
+            percent: 0,
+            stage: "Khởi động...",
+            processedImages: 0,
+            totalImages: 0,
+            elapsedSeconds: 0,
+            etaSeconds: null,
+            message: "Đang chuẩn bị phân tích...",
+            error: null,
+            filename: "",
+        });
+        analysisStartTimeRef.current = Date.now();
+        setQualityData(null);
+        setShowMetadataModal(false);
 
         try {
             const analyzeForm = new FormData();
@@ -1030,10 +1324,20 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             analyzeForm.append("scan_time", projectMetadata.scanTime);
             analyzeForm.append("operator", projectMetadata.operator);
             analyzeForm.append("device", projectMetadata.device);
-            analyzeForm.append("scope", projectMetadata.scope);
+            
+            const scopeData = {
+                s: projectMetadata.scope || "",
+                sc: projectMetadata.systemCapacity || "",
+                sv: projectMetadata.supervisor || "",
+                nt: projectMetadata.notes || "",
+                dt: projectMetadata.dataType || "UAV thermal image",
+                am: projectMetadata.aiModel || "YOLOv8-Solar-M300",
+                sys: projectMetadata.systemVersion || "O&M Suite v2.4"
+            };
+            analyzeForm.append("scope", JSON.stringify(scopeData));
             analyzeForm.append("panel_power", projectMetadata.panelPower);
 
-            const res = await axios.post(`${API}/api/v1/analyze-all`, analyzeForm);
+            const res = await analyzeAll(analyzeForm);
 
             if (res.data.data) {
                 if (onAnalysisComplete) {
@@ -1041,21 +1345,31 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                 }
                 setQualityData(null);
                 setShowMetadataModal(false);
-                alert(`✅ Thành công! Đã phân tích xong ${res.data.data.length} ảnh.`);
+                setIsAnalyzing(false);
+            } else if (res.data.message && res.data.message.includes("Bắt đầu phân tích AI")) {
+                startPolling();
             } else {
                 // Không có ảnh mới (đã xử lý hết hoặc thông báo khác từ server)
+                setIsAnalyzing(false);
                 alert(res.data.message || "Không có ảnh mới nào cần phân tích!");
             }
         } catch (error) {
-            alert("Lỗi AI: " + (error.response?.data?.detail || error.message));
-            setIsRunningAI(false);
+            console.error("Lỗi AI:", error);
+            setAnalysisProgress(prev => ({
+                ...prev,
+                status: "error",
+                error: error.response?.data?.detail || error.message || "Đã xảy ra lỗi khi khởi chạy AI",
+            }));
+            if (progressTimerRef.current) {
+                clearInterval(progressTimerRef.current);
+            }
         }
     };
 
     const handleCancelModal = () => {
-        if (!isRunningAI) setQualityData(null);
+        if (!isAnalyzing) setQualityData(null);
     };
-
+ 
     const handleUpdateModel = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -1072,7 +1386,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             const formData = new FormData();
             formData.append("file", file);
 
-            const res = await axios.post(`${API}/api/v1/update-ai-model`, formData);
+            const res = await updateAiModel(formData);
 
             if (res.data.error) {
                 alert(res.data.error);
@@ -1093,7 +1407,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
         setIsReanalyzing(true);
 
         try {
-            await axios.post(`${API}/api/v1/reanalyze`);
+            await reanalyze();
             if (onReset) onReset();
             // Tự động chạy lại AI
             await handleRunAI();
@@ -1110,7 +1424,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
         setIsResetting(true);
 
         try {
-            await axios.post(`${API}/api/v1/reset-system`);
+            await resetSystem();
             if (onReset) onReset();
             alert("Hệ thống đã được đưa về trạng thái mặc định.");
         } catch (error) {
@@ -1120,31 +1434,15 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
         }
     };
 
-    const isAnyLoading = isUploading || isRunningAI || isResetting || isUpdatingModel || isReanalyzing;
+    const isAnyLoading = isUploading || isAnalyzing || isResetting || isUpdatingModel || isReanalyzing;
 
     return (
         <div>
             {/* AI Progress modal — hiển thị khi đang chạy AI */}
-            {isRunningAI && (
+            {isAnalyzing && (
                 <AIProgressModal
-                    onComplete={async () => {
-                        setIsRunningAI(false);
-                        setQualityData(null);
-                        setShowMetadataModal(false);
-                        try {
-                            const latestRes = await axios.get(`${API}/api/v1/latest-batch`);
-                            if (latestRes.data && onAnalysisComplete) {
-                                onAnalysisComplete(latestRes.data.data, latestRes.data.batch_id, latestRes.data.panel_power);
-                            }
-                            alert(`✅ Thành công! Đã phân tích xong ${latestRes.data.data?.length || 0} ảnh.`);
-                        } catch (err) {
-                            alert("Lỗi khi tải kết quả phân tích: " + err.message);
-                        }
-                    }}
-                    onFailed={(errorMsg) => {
-                        setIsRunningAI(false);
-                        alert(errorMsg || "Phân tích thất bại.");
-                    }}
+                    progress={analysisProgress}
+                    onClose={() => setIsAnalyzing(false)}
                 />
             )}
 
@@ -1154,7 +1452,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     qualityData={qualityData}
                     onConfirm={handleRunAI}
                     onCancel={handleCancelModal}
-                    isRunningAI={isRunningAI}
+                    isRunningAI={isAnalyzing}
                 />
             )}
 
@@ -1180,7 +1478,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     flexWrap: "wrap",
                 }}
             >
-                <PageHeader title="Bảng điều khiển" subtitle="Tổng quan giám sát (Dữ liệu AI thời gian thực)" />
+                <PageHeader title="Bảng điều khiển" subtitle={projectMetadata.projectName ? `Dự án: ${projectMetadata.projectName} (Dữ liệu AI thời gian thực)` : "Tổng quan giám sát (Dữ liệu AI thời gian thực)"} />
 
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "flex-end" }}>
                     <input
@@ -1192,41 +1490,106 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                         style={{ display: "none" }}
                     />
 
-                    <ActionButton
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isAnyLoading}
-                        icon={isUploading ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
-                        style={{
-                            background: "linear-gradient(135deg, #0EA5E9, #8B5CF6)",
-                            color: "white",
-                            border: "none",
-                            boxShadow: "0 4px 12px rgba(14,165,233,0.3)",
-                        }}
-                    >
-                        {isUploading ? statusText : "Tải lên (File/Zip/Rar)"}
-                    </ActionButton>
-
                     <input
                         type="file"
-                        webkitdirectory=""
+                        webkitdirectory="true"
+                        directory=""
                         multiple
                         ref={folderInputRef}
                         onChange={handleUploadFiles}
                         style={{ display: "none" }}
                     />
 
-                    <ActionButton
-                        onClick={() => folderInputRef.current?.click()}
-                        disabled={isAnyLoading}
-                        icon={isUploading ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
-                        style={{
-                            background: "linear-gradient(135deg, #10B981, #3B82F6)",
-                            color: "white",
-                            border: "none",
-                        }}
-                    >
-                        {isUploading ? statusText : "Tải Thư Mục"}
-                    </ActionButton>
+                    <div ref={uploadMenuRef} style={{ position: "relative", display: "inline-block" }}>
+                        <ActionButton
+                            onClick={() => {
+                                if (!isAnyLoading) {
+                                    setUploadMenuOpen(prev => !prev);
+                                }
+                            }}
+                            disabled={isAnyLoading}
+                            icon={isUploading ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
+                            style={{
+                                background: "linear-gradient(135deg, #0EA5E9, #8B5CF6)",
+                                color: "white",
+                                border: "none",
+                                boxShadow: "0 4px 12px rgba(14,165,233,0.3)",
+                            }}
+                        >
+                            {isUploading ? statusText : "Tải dữ liệu UAV ▾"}
+                        </ActionButton>
+
+                        {uploadMenuOpen && (
+                            <div style={{
+                                position: "absolute",
+                                top: "100%",
+                                right: 0,
+                                marginTop: 8,
+                                background: "rgba(15, 23, 42, 0.95)",
+                                backdropFilter: "blur(12px)",
+                                border: "1px solid rgba(14, 165, 233, 0.3)",
+                                borderRadius: 12,
+                                boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 16px -8px rgba(0, 0, 0, 0.4)",
+                                padding: 6,
+                                zIndex: 100,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 4,
+                                minWidth: 180,
+                            }}>
+                                <button
+                                    onClick={() => {
+                                        setUploadMenuOpen(false);
+                                        fileInputRef.current?.click();
+                                    }}
+                                    style={{
+                                        background: "transparent",
+                                        border: "none",
+                                        color: "#f8fafc",
+                                        padding: "10px 14px",
+                                        borderRadius: 8,
+                                        fontSize: 13,
+                                        fontWeight: 600,
+                                        textAlign: "left",
+                                        cursor: "pointer",
+                                        transition: "background 0.2s",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 8,
+                                    }}
+                                    onMouseEnter={(e) => e.target.style.background = "rgba(14, 165, 233, 0.15)"}
+                                    onMouseLeave={(e) => e.target.style.background = "transparent"}
+                                >
+                                    <span style={{ fontSize: 14 }}>📄</span> Chọn file / Zip / Rar
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setUploadMenuOpen(false);
+                                        folderInputRef.current?.click();
+                                    }}
+                                    style={{
+                                        background: "transparent",
+                                        border: "none",
+                                        color: "#f8fafc",
+                                        padding: "10px 14px",
+                                        borderRadius: 8,
+                                        fontSize: 13,
+                                        fontWeight: 600,
+                                        textAlign: "left",
+                                        cursor: "pointer",
+                                        transition: "background 0.2s",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 8,
+                                    }}
+                                    onMouseEnter={(e) => e.target.style.background = "rgba(16, 185, 129, 0.15)"}
+                                    onMouseLeave={(e) => e.target.style.background = "transparent"}
+                                >
+                                    <span style={{ fontSize: 14 }}>📁</span> Chọn thư mục ảnh
+                                </button>
+                            </div>
+                        )}
+                    </div>
 
                     <ActionButton
                         onClick={() => setShowMetadataModal(true)}
@@ -1415,7 +1778,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                                     letterSpacing: "-0.5px",
                                 }}
                             >
-                                Độ ổn định hệ thống
+                                Tỷ lệ panel bình thường
                             </h3>
                             <div
                                 style={{
@@ -1488,7 +1851,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                                     marginBottom: 4,
                                 }}
                             >
-                                Hồ sơ sức khỏe
+                                Tình trạng hệ thống
                             </div>
                             <div
                                 style={{
