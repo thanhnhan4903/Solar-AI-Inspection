@@ -179,6 +179,16 @@ function ImageGallery({ images, apiBase }) {
                     style={{ width: "100%", height: "100%", objectFit: "cover" }}
                     onError={e => { e.target.src = ""; e.target.style.display = "none"; }}
                 />
+                {/* Filename overlay */}
+                <div style={{
+                    position: "absolute", top: 8, left: 10,
+                    background: "rgba(15, 23, 42, 0.75)", borderRadius: 6,
+                    padding: "4px 8px", fontSize: 11, color: "#fff", fontWeight: 600,
+                    maxWidth: "80%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    backdropFilter: "blur(4px)", border: "1px solid rgba(255,255,255,0.15)"
+                }} title={currentImg.filename}>
+                    {currentImg.filename}
+                </div>
                 <div style={{
                     position: "absolute", bottom: 8, right: 10,
                     background: "rgba(0,0,0,0.6)", borderRadius: 6,
@@ -1747,9 +1757,11 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
                 <div>
                     <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#0f172a" }}>Bảng điều khiển</h1>
-                    <p style={{ margin: "4px 0 0", fontSize: 13, color: "#64748b" }}>
-                        {projectMetadata.projectName ? `Dự án: ${projectMetadata.projectName} · ` : ""}Tổng quan giám sát (Dữ liệu AI thời gian thực)
-                    </p>
+                    {projectMetadata.projectName && (
+                        <p style={{ margin: "4px 0 0", fontSize: 13, color: "#64748b", fontWeight: 500 }}>
+                            Dự án: {projectMetadata.projectName}
+                        </p>
+                    )}
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {/* Upload dropdown */}
@@ -1807,10 +1819,10 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             {/* ── KPI CARDS ── */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>
                 {[
-                    { icon: <Image size={20} />, label: "TỔNG ẢNH UAV", value: (data?.length || 0).toLocaleString(), unit: "ảnh", accent: "#8b5cf6", delta: data?.length > 0 ? `so với lần tải trước` : null, up: true },
-                    { icon: <LayoutGrid size={20} />, label: "TỔNG PANEL", value: totalPanels.toLocaleString(), unit: "panel", accent: "#0ea5e9", delta: totalPanels > 0 ? `so với lần kiểm tra trước` : null, up: true },
-                    { icon: <AlertCircle size={20} />, label: "PANEL LỖI", value: totalFaults.toLocaleString(), unit: "panel lỗi", accent: "#ef4444", delta: totalPanels > 0 ? `${((totalFaults/Math.max(totalPanels,1))*100).toFixed(1)}% tổng số` : null, up: false },
-                    { icon: <Zap size={20} />, label: "CÔNG SUẤT HAO HỤT ƯỚC TÍNH", value: estimatedLossMWp >= 1 ? estimatedLossMWp.toFixed(2) : (estimatedLoss / 1000).toFixed(2), unit: estimatedLossMWp >= 1 ? "MWp" : "kWp", accent: "#f59e0b", delta: totalPanels > 0 ? `so với lần trước trung bình` : null, up: false },
+                    { icon: <Image size={20} />, label: "TỔNG ẢNH UAV", value: (data?.length || 0).toLocaleString(), unit: "ảnh", accent: "#8b5cf6" },
+                    { icon: <LayoutGrid size={20} />, label: "TỔNG PANEL", value: totalPanels.toLocaleString(), unit: "panel", accent: "#0ea5e9" },
+                    { icon: <AlertCircle size={20} />, label: "PANEL LỖI", value: totalFaults.toLocaleString(), unit: "panel lỗi", accent: "#ef4444" },
+                    { icon: <Zap size={20} />, label: "CÔNG SUẤT HAO HỤT ƯỚC TÍNH", value: estimatedLossMWp >= 1 ? estimatedLossMWp.toFixed(2) : (estimatedLoss / 1000).toFixed(2), unit: estimatedLossMWp >= 1 ? "MWp" : "kWp", accent: "#f59e0b" },
                 ].map((card, i) => (
                     <div key={i} style={{ background: "#fff", borderRadius: 14, padding: "16px 18px", border: "1px solid #e2e8f0", borderTop: `3px solid ${card.accent}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", transition: "box-shadow 0.2s" }}
                         onMouseEnter={e => e.currentTarget.style.boxShadow = `0 6px 20px ${card.accent}20`}
@@ -1823,11 +1835,6 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                             <span style={{ fontSize: 28, fontWeight: 800, color: "#0f172a", lineHeight: 1 }}>{card.value}</span>
                             <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>{card.unit}</span>
                         </div>
-                        {card.delta && (
-                            <p style={{ margin: "6px 0 0", fontSize: 11, color: card.up ? "#10b981" : "#ef4444", fontWeight: 500 }}>
-                                {card.up ? "▲" : "▼"} {card.delta}
-                            </p>
-                        )}
                     </div>
                 ))}
             </div>
@@ -1843,25 +1850,34 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
 
                     {/* Drop zone */}
                     <div
-                        onClick={() => !isAnyLoading && folderInputRef.current?.click()}
-                        style={{ border: "2px dashed #cbd5e1", borderRadius: 12, padding: "28px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, cursor: isAnyLoading ? "not-allowed" : "pointer", background: "#f8fafc", transition: "all 0.2s" }}
+                        style={{ border: "2px dashed #cbd5e1", borderRadius: 12, padding: "24px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, background: "#f8fafc", transition: "all 0.2s" }}
                         onMouseEnter={e => { e.currentTarget.style.borderColor = "#0ea5e9"; e.currentTarget.style.background = "#f0f9ff"; }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc"; }}
                         onDragOver={e => e.preventDefault()}
                         onDrop={e => { e.preventDefault(); if (!isAnyLoading && e.dataTransfer.files.length > 0) { const dt = e.dataTransfer; handleUploadFiles({ target: { files: dt.files } }); } }}
                     >
-                        <div style={{ width: 48, height: 48, borderRadius: "50%", background: "rgba(14,165,233,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            <Upload size={22} color="#0ea5e9" />
+                        <div style={{ width: 44, height: 44, borderRadius: "50%", background: "rgba(14,165,233,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Upload size={20} color="#0ea5e9" />
                         </div>
-                        <p style={{ margin: 0, fontSize: 13, color: "#475569", fontWeight: 500, textAlign: "center" }}>
-                            Kéo thả thư mục vào đây<br /><span style={{ fontSize: 11, color: "#94a3b8" }}>hoặc</span>
+                        <p style={{ margin: 0, fontSize: 12, color: "#475569", fontWeight: 500, textAlign: "center", lineHeight: 1.4 }}>
+                            Kéo thả thư mục hoặc file Zip/Rar vào đây<br /><span style={{ fontSize: 10, color: "#94a3b8" }}>hoặc chọn hình thức tải lên</span>
                         </p>
-                        <button
-                            onClick={e => { e.stopPropagation(); if (!isAnyLoading) folderInputRef.current?.click(); }}
-                            style={{ padding: "7px 18px", borderRadius: 8, border: "none", background: "#0ea5e9", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-                        >
-                            Chọn thư mục
-                        </button>
+                        <div style={{ display: "flex", gap: 8, width: "100%", justifyContent: "center", marginTop: 4 }}>
+                            <button
+                                onClick={e => { e.stopPropagation(); if (!isAnyLoading) fileInputRef.current?.click(); }}
+                                disabled={isAnyLoading}
+                                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#334155", fontSize: 12, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                            >
+                                📄 Tải file / Zip
+                            </button>
+                            <button
+                                onClick={e => { e.stopPropagation(); if (!isAnyLoading) folderInputRef.current?.click(); }}
+                                disabled={isAnyLoading}
+                                style={{ padding: "8px 12px", borderRadius: 8, border: "none", background: "#0ea5e9", color: "#fff", fontSize: 12, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                            >
+                                📁 Tải thư mục
+                            </button>
+                        </div>
                     </div>
 
                     {/* Upload progress */}
@@ -1895,21 +1911,34 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                         <Settings size={15} color="#6366f1" />
                         <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Thông tin đợt kiểm tra</span>
                     </div>
-
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 10px", flex: 1, overflowY: "auto", maxHeight: 260, paddingRight: 4 }}>
                         {[
-                            { icon: "🏭", label: "Tên dự án", value: projectMetadata.projectName || "—" },
+                            { icon: "🏭", label: "Tên dự án", value: projectMetadata.projectName || "—", fullWidth: true },
                             { icon: "📅", label: "Ngày kiểm tra", value: projectMetadata.scanTime || "—" },
+                            { icon: "📍", label: "Địa điểm", value: projectMetadata.location || "—" },
                             { icon: "🚁", label: "UAV", value: projectMetadata.device || "—" },
-                            { icon: "📐", label: "Độ bay bướu", value: projectMetadata.scope ? `${projectMetadata.scope}` : "—" },
-                            { icon: "👤", label: "Người vận hành", value: projectMetadata.operator || "—" },
-                            { icon: "📝", label: "Ghi chú", value: projectMetadata.notes || "Kiểm tra định kỳ tháng 6" },
+                            { icon: "🏢", label: "Đơn vị quét", value: projectMetadata.operator || "—" },
+                            { icon: "👤", label: "Người vận hành", value: projectMetadata.supervisor || "—" },
+                            { icon: "⚡", label: "Công suất pin", value: projectMetadata.panelPower ? `${projectMetadata.panelPower} W` : "—" },
+                            { icon: "🔌", label: "Công suất hệ thống", value: projectMetadata.systemCapacity || "—" },
+                            { icon: "📊", label: "Loại dữ liệu", value: projectMetadata.dataType || "—" },
+                            { icon: "🤖", label: "Model AI", value: projectMetadata.aiModel || "—" },
+                            { icon: "💻", label: "Hệ thống", value: projectMetadata.systemVersion || "—" },
+                            { icon: "📝", label: "Ghi chú", value: projectMetadata.notes || "Kiểm tra định kỳ tháng 6", fullWidth: true },
                         ].map((row, i) => (
-                            <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 8px", borderRadius: 8, background: i % 2 === 0 ? "#f8fafc" : "transparent" }}>
+                            <div key={i} style={{ 
+                                display: "flex", 
+                                alignItems: "flex-start", 
+                                gap: 6, 
+                                padding: "6px 8px", 
+                                borderRadius: 8, 
+                                background: "#f8fafc",
+                                gridColumn: row.fullWidth ? "span 2" : "span 1" 
+                            }}>
                                 <span style={{ fontSize: 13, flexShrink: 0 }}>{row.icon}</span>
                                 <div style={{ minWidth: 0, flex: 1 }}>
-                                    <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.4px" }}>{row.label}</div>
-                                    <div style={{ fontSize: 12, color: "#334155", fontWeight: 600, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.value}</div>
+                                    <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.4px" }}>{row.label}</div>
+                                    <div style={{ fontSize: 11, color: "#334155", fontWeight: 600, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.value}>{row.value}</div>
                                 </div>
                             </div>
                         ))}
@@ -1920,7 +1949,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                         disabled={isAnyLoading}
                         style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "9px 0", borderRadius: 10, border: "none", background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(14,165,233,0.3)", transition: "all 0.2s" }}
                     >
-                        <Play size={14} fill="white" /> Chạy phân tích AI
+                        <Settings size={14} fill="white" /> Chỉnh sửa thông tin
                     </button>
                 </div>
 
