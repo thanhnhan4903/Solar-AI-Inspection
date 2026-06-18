@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from "react";
-import { AlertTriangle, Zap, Download, LayoutGrid, ShieldAlert, Award, MapPin, Eye, Percent, CheckCircle } from "lucide-react";
+import { AlertTriangle, Zap, Download, LayoutGrid, ShieldAlert, Award, MapPin, Eye, Percent, CheckCircle, TrendingUp } from "lucide-react";
 import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { KpiCard } from "../../components/ui/KpiCard";
 import { SolarCard, CardHeader } from "../../components/ui/SolarCard";
 import { ActionButton } from "../../components/ui/ActionButton";
-import { downloadReportUrl } from "../../api";
+import { downloadReportUrl, fetchLatestBatch } from "../../api";
 import { normalizePanel, computeInspectionSummary } from "../../utils/inspectionData";
 
 const DEFECT_NAME_MAP = {
@@ -56,16 +56,97 @@ const REVIEW_STATUS_LABEL = {
     "false_positive":   { label: "Không phải lỗi", color: "#64748b", bg: "rgba(100,116,139,0.1)" },
 };
 
+function DonutChart({ data, totalLabel }) {
+    if (!data || data.length === 0) {
+        return (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 110, color: "#94a3b8", flexDirection: "column", gap: 6 }}>
+                <TrendingUp size={22} style={{ opacity: 0.3 }} />
+                <span style={{ fontSize: 11 }}>Chưa có dữ liệu</span>
+            </div>
+        );
+    }
+
+    const total = data.reduce((s, d) => s + d.value, 0) || 1;
+    const radius = 42;
+    const cx = 55, cy = 55;
+    const strokeWidth = 14;
+    const circumference = 2 * Math.PI * radius;
+
+    let offset = 0;
+    const segments = data.map(d => {
+        const pct = d.value / total;
+        const dash = pct * circumference;
+        const gap = circumference - dash;
+        const seg = { ...d, dash, gap, offset: offset * circumference, pct };
+        offset += pct;
+        return seg;
+    });
+
+    return (
+        <svg width={110} height={110} viewBox="0 0 110 110">
+            <circle cx={cx} cy={cy} r={radius} fill="none" stroke="#f1f5f9" strokeWidth={strokeWidth} />
+            {segments.map((seg, i) => (
+                <circle
+                    key={i}
+                    cx={cx} cy={cy} r={radius}
+                    fill="none"
+                    stroke={seg.color}
+                    strokeWidth={strokeWidth}
+                    strokeDasharray={`${seg.dash} ${seg.gap}`}
+                    strokeDashoffset={circumference / 4 - seg.offset}
+                    strokeLinecap="butt"
+                    style={{ transition: "stroke-dashoffset 0.8s ease" }}
+                />
+            ))}
+            <text x={cx} y={cy - 4} textAnchor="middle" style={{ fontSize: 14, fontWeight: 800, fill: "#1e293b" }}>
+                {totalLabel}
+            </text>
+            <text x={cx} y={cy + 8} textAnchor="middle" style={{ fontSize: 9, fill: "#64748b" }}>
+                tổng lỗi
+            </text>
+        </svg>
+    );
+}
+
 export default function ReportPage({ data, batchId }) {
     const [isDownloading, setIsDownloading] = useState(false);
+    const [projectMetadata, setProjectMetadata] = useState({
+        projectName: "",
+        location: "",
+        scanTime: "",
+        operator: "",
+        device: "",
+        panelPower: 600,
+        systemCapacity: "",
+        supervisor: "",
+        aiModel: ""
+    });
 
     useEffect(() => {
         const handler = () => {
             console.log("Review synced, ReportPage updated via props");
+            if (batchId) {
+                fetchLatestBatch().then(res => {
+                    if (res.data) {
+                        setProjectMetadata({
+                            projectName: res.data.project_name || "",
+                            location: res.data.location || "",
+                            scanTime: res.data.scan_time || "",
+                            operator: res.data.operator || "",
+                            device: res.data.device || "",
+                            panelPower: res.data.panel_power || 600,
+                            systemCapacity: res.data.system_capacity || "",
+                            supervisor: res.data.supervisor || "",
+                            aiModel: res.data.ai_model || ""
+                        });
+                    }
+                }).catch(console.error);
+            }
         };
         window.addEventListener("review-sync-completed", handler);
+        handler(); // Chạy luôn lần đầu tiên
         return () => window.removeEventListener("review-sync-completed", handler);
-    }, []);
+    }, [batchId]);
 
     // 1. Lọc tất cả tấm pin và chuẩn hóa
     const allPanels = data?.flatMap(img => (img.panels || []).map(p => {
@@ -85,41 +166,68 @@ export default function ReportPage({ data, batchId }) {
 
     const faultyPanels = allPanels.filter(p => p.status === "faulty");
 
-    // 2. Thống kê 4 loại lỗi - chỉ từ panel hợp lệ
-    const stats = {
-        "hotspot_single_cell": 0,
-        "hotspot_multi_cell": 0,
-        "crack": 0,
-        "shading": 0
+    const confirmedFaults = allPanels.filter(p => p.review_status === "confirmed_defect").length;
+    const falsePositives = allPanels.filter(p => p.review_status === "false_positive").length;
+
+    // 2. Thống kê lỗi - đồng bộ với dashboard
+    const classifyDefect = (rawName) => {
+        const cls = (rawName || "").toLowerCase();
+        if (cls.includes("hotspot_multi") || cls.includes("multi_cell") || cls.includes("multicell") || cls.includes("multi-cell")) return "hotspot multi cell";
+        if (cls.includes("hotspot_single") || cls.includes("single_cell") || cls.includes("single-cell")) return "hotspot single cell";
+        if (cls.includes("hotspot") || cls.includes("hot")) return "hotspot single cell";
+        if (cls.includes("crack") || cls.includes("nut")) return "crack";
+        if (cls.includes("shad") || cls.includes("shadow") || cls.includes("soil") || cls.includes("soiling") || cls.includes("dirt")) return "shading";
+        if (cls.includes("diode")) return "diode";
+        return rawName ? rawName.replace(/_/g, " ") : "khác";
     };
 
-    faultyPanels.forEach(p => {
-        if (p.defects) {
-            p.defects.forEach(d => {
-                const cname = (d.class_name || d.type || "").toLowerCase();
-                if (cname.includes("single")) {
-                    stats["hotspot_single_cell"]++;
-                } else if (cname.includes("multi")) {
-                    stats["hotspot_multi_cell"]++;
-                } else if (cname.includes("crack")) {
-                    stats["crack"]++;
-                } else if (cname.includes("shading") || cname.includes("soil") || cname.includes("soiling") || cname.includes("dirt") || cname.includes("shade") || cname.includes("shadow")) {
-                    stats["shading"]++;
-                } else {
-                    stats["shading"]++; // fallback
-                }
-            });
-        }
+    const FAULT_COLORS = {
+        "hotspot single cell": "#ef4444",   // Đỏ tươi — Hotspot đơn
+        "hotspot multi cell":  "#ff6b35",   // Cam — Hotspot đa
+        "crack":               "#f59e0b",   // Vàng cam — Crack
+        "shading":             "#8b5cf6",   // Tím — Shading
+        "diode":               "#06b6d4",   // Cyan — Diode
+    };
+
+    const FAULT_LABELS = {
+        "hotspot single cell": "Hotspot (Đơn)",
+        "hotspot multi cell":  "Hotspot (Đa)",
+        "crack":               "Crack",
+        "shading":             "Shading",
+        "diode":               "Diode",
+    };
+
+    const getFaultColor = (group) => FAULT_COLORS[group.toLowerCase()] || "#94a3b8";
+    const getFaultLabel = (group) => FAULT_LABELS[group.toLowerCase()] || group;
+
+    const defectCounts = {};
+    (data || []).forEach((img) => {
+        (img.panels || []).forEach((p) => {
+            const reviewStatus = p.review_status || "unreviewed";
+            const include = reviewStatus === "false_positive" ? false : (p.include_in_report !== undefined ? p.include_in_report : true);
+            if (include) {
+                (p.defects || []).forEach((d) => {
+                    const group = classifyDefect(d.class_name || d.type || "");
+                    defectCounts[group] = (defectCounts[group] || 0) + 1;
+                });
+            }
+        });
     });
 
-    const defectRows = [
-        { label: "hotspot_single_cell", key: "hotspot_single_cell", value: stats.hotspot_single_cell, color: colors.danger },
-        { label: "hotspot_multi_cell", key: "hotspot_multi_cell", value: stats.hotspot_multi_cell, color: "#dc2626" },
-        { label: "crack", key: "crack", value: stats.crack, color: "#a855f7" },
-        { label: "shading", key: "shading", value: stats.shading, color: "#06b6d4" },
-    ];
+    const donutChartData = Object.entries(defectCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([group, value]) => ({
+            label: getFaultLabel(group),
+            rawGroup: group,
+            value,
+            color: getFaultColor(group),
+        }));
 
-    const sumDefects = Object.values(stats).reduce((a, b) => a + b, 0);
+    const totalDefectsCount = donutChartData.reduce((s, d) => s + d.value, 0);
+
+    const estimatedLossMWp = totalPowerLossW / 1000000;
+    const estimatedLosskWp = totalPowerLossW / 1000;
+    const powerLossValue = estimatedLossMWp >= 1 ? `${estimatedLossMWp.toFixed(2)} MWp` : `${estimatedLosskWp.toFixed(2)} kWp`;
 
     const handleDownloadPDF = async () => {
         if (!batchId) return alert("Vui lòng tải ảnh drone và chạy phân tích AI ở Trang chủ trước!");
@@ -136,8 +244,8 @@ export default function ReportPage({ data, batchId }) {
     return (
         <div style={{ paddingBottom: 40 }}>
             {/* Header báo cáo */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-                <PageHeader title="Báo Cáo Kiểm Tra Chi Tiết" subtitle={`Báo cáo chuẩn đoán tự động AI - Lô #${batchId || 'N/A'}`} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <PageHeader title="Báo Cáo Kiểm Tra Chi Tiết" />
                 <ActionButton 
                     onClick={handleDownloadPDF} 
                     icon={isDownloading ? null : <Download size={16} />}
@@ -157,78 +265,119 @@ export default function ReportPage({ data, batchId }) {
                 </ActionButton>
             </div>
             
-            {/* 4 Thẻ KPI cao cấp */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
-                <KpiCard 
-                    icon={<LayoutGrid size={22} color="#0ea5e9" />} 
-                    label="TỔNG SỐ TẤM PIN" 
-                    value={totalPanels} 
-                    accent="#0ea5e9" 
-                    style={{ background: "#fff", borderRadius: 16, border: "1px solid #f1f5f9", boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)" }}
-                />
-                <KpiCard 
-                    icon={<AlertTriangle size={22} color={colors.danger} />} 
-                    label="TẤM PIN BỊ LỖI" 
-                    value={`${totalFaults} (${totalPanels > 0 ? (totalFaults / totalPanels * 100).toFixed(1) : 0}%)`} 
-                    accent={colors.danger} 
-                    style={{ background: "#fff", borderRadius: 16, border: "1px solid #f1f5f9", boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)" }}
-                />
-                <KpiCard 
-                    icon={<Zap size={22} color="#f59e0b" />} 
-                    label="HAO HỤT CÔNG SUẤT" 
-                    value={`${(totalPowerLossW / 1000).toFixed(2)} kW`} 
-                    accent="#f59e0b" 
-                    style={{ background: "#fff", borderRadius: 16, border: "1px solid #f1f5f9", boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)" }}
-                />
-                <KpiCard 
-                    icon={healthRate >= 90 ? <CheckCircle size={22} color={colors.primary} /> : <ShieldAlert size={22} color="#f97316" />} 
-                    label="SỨC KHỎE HỆ THỐNG" 
-                    value={`${healthRate}%`} 
-                    accent={colors.primary} 
-                    style={{ background: "#fff", borderRadius: 16, border: "1px solid #f1f5f9", boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)" }}
-                />
-            </div>
-
-            {/* Phân loại lỗi phát hiện */}
-            <SolarCard style={{ marginBottom: 24, borderRadius: 16, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)", border: "1px solid #f1f5f9" }}>
-                <CardHeader title="Phân loại lỗi phát hiện (AI Classification)" />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, padding: "0 24px 24px" }}>
-                    {/* Danh sách lỗi dạng progress bar */}
-                    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                        {defectRows.map(r => (
-                            <div key={r.key}>
-                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                                    <span style={{ fontSize: 13, fontWeight: 600, color: "#1e293b" }}>{r.label}</span>
-                                    <span style={{ fontSize: 13, fontWeight: 700, color: r.color }}>{r.value} vùng lỗi</span>
-                                </div>
-                                <div style={{ height: 8, background: "#f1f5f9", borderRadius: 10, overflow: "hidden" }}>
-                                    <div style={{ height: "100%", width: `${sumDefects > 0 ? (r.value / sumDefects) * 100 : 0}%`, background: r.color, borderRadius: 10, transition: "width 1s ease" }} />
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-
-                    {/* Phân tích chất lượng lưới pin */}
-                    <div style={{ background: "#f8fafc", borderRadius: 12, padding: 20, display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-                            <Award size={28} color={healthRate >= 90 ? colors.primary : "#f59e0b"} />
-                            <h4 style={{ margin: 0, fontSize: 16, color: "#1e293b", fontWeight: 700 }}>Đánh Giá Sức Khỏe Lưới Pin</h4>
+            {/* 1. THÔNG TIN ĐỢT KIỂM TRA (Full-width) */}
+            <SolarCard style={{ marginBottom: 12, borderRadius: 16, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)", border: "1px solid #f1f5f9" }}>
+                <CardHeader title="Thông tin đợt kiểm tra" />
+                <div style={{ padding: "0 24px 14px" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px 24px" }}>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Tên dự án</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.projectName || "—"}</span>
                         </div>
-                        <p style={{ margin: 0, fontSize: 14, color: "#475569", lineHeight: 1.6 }}>
-                            Lưới pin năng lượng mặt trời đạt tỉ lệ bình thường là <b>{healthRate}%</b>. 
-                            {healthRate >= 95 ? (
-                                <span style={{ color: colors.primary, fontWeight: 600 }}> Hệ thống đang hoạt động ở trạng thái TUYỆT VỜI (Tier A). Chưa cần bảo trì diện rộng.</span>
-                            ) : healthRate >= 85 ? (
-                                <span style={{ color: "#10b981", fontWeight: 600 }}> Hệ thống ở trạng thái TỐT (Tier B). Cần theo dõi các vùng có nguy cơ phát sinh hotspot.</span>
-                            ) : healthRate >= 75 ? (
-                                <span style={{ color: "#f59e0b", fontWeight: 600 }}> Hệ thống ở trạng thái TRUNG BÌNH (Tier C). Đề xuất kiểm tra trực tiếp tại hiện trường và vệ sinh tấm pin.</span>
-                            ) : (
-                                <span style={{ color: colors.danger, fontWeight: 600 }}> CẢNH BÁO: Hệ thống đang bị suy hao nặng (Tier D). Cần lập tức bố trí thay thế các tấm pin bị nứt vỡ hoặc hotspot nặng để tránh cháy nổ đường dây.</span>
-                            )}
-                        </p>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Địa điểm</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.location || "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Công suất pin</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.panelPower ? `${projectMetadata.panelPower} W` : "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Ngày kiểm tra</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.scanTime || "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Đơn vị quét</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.operator || "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Công suất hệ thống</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.systemCapacity || "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>UAV</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.device || "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Người vận hành</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.supervisor || "—"}</span>
+                        </div>
+                        <div>
+                            <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, display: "block", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 2 }}>Model AI</span>
+                            <span style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>{projectMetadata.aiModel || "—"}</span>
+                        </div>
                     </div>
                 </div>
             </SolarCard>
+
+            {/* 2. HAI CỘT: TỔNG QUAN KẾT QUẢ & THỐNG KÊ LỖI THEO LOẠI */}
+            <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 12, marginBottom: 12 }}>
+                {/* Cột trái: Tổng quan kết quả */}
+                <SolarCard style={{ borderRadius: 16, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)", border: "1px solid #f1f5f9", display: "flex", flexDirection: "column" }}>
+                    <CardHeader title="Tổng quan kết quả" />
+                    <div style={{ padding: "0 24px 16px", flex: 1, display: "flex", alignItems: "center" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, width: "100%" }}>
+                            {[
+                                { label: "Tổng số panel", value: totalPanels.toLocaleString(), color: "#2563eb", bg: "#f0f9ff", border: "#e0f2fe" },
+                                { label: "Panel lỗi", value: totalFaults.toLocaleString(), color: "#ef4444", bg: "#fef2f2", border: "#fee2e2" },
+                                { label: "Tỉ lệ lỗi", value: `${totalPanels > 0 ? (totalFaults / totalPanels * 100).toFixed(2) : 0}%`, color: "#ea580c", bg: "#fff7ed", border: "#ffedd5" },
+                                { label: "Công suất ước tính", value: powerLossValue, color: "#10b981", bg: "#f0fdf4", border: "#dcfce7" },
+                                { label: "Số lỗi đã duyệt", value: confirmedFaults.toLocaleString(), color: "#b91c1c", bg: "#fff5f5", border: "#ffe3e3" },
+                                { label: "False Positive", value: falsePositives.toLocaleString(), color: "#16a34a", bg: "#f4fbf7", border: "#e6f7ed" }
+                            ].map((item, i) => (
+                                <div key={i} style={{ background: item.bg, border: `1px solid ${item.border}`, borderRadius: 10, padding: "12px 10px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                                    <span style={{ fontSize: 10, color: "#64748b", fontWeight: 700, marginBottom: 4, textAlign: "center", textTransform: "uppercase", letterSpacing: "0.4px" }}>{item.label}</span>
+                                    <span style={{ fontSize: 18, color: item.color, fontWeight: 800 }}>{item.value}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </SolarCard>
+
+                {/* Cột phải: Thống kê lỗi theo loại */}
+                <SolarCard style={{ borderRadius: 16, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)", border: "1px solid #f1f5f9", display: "flex", flexDirection: "column" }}>
+                    <CardHeader title="Thống kê lỗi theo loại" />
+                    <div style={{ padding: "0 24px 16px", flex: 1, display: "flex", alignItems: "center", gap: 20, justifyContent: "center" }}>
+                        {/* Donut Chart */}
+                        <div style={{ flexShrink: 0 }}>
+                            <DonutChart data={donutChartData} totalLabel={totalDefectsCount.toLocaleString()} />
+                        </div>
+                        {/* Legend */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, width: 200 }}>
+                            {(() => {
+                                const primaryGroups = ["hotspot single cell", "hotspot multi cell", "crack", "shading", "diode"];
+                                const otherCount = Object.entries(defectCounts)
+                                    .filter(([group]) => !primaryGroups.includes(group))
+                                    .reduce((acc, [, val]) => acc + val, 0);
+
+                                const legendItems = [
+                                    { group: "hotspot single cell", label: "Hotspot (Đơn)", color: "#ef4444" },
+                                    { group: "hotspot multi cell", label: "Hotspot (Đa)", color: "#ff6b35" },
+                                    { group: "crack", label: "Crack", color: "#f59e0b" },
+                                    { group: "shading", label: "Shading", color: "#8b5cf6" },
+                                    { group: "diode", label: "Diode", color: "#06b6d4" },
+                                ];
+
+                                if (otherCount > 0) {
+                                    legendItems.push({ group: "khác", label: "Khác", color: "#94a3b8" });
+                                }
+
+                                return legendItems.map((d, i) => {
+                                    const val = d.group === "khác" ? otherCount : (defectCounts[d.group] || 0);
+                                    const pct = totalDefectsCount > 0 ? ((val / totalDefectsCount) * 100).toFixed(1) : "0.0";
+                                    return (
+                                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                            <div style={{ width: 8, height: 8, borderRadius: "50%", background: d.color, flexShrink: 0 }} />
+                                            <span style={{ fontSize: 12, color: "#475569", fontWeight: 600, flex: 1 }}>{d.label}</span>
+                                            <span style={{ fontSize: 12, color: "#1e293b", fontWeight: 700 }}>{pct}% ({val})</span>
+                                        </div>
+                                    );
+                                });
+                            })()}
+                        </div>
+                    </div>
+                </SolarCard>
+            </div>
 
             {/* Bảng chi tiết các tấm pin lỗi kèm so sánh kẹp song song ảnh Thermal & RGB */}
             <SolarCard style={{ borderRadius: 16, boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)", border: "1px solid #f1f5f9" }}>

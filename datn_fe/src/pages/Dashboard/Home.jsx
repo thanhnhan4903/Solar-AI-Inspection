@@ -47,17 +47,17 @@ const API = "http://127.0.0.1:8000";
 function DonutChart({ data, totalLabel }) {
     if (!data || data.length === 0) {
         return (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 180, color: "#94a3b8", flexDirection: "column", gap: 8 }}>
-                <TrendingUp size={28} style={{ opacity: 0.3 }} />
-                <span style={{ fontSize: 12 }}>Chưa có dữ liệu</span>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 110, color: "#94a3b8", flexDirection: "column", gap: 6 }}>
+                <TrendingUp size={22} style={{ opacity: 0.3 }} />
+                <span style={{ fontSize: 11 }}>Chưa có dữ liệu</span>
             </div>
         );
     }
 
     const total = data.reduce((s, d) => s + d.value, 0) || 1;
-    const radius = 60;
-    const cx = 90, cy = 90;
-    const strokeWidth = 22;
+    const radius = 42;
+    const cx = 55, cy = 55;
+    const strokeWidth = 14;
     const circumference = 2 * Math.PI * radius;
 
     let offset = 0;
@@ -71,7 +71,7 @@ function DonutChart({ data, totalLabel }) {
     });
 
     return (
-        <svg width={180} height={180} viewBox="0 0 180 180">
+        <svg width={110} height={110} viewBox="0 0 110 110">
             <circle cx={cx} cy={cy} r={radius} fill="none" stroke="#f1f5f9" strokeWidth={strokeWidth} />
             {segments.map((seg, i) => (
                 <circle
@@ -86,10 +86,10 @@ function DonutChart({ data, totalLabel }) {
                     style={{ transition: "stroke-dashoffset 0.8s ease" }}
                 />
             ))}
-            <text x={cx} y={cy - 8} textAnchor="middle" style={{ fontSize: 20, fontWeight: 800, fill: "#1e293b" }}>
+            <text x={cx} y={cy - 4} textAnchor="middle" style={{ fontSize: 14, fontWeight: 800, fill: "#1e293b" }}>
                 {totalLabel}
             </text>
-            <text x={cx} y={cy + 14} textAnchor="middle" style={{ fontSize: 11, fill: "#64748b" }}>
+            <text x={cx} y={cy + 8} textAnchor="middle" style={{ fontSize: 9, fill: "#64748b" }}>
                 tổng lỗi
             </text>
         </svg>
@@ -100,9 +100,9 @@ function DonutChart({ data, totalLabel }) {
 function PowerLossBarChart({ data }) {
     if (!data || data.length === 0) {
         return (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 160, color: "#94a3b8", flexDirection: "column", gap: 8 }}>
-                <Zap size={28} style={{ opacity: 0.3 }} />
-                <span style={{ fontSize: 12 }}>Chưa có dữ liệu phân tích</span>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 110, color: "#94a3b8", flexDirection: "column", gap: 6 }}>
+                <Zap size={24} style={{ opacity: 0.3 }} />
+                <span style={{ fontSize: 11 }}>Chưa có dữ liệu phân tích</span>
             </div>
         );
     }
@@ -116,21 +116,21 @@ function PowerLossBarChart({ data }) {
     };
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ flex: 1, display: "flex", alignItems: "flex-end", gap: 8, paddingBottom: 4 }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", justifyContent: "space-between" }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "flex-end", gap: 8, paddingBottom: 4, height: 80 }}>
                 {data.map((item, i) => {
-                    const barH = Math.max((item.value / maxVal) * 140, 8);
+                    const barH = Math.max((item.value / maxVal) * 60, 6);
                     return (
-                        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minWidth: 0 }}>
-                            <span style={{ fontSize: 9, fontWeight: 700, color: "#475569", textAlign: "center", lineHeight: 1.3 }}>
+                        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 0 }}>
+                            <span style={{ fontSize: 8, fontWeight: 700, color: "#475569", textAlign: "center", lineHeight: 1.1 }}>
                                 {formatVal(item.value, item.unit || "W")}
                             </span>
                             <div style={{
                                 width: "100%", height: barH,
                                 background: `linear-gradient(180deg, ${item.color}, ${item.color}bb)`,
-                                borderRadius: "4px 4px 0 0",
+                                borderRadius: "3px 3px 0 0",
                                 transition: "height 0.7s ease",
-                                boxShadow: `0 -3px 10px ${item.color}40`,
+                                boxShadow: `0 -2px 6px ${item.color}20`,
                                 cursor: "default",
                             }}
                                 title={`${item.label}: ${formatVal(item.value, item.unit || "W")}`}
@@ -139,11 +139,11 @@ function PowerLossBarChart({ data }) {
                     );
                 })}
             </div>
-            <div style={{ display: "flex", gap: 8, borderTop: "1px solid #e2e8f0", paddingTop: 6 }}>
+            <div style={{ display: "flex", gap: 6, borderTop: "1px solid #e2e8f0", paddingTop: 4 }}>
                 {data.map((item, i) => (
-                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 0 }}>
-                        <div style={{ width: 10, height: 10, borderRadius: 3, background: item.color, flexShrink: 0 }} />
-                        <span style={{ textAlign: "center", fontSize: 9, color: "#64748b", lineHeight: 1.3, minWidth: 0, wordBreak: "break-word" }}>
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 0 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: 2, background: item.color, flexShrink: 0 }} />
+                        <span style={{ textAlign: "center", fontSize: 8, color: "#64748b", lineHeight: 1.1, minWidth: 0, wordBreak: "break-word" }}>
                             {item.label}
                         </span>
                     </div>
@@ -172,7 +172,7 @@ function ImageGallery({ images, apiBase }) {
     return (
         <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 8 }}>
             {/* Main image */}
-            <div style={{ position: "relative", flex: 1, borderRadius: 10, overflow: "hidden", background: "#0f172a", minHeight: 120 }}>
+            <div style={{ position: "relative", flex: 1, borderRadius: 10, overflow: "hidden", background: "#0f172a", minHeight: 90 }}>
                 <img
                     src={imgSrc}
                     alt={currentImg.filename}
@@ -1172,6 +1172,138 @@ function normalizeProgress(raw, elapsedSeconds) {
 }
 
 // ─────────────────────────────────────────
+// InfoPanel — Thông tin đợt kiểm tra có pagination + mũi tên
+// ─────────────────────────────────────────
+// Phân bổ cố định: trang 1 = 4 mục, trang 2 = 4 mục, trang 3 = 4 mục
+const PAGE_SIZES = [4, 4, 4];
+
+function InfoPanel({ rows, onEdit, isAnyLoading }) {
+    const [page, setPage] = useState(0);
+
+    // Chia rows theo phân bổ cố định PAGE_SIZES
+    const pages = [];
+    let offset = 0;
+    for (const size of PAGE_SIZES) {
+        const chunk = rows.slice(offset, offset + size);
+        if (chunk.length > 0) pages.push(chunk);
+        offset += size;
+        if (offset >= rows.length) break;
+    }
+
+    const totalPages = pages.length;
+    const currentRows = pages[page] || [];
+    const hasPrev = page > 0;
+    const hasNext = page < totalPages - 1;
+
+    return (
+        <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 10, height: "100%", boxSizing: "border-box" }}>
+            {/* Header + mũi tên điều hướng */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Settings size={15} color="#6366f1" />
+                <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px", flex: 1 }}>Thông tin đợt kiểm tra</span>
+                {/* Mũi tên điều hướng trang */}
+                <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                    {totalPages > 1 && (
+                        <span style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, marginRight: 1 }}>
+                            {page + 1}/{totalPages}
+                        </span>
+                    )}
+                    <button
+                        onClick={() => setPage(p => Math.max(0, p - 1))}
+                        disabled={!hasPrev}
+                        title="Trang trước"
+                        style={{
+                            width: 24, height: 24, borderRadius: 5,
+                            border: "1px solid #e2e8f0",
+                            background: hasPrev ? "#f8fafc" : "#f1f5f9",
+                            color: hasPrev ? "#334155" : "#cbd5e1",
+                            fontSize: 12, cursor: hasPrev ? "pointer" : "default",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            transition: "all 0.15s", padding: 0,
+                        }}
+                    >
+                        ←
+                    </button>
+                    <button
+                        onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                        disabled={!hasNext}
+                        title="Trang tiếp theo"
+                        style={{
+                            width: 24, height: 24, borderRadius: 5,
+                            border: "1px solid #e2e8f0",
+                            background: hasNext ? "#0ea5e9" : "#f1f5f9",
+                            color: hasNext ? "#fff" : "#cbd5e1",
+                            fontSize: 12, cursor: hasNext ? "pointer" : "default",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            transition: "all 0.15s", padding: 0,
+                            boxShadow: hasNext ? "0 1px 4px rgba(14,165,233,0.2)" : "none",
+                        }}
+                    >
+                        →
+                    </button>
+                </div>
+            </div>
+
+            {/* Lưới hiển thị thông tin trang hiện tại */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", flex: 1 }}>
+                {currentRows.map((row, idx) => (
+                    <div key={idx} style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "8px 12px",
+                        borderRadius: 6,
+                        background: "#f8fafc",
+                        border: "1px solid #f1f5f9",
+                        width: "100%",
+                        boxSizing: "border-box",
+                        flex: 1,
+                        minHeight: 0
+                    }}>
+                        <span style={{ fontSize: 14, flexShrink: 0 }}>{row.icon}</span>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: 1 }}>{row.label}</div>
+                            {/* Hiển thị đầy đủ nội dung — wrap nếu dài, không cắt bỏ */}
+                            <div style={{ fontSize: 12, color: "#334155", fontWeight: 600, lineHeight: 1.3, wordBreak: "break-word" }}>
+                                {row.value}
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Dot indicators (nếu > 1 trang) */}
+            {totalPages > 1 && (
+                <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: -2 }}>
+                    {pages.map((_, pi) => (
+                        <button
+                            key={pi}
+                            onClick={() => setPage(pi)}
+                            style={{
+                                width: pi === page ? 12 : 4, height: 4,
+                                borderRadius: 2, border: "none",
+                                background: pi === page ? "#0ea5e9" : "#cbd5e1",
+                                cursor: "pointer", padding: 0,
+                                transition: "all 0.2s",
+                            }}
+                        />
+                    ))}
+                </div>
+            )}
+
+            {/* Nút Chỉnh sửa */}
+            <button
+                onClick={onEdit}
+                disabled={isAnyLoading}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "8px 0", borderRadius: 6, border: "none", background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "#fff", fontSize: 12, fontWeight: 700, cursor: isAnyLoading ? "not-allowed" : "pointer", boxShadow: "0 2px 6px rgba(14,165,233,0.2)", transition: "all 0.2s", opacity: isAnyLoading ? 0.7 : 1 }}
+            >
+                <Settings size={13} fill="white" /> Chỉnh sửa thông tin
+            </button>
+        </div>
+    );
+}
+
+// ─────────────────────────────────────────
 // Home Page
 // ─────────────────────────────────────────
 export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
@@ -1754,62 +1886,33 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             <input type="file" accept=".pt" ref={modelInputRef} onChange={handleUpdateModel} style={{ display: "none" }} />
 
             {/* ── HEADER ── */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
                 <div>
-                    <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#0f172a" }}>Bảng điều khiển</h1>
+                    <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#0f172a" }}>Bảng điều khiển</h1>
                     {projectMetadata.projectName && (
-                        <p style={{ margin: "4px 0 0", fontSize: 13, color: "#64748b", fontWeight: 500 }}>
+                        <p style={{ margin: "2px 0 0", fontSize: 12, color: "#64748b", fontWeight: 500 }}>
                             Dự án: {projectMetadata.projectName}
                         </p>
                     )}
                 </div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {/* Upload dropdown */}
-                    <div ref={uploadMenuRef} style={{ position: "relative" }}>
-                        <button
-                            onClick={() => !isAnyLoading && setUploadMenuOpen(p => !p)}
-                            disabled={isAnyLoading}
-                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", opacity: isAnyLoading ? 0.7 : 1, boxShadow: "0 4px 12px rgba(14,165,233,0.3)", transition: "all 0.2s" }}
-                        >
-                            {isUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-                            {isUploading ? statusText : "Tải dữ liệu UAV ▾"}
-                        </button>
-                        {uploadMenuOpen && (
-                            <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: "rgba(15,23,42,0.97)", border: "1px solid rgba(14,165,233,0.3)", borderRadius: 10, padding: 6, zIndex: 200, minWidth: 180, display: "flex", flexDirection: "column", gap: 4, boxShadow: "0 10px 30px rgba(0,0,0,0.4)" }}>
-                                {[{ icon: "📄", label: "Chọn file / Zip / Rar", ref: fileInputRef }, { icon: "📁", label: "Chọn thư mục ảnh", ref: folderInputRef }].map((item, i) => (
-                                    <button key={i} onClick={() => { setUploadMenuOpen(false); item.ref.current?.click(); }}
-                                        style={{ background: "transparent", border: "none", color: "#f8fafc", padding: "9px 12px", borderRadius: 7, fontSize: 13, fontWeight: 500, textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
-                                        onMouseEnter={e => e.currentTarget.style.background = "rgba(14,165,233,0.15)"}
-                                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
-                                    ><span>{item.icon}</span>{item.label}</button>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Thông tin dự án */}
-                    <button onClick={() => setShowMetadataModal(true)} disabled={isAnyLoading}
-                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#334155", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
-                        <Settings size={14} /> Thông tin dự án
-                    </button>
-
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     {/* Thay model AI */}
                     <button onClick={() => modelInputRef.current?.click()} disabled={isAnyLoading}
-                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(14,165,233,0.4)", background: "rgba(14,165,233,0.06)", color: "#0ea5e9", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "7px 12px", borderRadius: 6, border: "1px solid rgba(14,165,233,0.4)", background: "rgba(14,165,233,0.06)", color: "#0ea5e9", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
                         {isUpdatingModel ? <Loader2 size={14} className="animate-spin" /> : <Cpu size={14} />}
                         {isUpdatingModel ? "Đang cập nhật..." : "Thay model AI"}
                     </button>
 
                     {/* Phân tích lại */}
                     <button onClick={handleReanalyze} disabled={isAnyLoading || totalPanels === 0}
-                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "linear-gradient(135deg,#f59e0b,#ef4444)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: (isAnyLoading || totalPanels === 0) ? "not-allowed" : "pointer", opacity: totalPanels === 0 ? 0.5 : 1, transition: "all 0.2s" }}>
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "7px 12px", borderRadius: 6, border: "none", background: "linear-gradient(135deg,#f59e0b,#ef4444)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: (isAnyLoading || totalPanels === 0) ? "not-allowed" : "pointer", opacity: totalPanels === 0 ? 0.5 : 1, transition: "all 0.2s" }}>
                         {isReanalyzing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                         {isReanalyzing ? "Đang chạy lại..." : "Phân tích lại"}
                     </button>
 
                     {/* Reset */}
                     <button onClick={handleSystemReset} disabled={isAnyLoading}
-                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.3)", background: "#fff1f1", color: "#ef4444", fontSize: 13, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", transition: "all 0.2s" }}>
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "7px 12px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "#fff1f1", color: "#ef4444", fontSize: 12, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", transition: "all 0.2s" }}>
                         {isResetting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
                         {isResetting ? "Đang reset..." : "Reset Hệ thống"}
                     </button>
@@ -1817,23 +1920,23 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             </div>
 
             {/* ── KPI CARDS ── */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
                 {[
-                    { icon: <Image size={20} />, label: "TỔNG ẢNH UAV", value: (data?.length || 0).toLocaleString(), unit: "ảnh", accent: "#8b5cf6" },
-                    { icon: <LayoutGrid size={20} />, label: "TỔNG PANEL", value: totalPanels.toLocaleString(), unit: "panel", accent: "#0ea5e9" },
-                    { icon: <AlertCircle size={20} />, label: "PANEL LỖI", value: totalFaults.toLocaleString(), unit: "panel lỗi", accent: "#ef4444" },
-                    { icon: <Zap size={20} />, label: "CÔNG SUẤT HAO HỤT ƯỚC TÍNH", value: estimatedLossMWp >= 1 ? estimatedLossMWp.toFixed(2) : (estimatedLoss / 1000).toFixed(2), unit: estimatedLossMWp >= 1 ? "MWp" : "kWp", accent: "#f59e0b" },
+                    { icon: <Image size={18} />, label: "TỔNG ẢNH UAV", value: (data?.length || 0).toLocaleString(), unit: "ảnh", accent: "#8b5cf6" },
+                    { icon: <LayoutGrid size={18} />, label: "TỔNG PANEL", value: totalPanels.toLocaleString(), unit: "panel", accent: "#0ea5e9" },
+                    { icon: <AlertCircle size={18} />, label: "PANEL LỖI", value: totalFaults.toLocaleString(), unit: "panel lỗi", accent: "#ef4444" },
+                    { icon: <Zap size={18} />, label: "CÔNG SUẤT HAO HỤT ƯỚC TÍNH", value: estimatedLossMWp >= 1 ? estimatedLossMWp.toFixed(2) : (estimatedLoss / 1000).toFixed(2), unit: estimatedLossMWp >= 1 ? "MWp" : "kWp", accent: "#f59e0b" },
                 ].map((card, i) => (
-                    <div key={i} style={{ background: "#fff", borderRadius: 14, padding: "16px 18px", border: "1px solid #e2e8f0", borderTop: `3px solid ${card.accent}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", transition: "box-shadow 0.2s" }}
-                        onMouseEnter={e => e.currentTarget.style.boxShadow = `0 6px 20px ${card.accent}20`}
-                        onMouseLeave={e => e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.04)"}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                            <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.8px" }}>{card.label}</p>
-                            <div style={{ width: 36, height: 36, borderRadius: 10, background: `${card.accent}15`, display: "flex", alignItems: "center", justifyContent: "center", color: card.accent }}>{card.icon}</div>
+                    <div key={i} style={{ background: "#fff", borderRadius: 10, padding: "12px 16px", border: "1px solid #e2e8f0", borderTop: `2px solid ${card.accent}`, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", transition: "box-shadow 0.2s" }}
+                        onMouseEnter={e => e.currentTarget.style.boxShadow = `0 4px 12px ${card.accent}15`}
+                        onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.03)"}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                            <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.5px" }}>{card.label}</p>
+                            <div style={{ width: 30, height: 30, borderRadius: 6, background: `${card.accent}12`, display: "flex", alignItems: "center", justifyContent: "center", color: card.accent }}>{card.icon}</div>
                         </div>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                            <span style={{ fontSize: 28, fontWeight: 800, color: "#0f172a", lineHeight: 1 }}>{card.value}</span>
-                            <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>{card.unit}</span>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                            <span style={{ fontSize: 24, fontWeight: 800, color: "#0f172a", lineHeight: 1 }}>{card.value}</span>
+                            <span style={{ fontSize: 11, color: "#64748b", fontWeight: 500 }}>{card.unit}</span>
                         </div>
                     </div>
                 ))}
@@ -1842,40 +1945,40 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             {/* ── MIDDLE 3-COLUMN SECTION ── */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
                 {/* Col 1: TẢI DỮ LIỆU UAV */}
-                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column", gap: 14 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 10, height: "100%", boxSizing: "border-box" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <Upload size={15} color="#0ea5e9" />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Tải dữ liệu UAV</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Tải dữ liệu UAV</span>
                     </div>
 
                     {/* Drop zone */}
                     <div
-                        style={{ border: "2px dashed #cbd5e1", borderRadius: 12, padding: "24px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, background: "#f8fafc", transition: "all 0.2s" }}
+                        style={{ border: "2px dashed #cbd5e1", borderRadius: 10, padding: "20px 16px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "#f8fafc", transition: "all 0.2s", flex: 1 }}
                         onMouseEnter={e => { e.currentTarget.style.borderColor = "#0ea5e9"; e.currentTarget.style.background = "#f0f9ff"; }}
                         onMouseLeave={e => { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc"; }}
                         onDragOver={e => e.preventDefault()}
                         onDrop={e => { e.preventDefault(); if (!isAnyLoading && e.dataTransfer.files.length > 0) { const dt = e.dataTransfer; handleUploadFiles({ target: { files: dt.files } }); } }}
                     >
-                        <div style={{ width: 44, height: 44, borderRadius: "50%", background: "rgba(14,165,233,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                            <Upload size={20} color="#0ea5e9" />
+                        <div style={{ width: 36, height: 36, borderRadius: "50%", background: "rgba(14,165,233,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Upload size={18} color="#0ea5e9" />
                         </div>
-                        <p style={{ margin: 0, fontSize: 12, color: "#475569", fontWeight: 500, textAlign: "center", lineHeight: 1.4 }}>
+                        <p style={{ margin: 0, fontSize: 11, color: "#475569", fontWeight: 500, textAlign: "center", lineHeight: 1.3 }}>
                             Kéo thả thư mục hoặc file Zip/Rar vào đây<br /><span style={{ fontSize: 10, color: "#94a3b8" }}>hoặc chọn hình thức tải lên</span>
                         </p>
-                        <div style={{ display: "flex", gap: 8, width: "100%", justifyContent: "center", marginTop: 4 }}>
+                        <div style={{ display: "flex", gap: 6, width: "100%", justifyContent: "center", marginTop: 2 }}>
                             <button
                                 onClick={e => { e.stopPropagation(); if (!isAnyLoading) fileInputRef.current?.click(); }}
                                 disabled={isAnyLoading}
-                                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#334155", fontSize: 12, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                                style={{ padding: "6px 12px", borderRadius: 5, border: "1px solid #cbd5e1", background: "#fff", color: "#334155", fontSize: 11, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 3 }}
                             >
-                                📄 Tải file / Zip
+                                📄 Tải file
                             </button>
                             <button
                                 onClick={e => { e.stopPropagation(); if (!isAnyLoading) folderInputRef.current?.click(); }}
                                 disabled={isAnyLoading}
-                                style={{ padding: "8px 12px", borderRadius: 8, border: "none", background: "#0ea5e9", color: "#fff", fontSize: 12, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                                style={{ padding: "6px 12px", borderRadius: 5, border: "none", background: "#0ea5e9", color: "#fff", fontSize: 11, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 3 }}
                             >
-                                📁 Tải thư mục
+                                📁 Thư mục
                             </button>
                         </div>
                     </div>
@@ -1884,8 +1987,8 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     {isUploading && (
                         <div>
                             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                                <span style={{ fontSize: 11, color: "#475569", fontWeight: 500 }}>Đang tải lên...</span>
-                                <span style={{ fontSize: 11, color: "#0ea5e9", fontWeight: 600 }}>100%</span>
+                                <span style={{ fontSize: 12, color: "#475569", fontWeight: 500 }}>Đang tải lên...</span>
+                                <span style={{ fontSize: 12, color: "#0ea5e9", fontWeight: 600 }}>100%</span>
                             </div>
                             <div style={{ height: 6, background: "#e2e8f0", borderRadius: 6, overflow: "hidden" }}>
                                 <div style={{ height: "100%", width: "100%", background: "linear-gradient(90deg,#0ea5e9,#6366f1)", borderRadius: 6, animation: "shimmerLoad 1.5s infinite" }} />
@@ -1894,9 +1997,9 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     )}
 
                     {/* Format info */}
-                    <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                    <div style={{ fontSize: 12, color: "#94a3b8" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
-                            <CheckCircle size={12} color={data?.length > 0 ? "#10b981" : "#94a3b8"} />
+                            <CheckCircle size={14} color={data?.length > 0 ? "#10b981" : "#94a3b8"} />
                             <span style={{ color: data?.length > 0 ? "#10b981" : "#64748b", fontWeight: 500 }}>
                                 {data?.length > 0 ? `✓ Đã tải ${data.length} ảnh · Tổng: ${data.length} ảnh` : "Hỗ trợ định dạng: JPG, PNG, TIF, RJPG"}
                             </span>
@@ -1905,59 +2008,30 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     </div>
                 </div>
 
-                {/* Col 2: THÔNG TIN ĐỢT KIỂM TRA */}
-                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column", gap: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <Settings size={15} color="#6366f1" />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Thông tin đợt kiểm tra</span>
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 10px", flex: 1, overflowY: "auto", maxHeight: 260, paddingRight: 4 }}>
-                        {[
-                            { icon: "🏭", label: "Tên dự án", value: projectMetadata.projectName || "—", fullWidth: true },
-                            { icon: "📅", label: "Ngày kiểm tra", value: projectMetadata.scanTime || "—" },
-                            { icon: "📍", label: "Địa điểm", value: projectMetadata.location || "—" },
-                            { icon: "🚁", label: "UAV", value: projectMetadata.device || "—" },
-                            { icon: "🏢", label: "Đơn vị quét", value: projectMetadata.operator || "—" },
-                            { icon: "👤", label: "Người vận hành", value: projectMetadata.supervisor || "—" },
-                            { icon: "⚡", label: "Công suất pin", value: projectMetadata.panelPower ? `${projectMetadata.panelPower} W` : "—" },
-                            { icon: "🔌", label: "Công suất hệ thống", value: projectMetadata.systemCapacity || "—" },
-                            { icon: "📊", label: "Loại dữ liệu", value: projectMetadata.dataType || "—" },
-                            { icon: "🤖", label: "Model AI", value: projectMetadata.aiModel || "—" },
-                            { icon: "💻", label: "Hệ thống", value: projectMetadata.systemVersion || "—" },
-                            { icon: "📝", label: "Ghi chú", value: projectMetadata.notes || "Kiểm tra định kỳ tháng 6", fullWidth: true },
-                        ].map((row, i) => (
-                            <div key={i} style={{ 
-                                display: "flex", 
-                                alignItems: "flex-start", 
-                                gap: 6, 
-                                padding: "6px 8px", 
-                                borderRadius: 8, 
-                                background: "#f8fafc",
-                                gridColumn: row.fullWidth ? "span 2" : "span 1" 
-                            }}>
-                                <span style={{ fontSize: 13, flexShrink: 0 }}>{row.icon}</span>
-                                <div style={{ minWidth: 0, flex: 1 }}>
-                                    <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.4px" }}>{row.label}</div>
-                                    <div style={{ fontSize: 11, color: "#334155", fontWeight: 600, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.value}>{row.value}</div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-
-                    <button
-                        onClick={() => setShowMetadataModal(true)}
-                        disabled={isAnyLoading}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "9px 0", borderRadius: 10, border: "none", background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(14,165,233,0.3)", transition: "all 0.2s" }}
-                    >
-                        <Settings size={14} fill="white" /> Chỉnh sửa thông tin
-                    </button>
-                </div>
+                {/* Col 2: THÔNG TIN ĐỢT KIỂM TRA — với pagination */}
+                {(() => {
+                    const infoRows = [
+                        { icon: "🏭", label: "Tên dự án", value: projectMetadata.projectName || "—", fullWidth: true },
+                        { icon: "📅", label: "Ngày kiểm tra", value: projectMetadata.scanTime || "—" },
+                        { icon: "📍", label: "Địa điểm", value: projectMetadata.location || "—" },
+                        { icon: "🚁", label: "UAV", value: projectMetadata.device || "—" },
+                        { icon: "🏢", label: "Đơn vị quét", value: projectMetadata.operator || "—" },
+                        { icon: "👤", label: "Người vận hành", value: projectMetadata.supervisor || "—" },
+                        { icon: "⚡", label: "Công suất pin", value: projectMetadata.panelPower ? `${projectMetadata.panelPower} W` : "—" },
+                        { icon: "🔌", label: "Công suất hệ thống", value: projectMetadata.systemCapacity || "—" },
+                        { icon: "📊", label: "Loại dữ liệu", value: projectMetadata.dataType || "—" },
+                        { icon: "🤖", label: "Model AI", value: projectMetadata.aiModel || "—" },
+                        { icon: "💻", label: "Hệ thống", value: projectMetadata.systemVersion || "—" },
+                        { icon: "📝", label: "Ghi chú", value: projectMetadata.notes || "Kiểm tra định kỳ tháng 6", fullWidth: true },
+                    ];
+                    return <InfoPanel rows={infoRows} onEdit={() => setShowMetadataModal(true)} isAnyLoading={isAnyLoading} />;
+                })()}
 
                 {/* Col 3: ẢNH UAV ĐÃ TẢI LÊN */}
-                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column", gap: 10 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, height: "100%", boxSizing: "border-box" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <Image size={15} color="#f59e0b" />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Ảnh UAV đã tải lên</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Ảnh UAV đã tải lên</span>
                         {data?.length > 0 && <span style={{ marginLeft: "auto", fontSize: 11, color: "#64748b", fontWeight: 500 }}>{data.length} ảnh</span>}
                     </div>
                     <div style={{ flex: 1, minHeight: 0 }}>
@@ -1969,10 +2043,10 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             {/* ── BOTTOM 2-COLUMN SECTION ── */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1.6fr", gap: 16 }}>
                 {/* Col 1: THỐNG KÊ LỖI THEO LOẠI */}
-                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
                         <AlertCircle size={15} color="#ef4444" />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Thống kê lỗi theo loại</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Thống kê lỗi theo loại</span>
                     </div>
 
                     <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
@@ -1982,18 +2056,18 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                         </div>
 
                         {/* Legend table */}
-                        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
-                            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "4px 10px", fontSize: 11, color: "#94a3b8", fontWeight: 600, paddingBottom: 4, borderBottom: "1px solid #f1f5f9" }}>
+                        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "2px 8px", fontSize: 11, color: "#94a3b8", fontWeight: 600, paddingBottom: 4, borderBottom: "1px solid #f1f5f9" }}>
                                 <span>Loại lỗi</span><span></span><span>Số lượng</span><span>Tỷ lệ</span>
                             </div>
                             {donutData.length === 0 ? (
-                                <div style={{ color: "#94a3b8", fontSize: 12, textAlign: "center", paddingTop: 16 }}>Chưa có dữ liệu</div>
+                                <div style={{ color: "#94a3b8", fontSize: 12, textAlign: "center", paddingTop: 8 }}>Chưa có dữ liệu</div>
                             ) : donutData.map((d, i) => (
-                                <div key={i} style={{ display: "grid", gridTemplateColumns: "14px 1fr auto auto", gap: "0 10px", alignItems: "center", fontSize: 12 }}>
-                                    <div style={{ width: 12, height: 12, borderRadius: 3, background: d.color, flexShrink: 0 }} />
+                                <div key={i} style={{ display: "grid", gridTemplateColumns: "10px 1fr auto auto", gap: "0 8px", alignItems: "center", fontSize: 12, padding: "2px 0" }}>
+                                    <div style={{ width: 10, height: 10, borderRadius: 2, background: d.color, flexShrink: 0 }} />
                                     <span style={{ color: "#334155", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.label}</span>
                                     <span style={{ color: "#0f172a", fontWeight: 700, textAlign: "right" }}>{d.value.toLocaleString()}</span>
-                                    <span style={{ color: "#64748b", textAlign: "right", minWidth: 42 }}>{((d.value / Math.max(totalFaultCount, 1)) * 100).toFixed(1)}%</span>
+                                    <span style={{ color: "#64748b", textAlign: "right", minWidth: 36 }}>{((d.value / Math.max(totalFaultCount, 1)) * 100).toFixed(1)}%</span>
                                 </div>
                             ))}
                         </div>
@@ -2001,26 +2075,26 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
 
                     <button
                         onClick={() => {}}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%", padding: "8px 0", marginTop: 14, borderRadius: 8, border: "1px solid #e2e8f0", background: "transparent", color: "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, width: "100%", padding: "7px 0", marginTop: 12, borderRadius: 6, border: "1px solid #e2e8f0", background: "transparent", color: "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
                     >
-                        Xem chi tiết <ChevronRight size={14} />
+                        Xem chi tiết <ChevronRight size={12} />
                     </button>
                 </div>
 
                 {/* Col 2: CÔNG SUẤT HAO HỤT THEO LOẠI LỖI */}
-                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
                         <Zap size={15} color="#f59e0b" />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Công suất hao hụt theo loại lỗi</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Công suất hao hụt theo loại lỗi</span>
                         {lossUnit && powerLossChartData.length > 0 && (
                             <span style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>Đơn vị: {lossUnit}</span>
                         )}
                     </div>
-                    <div style={{ flex: 1, minHeight: 180 }}>
+                    <div style={{ flex: 1, minHeight: 140 }}>
                         <PowerLossBarChart data={powerLossChartData} />
                     </div>
                     {powerLossChartData.length > 0 ? (
-                        <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", fontSize: 11, color: "#92400e", display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: 6, background: "#fffbeb", border: "1px solid #fde68a", fontSize: 11, color: "#92400e", display: "flex", alignItems: "center", gap: 4 }}>
                             <Zap size={12} color="#f59e0b" />
                             <span>
                                 <b style={{ color: powerLossChartData[0]?.color }}>{powerLossChartData[0]?.label}</b>
@@ -2029,7 +2103,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                             </span>
                         </div>
                     ) : (
-                        <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: 11, color: "#94a3b8", textAlign: "center" }}>
+                        <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: 6, background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: 11, color: "#94a3b8", textAlign: "center" }}>
                             Chưa có dữ liệu công suất hao hụt
                         </div>
                     )}

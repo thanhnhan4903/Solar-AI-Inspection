@@ -190,7 +190,7 @@ class CustomPDF(FPDF):
 
 class ReportGenerator:
     @staticmethod
-    def _build_pdf_content(pdf, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, toc_page_numbers=None):
+    def _build_pdf_content(pdf, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, gis_map_path=None, toc_page_numbers=None):
         """
         Dựng layout báo cáo PDF. Hàm này sẽ được chạy 2 lần (Two-pass):
         - Lần 1: Không có toc_page_numbers (để đo vị trí trang thực tế của các phần).
@@ -445,12 +445,14 @@ class ReportGenerator:
         pdf.write(7.5, "Dưới đây là hình ảnh bản đồ nhiệt toàn cảnh của khu vực quét điện mặt trời. Bản đồ cung cấp cái nhìn tổng quan về vị trí phân bố các tấm pin lỗi phục vụ hiệu quả cho công tác lập kế hoạch O&M.")
         pdf.ln(12)
         
-        if AERIAL_PATH and os.path.exists(AERIAL_PATH):
+        map_image_path = gis_map_path if (gis_map_path and os.path.exists(gis_map_path)) else AERIAL_PATH
+        
+        if map_image_path and os.path.exists(map_image_path):
             y_img = pdf.get_y()
-            pdf.image(AERIAL_PATH, x=35, y=y_img, w=155)
+            pdf.image(map_image_path, x=35, y=y_img, w=155)
             
             try:
-                temp_img = cv2.imread(AERIAL_PATH)
+                temp_img = cv2.imread(map_image_path)
                 if temp_img is not None:
                     h_i, w_i = temp_img.shape[:2]
                     img_aspect = h_i / w_i
@@ -700,6 +702,186 @@ class ReportGenerator:
         return sec_1_page, sec_2_page, sec_3_page, sec_4_page
 
     @staticmethod
+    def generate_gis_map_image(data_list, output_map_path):
+        """
+        Tạo ảnh bản đồ GIS từ kết quả phân tích bằng cách ghép các ảnh thermal lại
+        và vẽ polygon các panel (xanh/đỏ) cùng với các defect tương tự UnifiedDashboard.
+        """
+        import cv2
+        import numpy as np
+        import os
+        import json
+
+        # Nhóm các kết quả theo image filename để giữ đúng thứ tự ảnh xuất hiện trong database
+        image_to_results = {}
+        ordered_filenames = []
+        for p in data_list:
+            if not p.image:
+                continue
+            fname = p.image.filename
+            if fname not in image_to_results:
+                image_to_results[fname] = []
+                ordered_filenames.append(fname)
+            image_to_results[fname].append(p)
+
+        num_images = len(ordered_filenames)
+        if num_images == 0:
+            return None
+
+        # Cấu hình grid giống UnifiedDashboard
+        IMAGES_PER_ROW = 5
+        PADDING = 100
+
+        # Đọc thử kích thước của các ảnh hoặc mặc định 640x512
+        img_w, img_h = 640, 512
+        for fname in ordered_filenames:
+            path = os.path.join("data/precalib", fname)
+            if not os.path.exists(path):
+                path = os.path.join("data/raw", fname)
+            if os.path.exists(path):
+                img = cv2.imread(path)
+                if img is not None:
+                    img_h, img_w = img.shape[:2]
+                    break
+
+        col_count = min(num_images, IMAGES_PER_ROW)
+        row_count = (num_images + IMAGES_PER_ROW - 1) // IMAGES_PER_ROW
+
+        # Thêm 60px lề dưới cho dải chú thích (legend strip)
+        legend_h = 60
+        canvas_w = col_count * img_w + (col_count - 1) * PADDING
+        canvas_h = row_count * img_h + (row_count - 1) * PADDING + legend_h
+
+        # Tạo canvas với màu nền tối #030712 (RGB: 3, 7, 18 -> BGR: 18, 7, 3)
+        canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+        canvas[:, :] = (18, 7, 3)
+
+        # Ghép các ảnh nền
+        for index, fname in enumerate(ordered_filenames):
+            col = index % IMAGES_PER_ROW
+            row = index // IMAGES_PER_ROW
+
+            x_offset = col * (img_w + PADDING)
+            y_offset = row * (img_h + PADDING)
+
+            path = os.path.join("data/precalib", fname)
+            if not os.path.exists(path):
+                path = os.path.join("data/raw", fname)
+
+            img = None
+            if os.path.exists(path):
+                img = cv2.imread(path)
+
+            if img is not None:
+                h_actual, w_actual = img.shape[:2]
+                if w_actual != img_w or h_actual != img_h:
+                    img = cv2.resize(img, (img_w, img_h))
+                canvas[y_offset:y_offset+img_h, x_offset:x_offset+img_w] = img
+            else:
+                cv2.rectangle(canvas, (x_offset, y_offset), (x_offset + img_w, y_offset + img_h), (30, 30, 30), -1)
+                cv2.putText(canvas, fname, (x_offset + 10, y_offset + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+
+            # Vẽ các panel của ảnh này
+            results_in_image = image_to_results.get(fname, [])
+            for p in results_in_image:
+                p_detail = {}
+                if p.defect_type and p.defect_type.startswith("{"):
+                    try:
+                        p_detail = json.loads(p.defect_type)
+                    except Exception:
+                        pass
+
+                # Lấy polygon vẽ panel
+                poly = p_detail.get("outer_polygon") or p_detail.get("polygon")
+                if not poly:
+                    bbox = p_detail.get("bbox") or p_detail.get("box")
+                    if bbox and len(bbox) == 4:
+                        bx1, by1, bx2, by2 = bbox
+                        poly = [[bx1, by1], [bx2, by1], [bx2, by2], [bx1, by2]]
+
+                if poly and len(poly) >= 3:
+                    canvas_poly = []
+                    for pt in poly:
+                        px, py = pt
+                        canvas_poly.append([int(x_offset + px), int(y_offset + py)])
+                    pts = np.array(canvas_poly, dtype=np.int32)
+
+                    # Trạng thái panel
+                    defects = p_detail.get("defects", [])
+                    has_defect = len(defects) > 0 and p_detail.get("review_status", "unreviewed") != "false_positive"
+
+                    # Màu BGR: Xanh lá (healthy) hoặc Đỏ (faulty)
+                    color = (68, 68, 239) if has_defect else (94, 197, 34)
+
+                    cv2.polylines(canvas, [pts], isClosed=True, color=color, thickness=2)
+
+                    # Vẽ tên local_id của panel
+                    local_id = p.panel.local_id if (p.panel and p.panel.local_id) else f"R{p_detail.get('row', 0):02d}_C{p_detail.get('col', 0):02d}"
+                    center_x = int(sum(pt[0] for pt in canvas_poly) / len(canvas_poly))
+                    center_y = int(sum(pt[1] for pt in canvas_poly) / len(canvas_poly))
+                    cv2.putText(canvas, local_id, (center_x - 15, center_y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+
+                    # Vẽ các defect của panel này
+                    if has_defect:
+                        for d in defects:
+                            d_poly = d.get("polygon") or d.get("display_polygon")
+                            if not d_poly:
+                                d_bbox = d.get("bbox") or d.get("box")
+                                if d_bbox and len(d_bbox) == 4:
+                                    dx1, dy1, dx2, dy2 = d_bbox
+                                    d_poly = [[dx1, dy1], [dx2, dy1], [dx2, dy2], [dx1, dy2]]
+
+                            if d_poly and len(d_poly) >= 3:
+                                canvas_d_poly = []
+                                for d_pt in d_poly:
+                                    d_px, d_py = d_pt
+                                    canvas_d_poly.append([int(x_offset + d_px), int(y_offset + d_py)])
+                                d_pts = np.array(canvas_d_poly, dtype=np.int32)
+
+                                # Màu defect dựa trên class_name
+                                cname = str(d.get("class_name", "")).lower()
+                                if "hotspot_single" in cname or "single_cell" in cname:
+                                    d_color = (48, 59, 255)
+                                elif "hotspot_multi" in cname or "multi_cell" in cname:
+                                    d_color = (85, 45, 255)
+                                elif "crack" in cname or "nut" in cname:
+                                    d_color = (11, 158, 245)
+                                elif "shading" in cname or "shadow" in cname or "shade" in cname or "soil" in cname:
+                                    d_color = (246, 92, 139)
+                                else:
+                                    d_color = (48, 59, 255)
+
+                                cv2.polylines(canvas, [d_pts], isClosed=True, color=d_color, thickness=2)
+
+        # Vẽ dải chú thích ở dưới cùng
+        legend_y = canvas_h - legend_h
+        cv2.line(canvas, (20, legend_y), (canvas_w - 20, legend_y), (50, 50, 50), 1)
+
+        legend_items = [
+            ((94, 197, 34), "Tam pin binh thuong", "panel"),
+            ((68, 68, 239), "Tam pin co loi", "panel"),
+            ((48, 59, 255), "Diem nong don (hotspot_single)", "defect"),
+            ((85, 45, 255), "Diem nong da (hotspot_multi)", "defect"),
+            ((11, 158, 245), "Vet nut (crack)", "defect"),
+            ((246, 92, 139), "Bong che (shading)", "defect")
+        ]
+
+        item_w = canvas_w // len(legend_items)
+        for i, (col, label, ltype) in enumerate(legend_items):
+            item_x = i * item_w + 20
+            
+            if ltype == "panel":
+                cv2.rectangle(canvas, (item_x, legend_y + 20), (item_x + 20, legend_y + 40), col, 2)
+            else:
+                cv2.line(canvas, (item_x, legend_y + 30), (item_x + 20, legend_y + 30), col, 3)
+                
+            cv2.putText(canvas, label, (item_x + 28, legend_y + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (229, 231, 235), 1, cv2.LINE_AA)
+
+        # Lưu ảnh kết quả
+        cv2.imwrite(output_map_path, canvas)
+        return output_map_path
+
+    @staticmethod
     def generate_inspection_report(batch_id, data_list, output_path):
         """
         Khởi tạo tiến trình tạo báo cáo qua hai bước (Two-pass Rendering).
@@ -791,10 +973,16 @@ class ReportGenerator:
 
         # Thư mục tạm lưu ảnh đã cắt để chèn vào PDF
         temp_dir = tempfile.mkdtemp()
-        
-        # ─────────────────────────────────────────
-        # Bước tiền xử lý: Cắt toàn bộ ảnh nhiệt zoom lỗi & ảnh RGB bối cảnh
-        # ─────────────────────────────────────────
+
+        # Tạo ảnh bản đồ GIS động từ kết quả phân tích
+        gis_map_path = os.path.join(temp_dir, "gis_map.png")
+        try:
+            ReportGenerator.generate_gis_map_image(data_list, gis_map_path)
+            logger.info(f"Successfully generated dynamic GIS map image at {gis_map_path}")
+        except Exception as e:
+            logger.exception(f"Failed to generate dynamic GIS map: {e}")
+            gis_map_path = None
+
         cropped_images = {}
         for idx, (p, p_detail) in enumerate(faulty_panels):
             defects = p_detail.get("defects", [])
@@ -941,7 +1129,7 @@ class ReportGenerator:
         # ─────────────────────────────────────────
         pdf1 = CustomPDF()
         sec_1, sec_2, sec_3, sec_4 = ReportGenerator._build_pdf_content(
-            pdf1, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, toc_page_numbers=None
+            pdf1, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, gis_map_path=gis_map_path, toc_page_numbers=None
         )
         
         toc_page_numbers = {
@@ -956,7 +1144,7 @@ class ReportGenerator:
         # ─────────────────────────────────────────
         pdf2 = CustomPDF()
         ReportGenerator._build_pdf_content(
-            pdf2, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, toc_page_numbers=toc_page_numbers
+            pdf2, data_list, thermal_to_rgb, metadata_fields, faulty_panels, cropped_images, panel_power, gis_map_path=gis_map_path, toc_page_numbers=toc_page_numbers
         )
 
         pdf2.output(output_path)
