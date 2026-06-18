@@ -89,6 +89,7 @@ export default function App() {
                             setCurrentBatchId(null);
                             setCurrentPanelPower(600);
                         }}
+                        onViewOnMap={() => navigate("ops")}
                     />
                 )}
 

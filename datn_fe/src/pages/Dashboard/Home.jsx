@@ -1306,7 +1306,7 @@ function InfoPanel({ rows, onEdit, isAnyLoading }) {
 // ─────────────────────────────────────────
 // Home Page
 // ─────────────────────────────────────────
-export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
+export default function Home({ data, batchId, onAnalysisComplete, onReset, onViewOnMap }) {
     const [isUploading, setIsUploading] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analysisProgress, setAnalysisProgress] = useState({
@@ -2074,7 +2074,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                     </div>
 
                     <button
-                        onClick={() => {}}
+                        onClick={onViewOnMap}
                         style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, width: "100%", padding: "7px 0", marginTop: 12, borderRadius: 6, border: "1px solid #e2e8f0", background: "transparent", color: "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
                     >
                         Xem chi tiết <ChevronRight size={12} />
