@@ -43,6 +43,194 @@ const API = "http://127.0.0.1:8000";
 // ─────────────────────────────────────────
 // Mini bar chart component
 // ─────────────────────────────────────────
+// Donut Chart component (SVG pure)
+function DonutChart({ data, totalLabel }) {
+    if (!data || data.length === 0) {
+        return (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 180, color: "#94a3b8", flexDirection: "column", gap: 8 }}>
+                <TrendingUp size={28} style={{ opacity: 0.3 }} />
+                <span style={{ fontSize: 12 }}>Chưa có dữ liệu</span>
+            </div>
+        );
+    }
+
+    const total = data.reduce((s, d) => s + d.value, 0) || 1;
+    const radius = 60;
+    const cx = 90, cy = 90;
+    const strokeWidth = 22;
+    const circumference = 2 * Math.PI * radius;
+
+    let offset = 0;
+    const segments = data.map(d => {
+        const pct = d.value / total;
+        const dash = pct * circumference;
+        const gap = circumference - dash;
+        const seg = { ...d, dash, gap, offset: offset * circumference, pct };
+        offset += pct;
+        return seg;
+    });
+
+    return (
+        <svg width={180} height={180} viewBox="0 0 180 180">
+            <circle cx={cx} cy={cy} r={radius} fill="none" stroke="#f1f5f9" strokeWidth={strokeWidth} />
+            {segments.map((seg, i) => (
+                <circle
+                    key={i}
+                    cx={cx} cy={cy} r={radius}
+                    fill="none"
+                    stroke={seg.color}
+                    strokeWidth={strokeWidth}
+                    strokeDasharray={`${seg.dash} ${seg.gap}`}
+                    strokeDashoffset={circumference / 4 - seg.offset}
+                    strokeLinecap="butt"
+                    style={{ transition: "stroke-dashoffset 0.8s ease" }}
+                />
+            ))}
+            <text x={cx} y={cy - 8} textAnchor="middle" style={{ fontSize: 20, fontWeight: 800, fill: "#1e293b" }}>
+                {totalLabel}
+            </text>
+            <text x={cx} y={cy + 14} textAnchor="middle" style={{ fontSize: 11, fill: "#64748b" }}>
+                tổng lỗi
+            </text>
+        </svg>
+    );
+}
+
+// Power Loss Bar Chart by fault type
+function PowerLossBarChart({ data }) {
+    if (!data || data.length === 0) {
+        return (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 160, color: "#94a3b8", flexDirection: "column", gap: 8 }}>
+                <Zap size={28} style={{ opacity: 0.3 }} />
+                <span style={{ fontSize: 12 }}>Chưa có dữ liệu phân tích</span>
+            </div>
+        );
+    }
+
+    const maxVal = Math.max(...data.map(d => d.value), 0.001);
+
+    const formatVal = (v, unit) => {
+        if (unit === "W") return `${Math.round(v)} W`;
+        if (unit === "kWp") return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} kWp`;
+        return `${v.toFixed(2)} MWp`;
+    };
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "flex-end", gap: 8, paddingBottom: 4 }}>
+                {data.map((item, i) => {
+                    const barH = Math.max((item.value / maxVal) * 140, 8);
+                    return (
+                        <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minWidth: 0 }}>
+                            <span style={{ fontSize: 9, fontWeight: 700, color: "#475569", textAlign: "center", lineHeight: 1.3 }}>
+                                {formatVal(item.value, item.unit || "W")}
+                            </span>
+                            <div style={{
+                                width: "100%", height: barH,
+                                background: `linear-gradient(180deg, ${item.color}, ${item.color}bb)`,
+                                borderRadius: "4px 4px 0 0",
+                                transition: "height 0.7s ease",
+                                boxShadow: `0 -3px 10px ${item.color}40`,
+                                cursor: "default",
+                            }}
+                                title={`${item.label}: ${formatVal(item.value, item.unit || "W")}`}
+                            />
+                        </div>
+                    );
+                })}
+            </div>
+            <div style={{ display: "flex", gap: 8, borderTop: "1px solid #e2e8f0", paddingTop: 6 }}>
+                {data.map((item, i) => (
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 0 }}>
+                        <div style={{ width: 10, height: 10, borderRadius: 3, background: item.color, flexShrink: 0 }} />
+                        <span style={{ textAlign: "center", fontSize: 9, color: "#64748b", lineHeight: 1.3, minWidth: 0, wordBreak: "break-word" }}>
+                            {item.label}
+                        </span>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+// Image Gallery component
+function ImageGallery({ images, apiBase }) {
+    const [activeIdx, setActiveIdx] = useState(0);
+
+    if (!images || images.length === 0) {
+        return (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 10, color: "#94a3b8" }}>
+                <Image size={36} style={{ opacity: 0.3 }} />
+                <span style={{ fontSize: 12 }}>Chưa có ảnh nào được tải lên</span>
+            </div>
+        );
+    }
+
+    const currentImg = images[activeIdx];
+    const imgSrc = `${apiBase}/data/precalib/${currentImg.filename}`;
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 8 }}>
+            {/* Main image */}
+            <div style={{ position: "relative", flex: 1, borderRadius: 10, overflow: "hidden", background: "#0f172a", minHeight: 120 }}>
+                <img
+                    src={imgSrc}
+                    alt={currentImg.filename}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    onError={e => { e.target.src = ""; e.target.style.display = "none"; }}
+                />
+                <div style={{
+                    position: "absolute", bottom: 8, right: 10,
+                    background: "rgba(0,0,0,0.6)", borderRadius: 6,
+                    padding: "2px 8px", fontSize: 11, color: "#fff", fontWeight: 600
+                }}>
+                    {activeIdx + 1} / {images.length}
+                </div>
+                {/* Nav arrows */}
+                {images.length > 1 && (
+                    <>
+                        <button onClick={() => setActiveIdx(i => Math.max(0, i - 1))} style={{
+                            position: "absolute", left: 6, top: "50%", transform: "translateY(-50%)",
+                            background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%",
+                            width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
+                            cursor: "pointer", color: "#fff", fontSize: 14
+                        }}>‹</button>
+                        <button onClick={() => setActiveIdx(i => Math.min(images.length - 1, i + 1))} style={{
+                            position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                            background: "rgba(0,0,0,0.5)", border: "none", borderRadius: "50%",
+                            width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
+                            cursor: "pointer", color: "#fff", fontSize: 14
+                        }}>›</button>
+                    </>
+                )}
+            </div>
+
+            {/* Thumbnails strip */}
+            <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, flexShrink: 0 }}>
+                {images.slice(0, 8).map((img, i) => (
+                    <div
+                        key={i}
+                        onClick={() => setActiveIdx(i)}
+                        style={{
+                            flexShrink: 0, width: 52, height: 36, borderRadius: 6,
+                            overflow: "hidden", cursor: "pointer",
+                            border: i === activeIdx ? "2px solid #0ea5e9" : "2px solid transparent",
+                            background: "#0f172a", transition: "border 0.2s"
+                        }}
+                    >
+                        <img
+                            src={`${apiBase}/data/precalib/${img.filename}`}
+                            alt=""
+                            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                            onError={e => { e.target.style.display = "none"; }}
+                        />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function AnomalyBarChart({ data }) {
     if (!data || data.length === 0) {
         return (
@@ -58,41 +246,25 @@ function AnomalyBarChart({ data }) {
 
     const max = Math.max(...data.map((d) => d.value), 1);
     const barColors = ["#f97316","#ef4444","#06b6d4","#eab308","#a855f7","#10b981","#0ea5e9","#f59e0b"];
-    const MAX_BAR_HEIGHT = 64; // px — giới hạn cứng để không tràn
+    const MAX_BAR_HEIGHT = 64;
 
     return (
         <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-            {/* Bars area */}
-            <div style={{
-                flex: 1, display: "flex", alignItems: "flex-end",
-                gap: 6, minHeight: 0, overflow: "hidden", paddingBottom: 2,
-            }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "flex-end", gap: 6, minHeight: 0, overflow: "hidden", paddingBottom: 2 }}>
                 {data.map((item, i) => {
                     const barH = Math.max(Math.round((item.value / max) * MAX_BAR_HEIGHT), 4);
                     const color = barColors[i % barColors.length];
                     return (
                         <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 0 }}>
-                            <span style={{ fontSize: 10, fontWeight: 700, color: "#334155", lineHeight: 1 }}>
-                                {item.value}
-                            </span>
-                            <div style={{
-                                width: "100%", height: barH,
-                                background: `linear-gradient(180deg, ${color}, ${color}bb)`,
-                                borderRadius: "3px 3px 0 0",
-                                transition: "height 0.6s ease",
-                            }} />
+                            <span style={{ fontSize: 10, fontWeight: 700, color: "#334155", lineHeight: 1 }}>{item.value}</span>
+                            <div style={{ width: "100%", height: barH, background: `linear-gradient(180deg, ${color}, ${color}bb)`, borderRadius: "3px 3px 0 0", transition: "height 0.6s ease" }} />
                         </div>
                     );
                 })}
             </div>
-
-            {/* Labels */}
             <div style={{ display: "flex", gap: 6, borderTop: "1px solid #e2e8f0", paddingTop: 4, flexShrink: 0 }}>
                 {data.map((item, i) => (
-                    <div key={i} style={{
-                        flex: 1, textAlign: "center", fontSize: 8,
-                        color: "#64748b", wordBreak: "break-word", lineHeight: 1.2, minWidth: 0,
-                    }}>
+                    <div key={i} style={{ flex: 1, textAlign: "center", fontSize: 8, color: "#64748b", wordBreak: "break-word", lineHeight: 1.2, minWidth: 0 }}>
                         {item.label}
                     </div>
                 ))}
@@ -1066,6 +1238,18 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
     const estimatedLoss = summary.total_power_loss_w;
     const healthyRate = summary.normal_panel_ratio_percent;
 
+    // Helper: classify defect class name into canonical group
+    const classifyDefect = (rawName) => {
+        const cls = (rawName || "").toLowerCase();
+        if (cls.includes("hotspot_multi") || cls.includes("multi_cell") || cls.includes("multicell") || cls.includes("multi-cell")) return "hotspot multi cell";
+        if (cls.includes("hotspot_single") || cls.includes("single_cell") || cls.includes("single-cell")) return "hotspot single cell";
+        if (cls.includes("hotspot") || cls.includes("hot")) return "hotspot single cell";
+        if (cls.includes("crack") || cls.includes("nut")) return "crack";
+        if (cls.includes("shad") || cls.includes("shadow") || cls.includes("soil") || cls.includes("soiling") || cls.includes("dirt")) return "shading";
+        if (cls.includes("diode")) return "diode";
+        return rawName ? rawName.replace(/_/g, " ") : "khác";
+    };
+
     const defectCounts = {};
     (data || []).forEach((img) => {
         (img.panels || []).forEach((p) => {
@@ -1073,8 +1257,8 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
             const include = reviewStatus === "false_positive" ? false : (p.include_in_report !== undefined ? p.include_in_report : true);
             if (include) {
                 (p.defects || []).forEach((d) => {
-                    const name = (d.class_name || d.type || "unknown").replace(/_/g, " ");
-                    defectCounts[name] = (defectCounts[name] || 0) + 1;
+                    const group = classifyDefect(d.class_name || d.type || "");
+                    defectCounts[group] = (defectCounts[group] || 0) + 1;
                 });
             }
         });
@@ -1436,8 +1620,94 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
 
     const isAnyLoading = isUploading || isAnalyzing || isResetting || isUpdatingModel || isReanalyzing;
 
+    // ── Màu sắc chuẩn cho từng nhóm lỗi (phân biệt hotspot đơn/đa) ──
+    const FAULT_COLORS = {
+        "hotspot single cell": "#ef4444",   // Đỏ tươi — Hotspot đơn
+        "hotspot multi cell":  "#ff6b35",   // Cam — Hotspot đa
+        "crack":               "#f59e0b",   // Vàng cam — Crack
+        "shading":             "#8b5cf6",   // Tím — Shading
+        "diode":               "#06b6d4",   // Cyan — Diode
+    };
+    const getFaultColor = (group) => FAULT_COLORS[group.toLowerCase()] || "#94a3b8";
+
+    // Tên hiển thị đẹp hơn cho từng nhóm
+    const FAULT_LABELS = {
+        "hotspot single cell": "Hotspot (Đơn)",
+        "hotspot multi cell":  "Hotspot (Đa)",
+        "crack":               "Crack",
+        "shading":             "Shading",
+        "diode":               "Diode",
+    };
+    const getFaultLabel = (group) => FAULT_LABELS[group.toLowerCase()] || group;
+
+    // ── Tính công suất hao hụt theo từng nhóm lỗi ──
+    // Backend lưu power_loss_w ở cấp panel — phân bổ theo tỷ lệ số defect từng nhóm trong panel
+    const defectPowerLossW = {};
+    (data || []).forEach((img) => {
+        (img.panels || []).forEach((p) => {
+            const reviewStatus = p.review_status || "unreviewed";
+            const include = reviewStatus === "false_positive" ? false : (p.include_in_report !== undefined ? p.include_in_report : true);
+            if (!include) return;
+
+            const panelLossW = Number(p.power_loss_w ?? p.total_panel_loss ?? 0);
+            const defects = p.defects || [];
+            if (defects.length === 0) return;
+
+            // Đếm số defect theo nhóm trong panel này
+            const panelGroupCounts = {};
+            defects.forEach((d) => {
+                const group = classifyDefect(d.class_name || d.type || "");
+                panelGroupCounts[group] = (panelGroupCounts[group] || 0) + 1;
+            });
+
+            const totalDefectsInPanel = Object.values(panelGroupCounts).reduce((s, v) => s + v, 0);
+            if (totalDefectsInPanel === 0) return;
+
+            // Phân bổ power_loss_w theo tỷ lệ số defect
+            Object.entries(panelGroupCounts).forEach(([group, cnt]) => {
+                const share = (cnt / totalDefectsInPanel) * panelLossW;
+                defectPowerLossW[group] = (defectPowerLossW[group] || 0) + share;
+            });
+        });
+    });
+
+    // Xác định đơn vị hiển thị phù hợp
+    const totalLossW = Object.values(defectPowerLossW).reduce((s, v) => s + v, 0);
+    let lossUnit, lossDivisor;
+    if (totalLossW >= 1_000_000) {
+        lossUnit = "MWp"; lossDivisor = 1_000_000;
+    } else if (totalLossW >= 1_000) {
+        lossUnit = "kWp"; lossDivisor = 1_000;
+    } else {
+        lossUnit = "W"; lossDivisor = 1;
+    }
+
+    const powerLossChartData = Object.entries(defectPowerLossW)
+        .filter(([, v]) => v > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([group, valueW]) => ({
+            label: getFaultLabel(group),
+            rawGroup: group,
+            value: valueW / lossDivisor,
+            color: getFaultColor(group),
+            unit: lossUnit,
+        }));
+
+    // ── Dữ liệu Donut chart (dùng defectCounts đã phân nhóm ở trên) ──
+    const donutData = Object.entries(defectCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([group, value]) => ({
+            label: getFaultLabel(group),
+            rawGroup: group,
+            value,
+            color: getFaultColor(group),
+        }));
+
+    const totalFaultCount = donutData.reduce((s, d) => s + d.value, 0);
+    const estimatedLossMWp = estimatedLoss / 1_000_000;
+
     return (
-        <div>
+        <div style={{ fontFamily: "'Inter', 'DM Sans', system-ui, sans-serif" }}>
             {/* AI Progress modal — hiển thị khi đang chạy AI */}
             {isAnalyzing && (
                 <AIProgressModal
@@ -1468,469 +1738,282 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset }) {
                 />
             )}
 
-            <div
-                style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-end",
-                    marginBottom: 24,
-                    gap: 16,
-                    flexWrap: "wrap",
-                }}
-            >
-                <PageHeader title="Bảng điều khiển" subtitle={projectMetadata.projectName ? `Dự án: ${projectMetadata.projectName} (Dữ liệu AI thời gian thực)` : "Tổng quan giám sát (Dữ liệu AI thời gian thực)"} />
+            {/* ── HIDDEN FILE INPUTS ── */}
+            <input type="file" accept=".zip,.rar,.jpg,.jpeg,.png,image/*" multiple ref={fileInputRef} onChange={handleUploadFiles} style={{ display: "none" }} />
+            <input type="file" webkitdirectory="true" directory="" multiple ref={folderInputRef} onChange={handleUploadFiles} style={{ display: "none" }} />
+            <input type="file" accept=".pt" ref={modelInputRef} onChange={handleUpdateModel} style={{ display: "none" }} />
 
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                    <input
-                        type="file"
-                        accept=".zip,.rar,.jpg,.jpeg,.png,image/*"
-                        multiple
-                        ref={fileInputRef}
-                        onChange={handleUploadFiles}
-                        style={{ display: "none" }}
-                    />
-
-                    <input
-                        type="file"
-                        webkitdirectory="true"
-                        directory=""
-                        multiple
-                        ref={folderInputRef}
-                        onChange={handleUploadFiles}
-                        style={{ display: "none" }}
-                    />
-
-                    <div ref={uploadMenuRef} style={{ position: "relative", display: "inline-block" }}>
-                        <ActionButton
-                            onClick={() => {
-                                if (!isAnyLoading) {
-                                    setUploadMenuOpen(prev => !prev);
-                                }
-                            }}
+            {/* ── HEADER ── */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+                <div>
+                    <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#0f172a" }}>Bảng điều khiển</h1>
+                    <p style={{ margin: "4px 0 0", fontSize: 13, color: "#64748b" }}>
+                        {projectMetadata.projectName ? `Dự án: ${projectMetadata.projectName} · ` : ""}Tổng quan giám sát (Dữ liệu AI thời gian thực)
+                    </p>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {/* Upload dropdown */}
+                    <div ref={uploadMenuRef} style={{ position: "relative" }}>
+                        <button
+                            onClick={() => !isAnyLoading && setUploadMenuOpen(p => !p)}
                             disabled={isAnyLoading}
-                            icon={isUploading ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
-                            style={{
-                                background: "linear-gradient(135deg, #0EA5E9, #8B5CF6)",
-                                color: "white",
-                                border: "none",
-                                boxShadow: "0 4px 12px rgba(14,165,233,0.3)",
-                            }}
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", opacity: isAnyLoading ? 0.7 : 1, boxShadow: "0 4px 12px rgba(14,165,233,0.3)", transition: "all 0.2s" }}
                         >
+                            {isUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
                             {isUploading ? statusText : "Tải dữ liệu UAV ▾"}
-                        </ActionButton>
-
+                        </button>
                         {uploadMenuOpen && (
-                            <div style={{
-                                position: "absolute",
-                                top: "100%",
-                                right: 0,
-                                marginTop: 8,
-                                background: "rgba(15, 23, 42, 0.95)",
-                                backdropFilter: "blur(12px)",
-                                border: "1px solid rgba(14, 165, 233, 0.3)",
-                                borderRadius: 12,
-                                boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 16px -8px rgba(0, 0, 0, 0.4)",
-                                padding: 6,
-                                zIndex: 100,
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 4,
-                                minWidth: 180,
-                            }}>
-                                <button
-                                    onClick={() => {
-                                        setUploadMenuOpen(false);
-                                        fileInputRef.current?.click();
-                                    }}
-                                    style={{
-                                        background: "transparent",
-                                        border: "none",
-                                        color: "#f8fafc",
-                                        padding: "10px 14px",
-                                        borderRadius: 8,
-                                        fontSize: 13,
-                                        fontWeight: 600,
-                                        textAlign: "left",
-                                        cursor: "pointer",
-                                        transition: "background 0.2s",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: 8,
-                                    }}
-                                    onMouseEnter={(e) => e.target.style.background = "rgba(14, 165, 233, 0.15)"}
-                                    onMouseLeave={(e) => e.target.style.background = "transparent"}
-                                >
-                                    <span style={{ fontSize: 14 }}>📄</span> Chọn file / Zip / Rar
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        setUploadMenuOpen(false);
-                                        folderInputRef.current?.click();
-                                    }}
-                                    style={{
-                                        background: "transparent",
-                                        border: "none",
-                                        color: "#f8fafc",
-                                        padding: "10px 14px",
-                                        borderRadius: 8,
-                                        fontSize: 13,
-                                        fontWeight: 600,
-                                        textAlign: "left",
-                                        cursor: "pointer",
-                                        transition: "background 0.2s",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: 8,
-                                    }}
-                                    onMouseEnter={(e) => e.target.style.background = "rgba(16, 185, 129, 0.15)"}
-                                    onMouseLeave={(e) => e.target.style.background = "transparent"}
-                                >
-                                    <span style={{ fontSize: 14 }}>📁</span> Chọn thư mục ảnh
-                                </button>
+                            <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: "rgba(15,23,42,0.97)", border: "1px solid rgba(14,165,233,0.3)", borderRadius: 10, padding: 6, zIndex: 200, minWidth: 180, display: "flex", flexDirection: "column", gap: 4, boxShadow: "0 10px 30px rgba(0,0,0,0.4)" }}>
+                                {[{ icon: "📄", label: "Chọn file / Zip / Rar", ref: fileInputRef }, { icon: "📁", label: "Chọn thư mục ảnh", ref: folderInputRef }].map((item, i) => (
+                                    <button key={i} onClick={() => { setUploadMenuOpen(false); item.ref.current?.click(); }}
+                                        style={{ background: "transparent", border: "none", color: "#f8fafc", padding: "9px 12px", borderRadius: 7, fontSize: 13, fontWeight: 500, textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
+                                        onMouseEnter={e => e.currentTarget.style.background = "rgba(14,165,233,0.15)"}
+                                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                                    ><span>{item.icon}</span>{item.label}</button>
+                                ))}
                             </div>
                         )}
                     </div>
 
-                    <ActionButton
+                    {/* Thông tin dự án */}
+                    <button onClick={() => setShowMetadataModal(true)} disabled={isAnyLoading}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#334155", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
+                        <Settings size={14} /> Thông tin dự án
+                    </button>
+
+                    {/* Thay model AI */}
+                    <button onClick={() => modelInputRef.current?.click()} disabled={isAnyLoading}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(14,165,233,0.4)", background: "rgba(14,165,233,0.06)", color: "#0ea5e9", fontSize: 13, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
+                        {isUpdatingModel ? <Loader2 size={14} className="animate-spin" /> : <Cpu size={14} />}
+                        {isUpdatingModel ? "Đang cập nhật..." : "Thay model AI"}
+                    </button>
+
+                    {/* Phân tích lại */}
+                    <button onClick={handleReanalyze} disabled={isAnyLoading || totalPanels === 0}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "linear-gradient(135deg,#f59e0b,#ef4444)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: (isAnyLoading || totalPanels === 0) ? "not-allowed" : "pointer", opacity: totalPanels === 0 ? 0.5 : 1, transition: "all 0.2s" }}>
+                        {isReanalyzing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                        {isReanalyzing ? "Đang chạy lại..." : "Phân tích lại"}
+                    </button>
+
+                    {/* Reset */}
+                    <button onClick={handleSystemReset} disabled={isAnyLoading}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.3)", background: "#fff1f1", color: "#ef4444", fontSize: 13, fontWeight: 600, cursor: isAnyLoading ? "not-allowed" : "pointer", transition: "all 0.2s" }}>
+                        {isResetting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                        {isResetting ? "Đang reset..." : "Reset Hệ thống"}
+                    </button>
+                </div>
+            </div>
+
+            {/* ── KPI CARDS ── */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>
+                {[
+                    { icon: <Image size={20} />, label: "TỔNG ẢNH UAV", value: (data?.length || 0).toLocaleString(), unit: "ảnh", accent: "#8b5cf6", delta: data?.length > 0 ? `so với lần tải trước` : null, up: true },
+                    { icon: <LayoutGrid size={20} />, label: "TỔNG PANEL", value: totalPanels.toLocaleString(), unit: "panel", accent: "#0ea5e9", delta: totalPanels > 0 ? `so với lần kiểm tra trước` : null, up: true },
+                    { icon: <AlertCircle size={20} />, label: "PANEL LỖI", value: totalFaults.toLocaleString(), unit: "panel lỗi", accent: "#ef4444", delta: totalPanels > 0 ? `${((totalFaults/Math.max(totalPanels,1))*100).toFixed(1)}% tổng số` : null, up: false },
+                    { icon: <Zap size={20} />, label: "CÔNG SUẤT HAO HỤT ƯỚC TÍNH", value: estimatedLossMWp >= 1 ? estimatedLossMWp.toFixed(2) : (estimatedLoss / 1000).toFixed(2), unit: estimatedLossMWp >= 1 ? "MWp" : "kWp", accent: "#f59e0b", delta: totalPanels > 0 ? `so với lần trước trung bình` : null, up: false },
+                ].map((card, i) => (
+                    <div key={i} style={{ background: "#fff", borderRadius: 14, padding: "16px 18px", border: "1px solid #e2e8f0", borderTop: `3px solid ${card.accent}`, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", transition: "box-shadow 0.2s" }}
+                        onMouseEnter={e => e.currentTarget.style.boxShadow = `0 6px 20px ${card.accent}20`}
+                        onMouseLeave={e => e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,0.04)"}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                            <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.8px" }}>{card.label}</p>
+                            <div style={{ width: 36, height: 36, borderRadius: 10, background: `${card.accent}15`, display: "flex", alignItems: "center", justifyContent: "center", color: card.accent }}>{card.icon}</div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                            <span style={{ fontSize: 28, fontWeight: 800, color: "#0f172a", lineHeight: 1 }}>{card.value}</span>
+                            <span style={{ fontSize: 12, color: "#64748b", fontWeight: 500 }}>{card.unit}</span>
+                        </div>
+                        {card.delta && (
+                            <p style={{ margin: "6px 0 0", fontSize: 11, color: card.up ? "#10b981" : "#ef4444", fontWeight: 500 }}>
+                                {card.up ? "▲" : "▼"} {card.delta}
+                            </p>
+                        )}
+                    </div>
+                ))}
+            </div>
+
+            {/* ── MIDDLE 3-COLUMN SECTION ── */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+                {/* Col 1: TẢI DỮ LIỆU UAV */}
+                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column", gap: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Upload size={15} color="#0ea5e9" />
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Tải dữ liệu UAV</span>
+                    </div>
+
+                    {/* Drop zone */}
+                    <div
+                        onClick={() => !isAnyLoading && folderInputRef.current?.click()}
+                        style={{ border: "2px dashed #cbd5e1", borderRadius: 12, padding: "28px 16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, cursor: isAnyLoading ? "not-allowed" : "pointer", background: "#f8fafc", transition: "all 0.2s" }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = "#0ea5e9"; e.currentTarget.style.background = "#f0f9ff"; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc"; }}
+                        onDragOver={e => e.preventDefault()}
+                        onDrop={e => { e.preventDefault(); if (!isAnyLoading && e.dataTransfer.files.length > 0) { const dt = e.dataTransfer; handleUploadFiles({ target: { files: dt.files } }); } }}
+                    >
+                        <div style={{ width: 48, height: 48, borderRadius: "50%", background: "rgba(14,165,233,0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Upload size={22} color="#0ea5e9" />
+                        </div>
+                        <p style={{ margin: 0, fontSize: 13, color: "#475569", fontWeight: 500, textAlign: "center" }}>
+                            Kéo thả thư mục vào đây<br /><span style={{ fontSize: 11, color: "#94a3b8" }}>hoặc</span>
+                        </p>
+                        <button
+                            onClick={e => { e.stopPropagation(); if (!isAnyLoading) folderInputRef.current?.click(); }}
+                            style={{ padding: "7px 18px", borderRadius: 8, border: "none", background: "#0ea5e9", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                        >
+                            Chọn thư mục
+                        </button>
+                    </div>
+
+                    {/* Upload progress */}
+                    {isUploading && (
+                        <div>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                                <span style={{ fontSize: 11, color: "#475569", fontWeight: 500 }}>Đang tải lên...</span>
+                                <span style={{ fontSize: 11, color: "#0ea5e9", fontWeight: 600 }}>100%</span>
+                            </div>
+                            <div style={{ height: 6, background: "#e2e8f0", borderRadius: 6, overflow: "hidden" }}>
+                                <div style={{ height: "100%", width: "100%", background: "linear-gradient(90deg,#0ea5e9,#6366f1)", borderRadius: 6, animation: "shimmerLoad 1.5s infinite" }} />
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Format info */}
+                    <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                            <CheckCircle size={12} color={data?.length > 0 ? "#10b981" : "#94a3b8"} />
+                            <span style={{ color: data?.length > 0 ? "#10b981" : "#64748b", fontWeight: 500 }}>
+                                {data?.length > 0 ? `✓ Đã tải ${data.length} ảnh · Tổng: ${data.length} ảnh` : "Hỗ trợ định dạng: JPG, PNG, TIF, RJPG"}
+                            </span>
+                        </div>
+                        {data?.length > 0 && <div style={{ color: "#0ea5e9", fontWeight: 500 }}>Đã tải lên &amp; phân tích AI thành công · 100%</div>}
+                    </div>
+                </div>
+
+                {/* Col 2: THÔNG TIN ĐỢT KIỂM TRA */}
+                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Settings size={15} color="#6366f1" />
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Thông tin đợt kiểm tra</span>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1 }}>
+                        {[
+                            { icon: "🏭", label: "Tên dự án", value: projectMetadata.projectName || "—" },
+                            { icon: "📅", label: "Ngày kiểm tra", value: projectMetadata.scanTime || "—" },
+                            { icon: "🚁", label: "UAV", value: projectMetadata.device || "—" },
+                            { icon: "📐", label: "Độ bay bướu", value: projectMetadata.scope ? `${projectMetadata.scope}` : "—" },
+                            { icon: "👤", label: "Người vận hành", value: projectMetadata.operator || "—" },
+                            { icon: "📝", label: "Ghi chú", value: projectMetadata.notes || "Kiểm tra định kỳ tháng 6" },
+                        ].map((row, i) => (
+                            <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 8px", borderRadius: 8, background: i % 2 === 0 ? "#f8fafc" : "transparent" }}>
+                                <span style={{ fontSize: 13, flexShrink: 0 }}>{row.icon}</span>
+                                <div style={{ minWidth: 0, flex: 1 }}>
+                                    <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.4px" }}>{row.label}</div>
+                                    <div style={{ fontSize: 12, color: "#334155", fontWeight: 600, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.value}</div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <button
                         onClick={() => setShowMetadataModal(true)}
                         disabled={isAnyLoading}
-                        icon={<Settings size={16} />}
-                        style={{
-                            background: "linear-gradient(135deg, #475569, #1e293b)",
-                            color: "white",
-                            border: "none",
-                            boxShadow: "0 4px 12px rgba(30,41,59,0.3)",
-                        }}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "9px 0", borderRadius: 10, border: "none", background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(14,165,233,0.3)", transition: "all 0.2s" }}
                     >
-                        Thông tin dự án
-                    </ActionButton>
-
-                    <input
-                        type="file"
-                        accept=".pt"
-                        ref={modelInputRef}
-                        onChange={handleUpdateModel}
-                        style={{ display: "none" }}
-                    />
-
-                    <ActionButton
-                        onClick={() => modelInputRef.current?.click()}
-                        disabled={isAnyLoading}
-                        icon={isUpdatingModel ? <Loader2 className="animate-spin" size={16} /> : <Cpu size={16} />}
-                        style={{
-                            background: "linear-gradient(135deg, #0ea5e920, #8b5cf610)",
-                            color: colors.primary,
-                            border: `1px solid ${colors.primary}50`,
-                            backdropFilter: "blur(4px)",
-                        }}
-                    >
-                        {isUpdatingModel ? "Đang cập nhật AI..." : "Thay model AI"}
-                    </ActionButton>
-
-                    <ActionButton
-                        onClick={handleReanalyze}
-                        disabled={isAnyLoading || totalPanels === 0}
-                        icon={isReanalyzing ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
-                        style={{
-                            background: "linear-gradient(135deg, #f59e0b, #ef4444)",
-                            color: "white",
-                            border: "none",
-                            boxShadow: totalPanels > 0 ? "0 4px 12px rgba(245,158,11,0.3)" : "none",
-                            opacity: (totalPanels === 0) ? 0.5 : 1,
-                        }}
-                    >
-                        {isReanalyzing ? "Đang chạy lại..." : "Phân tích lại"}
-                    </ActionButton>
-
-                    <ActionButton
-                        onClick={handleSystemReset}
-                        disabled={isAnyLoading}
-                        icon={isResetting ? <Loader2 className="animate-spin" size={16} /> : <Trash2 size={16} />}
-                        style={{
-                            background: "#fee2e2",
-                            color: colors.error || colors.danger,
-                            border: `1px solid ${(colors.error || colors.danger)}30`,
-                        }}
-                    >
-                        Reset Hệ thống
-                    </ActionButton>
-                </div>
-            </div>
-
-            <div
-                style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                    gap: 16,
-                    marginBottom: 24,
-                }}
-            >
-                <KpiCard
-                    icon={<Image size={20} />}
-                    label="SỐ HÌNH ĐƯỢC QUÉT"
-                    value={data?.length || 0}
-                    accent={colors.purple}
-                />
-                <KpiCard
-                    icon={<LayoutGrid size={20} />}
-                    label="TỔNG SỐ TẤM PIN"
-                    value={totalPanels.toLocaleString()}
-                    accent={colors.primary}
-                />
-                <KpiCard
-                    icon={<AlertCircle size={20} />}
-                    label="SỐ LƯỢNG LỖI"
-                    value={totalFaults}
-                    accent={colors.danger || colors.error}
-                />
-                <KpiCard
-                    icon={<Zap size={20} />}
-                    label="SẢN LƯỢNG HAO HỤT (W)"
-                    value={`${estimatedLoss.toFixed(2)}W`}
-                    accent={colors.warning}
-                />
-            </div>
-
-            <div
-                style={{
-                    background: "rgba(255,255,255,0.85)",
-                    backdropFilter: "blur(16px)",
-                    borderRadius: 20,
-                    border: "1px solid rgba(226,232,240,0.8)",
-                    padding: "24px 32px",
-                    boxShadow: "0 10px 30px rgba(0,0,0,0.04)",
-                    display: "flex",
-                    alignItems: "stretch",
-                    justifyContent: "space-between",
-                    gap: 32,
-                    flexWrap: "wrap",
-                }}
-            >
-                <style>{`
-                    @keyframes neonPulse {
-                        0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
-                        70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
-                        100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
-                    }
-                `}</style>
-
-                <div style={{ display: "flex", alignItems: "center", gap: 24, minWidth: 280 }}>
-                    <div
-                        style={{
-                            position: "relative",
-                            width: 90,
-                            height: 90,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                        }}
-                    >
-                        <svg width="90" height="90" style={{ transform: "rotate(-90deg)" }}>
-                            <circle cx="45" cy="45" r="36" fill="transparent" stroke="#f1f5f9" strokeWidth="6" />
-                            <circle
-                                cx="45"
-                                cy="45"
-                                r="36"
-                                fill="transparent"
-                                stroke="url(#progressGradient)"
-                                strokeWidth="6"
-                                strokeDasharray={226.2}
-                                strokeDashoffset={226.2 - (healthyRate / 100) * 226.2}
-                                strokeLinecap="round"
-                                style={{ transition: "stroke-dashoffset 1.2s ease-in-out" }}
-                            />
-                            <defs>
-                                <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                    <stop offset="0%" stopColor="#10B981" />
-                                    <stop offset="100%" stopColor="#059669" />
-                                </linearGradient>
-                            </defs>
-                        </svg>
-
-                        <div style={{ position: "absolute", textAlign: "center" }}>
-                            <div style={{ fontSize: 16, fontWeight: 800, color: "#1e293b" }}>
-                                {totalPanels > 0 ? `${healthyRate.toFixed(1)}%` : "—"}
-                            </div>
-                        </div>
-                    </div>
-
-                    <div>
-                        <div
-                            style={{
-                                fontSize: 11,
-                                fontWeight: 600,
-                                color: "#64748b",
-                                textTransform: "uppercase",
-                                letterSpacing: "1px",
-                                marginBottom: 4,
-                            }}
-                        >
-                            Chi tiết phân tích AI
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <h3
-                                style={{
-                                    margin: 0,
-                                    fontSize: 20,
-                                    fontWeight: 850,
-                                    color: "#1e293b",
-                                    letterSpacing: "-0.5px",
-                                }}
-                            >
-                                Tỷ lệ panel bình thường
-                            </h3>
-                            <div
-                                style={{
-                                    width: 8,
-                                    height: 8,
-                                    borderRadius: "50%",
-                                    background: totalPanels > 0 && healthyRate > 90 ? "#10b981" : "#94a3b8",
-                                    animation: totalPanels > 0 && healthyRate > 90 ? "neonPulse 2s infinite" : "none",
-                                    flexShrink: 0,
-                                }}
-                            />
-                        </div>
-                    </div>
+                        <Play size={14} fill="white" /> Chạy phân tích AI
+                    </button>
                 </div>
 
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10, minWidth: 260 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                        <div
-                            style={{
-                                padding: "10px 14px",
-                                background: "#f8fafc",
-                                borderRadius: 12,
-                                border: "1px solid #f1f5f9",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: 9,
-                                    fontWeight: 700,
-                                    color: "#94a3b8",
-                                    textTransform: "uppercase",
-                                    letterSpacing: "0.5px",
-                                    marginBottom: 4,
-                                }}
-                            >
-                                Trạng thái xử lý
-                            </div>
-                            <div
-                                style={{
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    padding: "2px 8px",
-                                    background: totalPanels > 0 ? "#e6f4ea" : "#f1f5f9",
-                                    color: totalPanels > 0 ? "#137333" : "#5f6368",
-                                    borderRadius: 6,
-                                    fontSize: 10,
-                                    fontWeight: 700,
-                                    textTransform: "uppercase",
-                                }}
-                            >
-                                {totalPanels > 0 ? "Đang chạy" : "Không có"}
-                            </div>
-                        </div>
-
-                        <div
-                            style={{
-                                padding: "10px 14px",
-                                background: "#f8fafc",
-                                borderRadius: 12,
-                                border: "1px solid #f1f5f9",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: 9,
-                                    fontWeight: 700,
-                                    color: "#94a3b8",
-                                    textTransform: "uppercase",
-                                    letterSpacing: "0.5px",
-                                    marginBottom: 4,
-                                }}
-                            >
-                                Tình trạng hệ thống
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: 12,
-                                    fontWeight: 800,
-                                    color: totalPanels > 0 ? (healthyRate > 95 ? "#10b981" : "#d97706") : "#94a3b8",
-                                }}
-                            >
-                                {totalPanels > 0 ? (healthyRate > 95 ? "XUẤT SẮC" : "ỔN ĐỊNH") : "CHƯA QUÉT"}
-                            </div>
-                        </div>
+                {/* Col 3: ẢNH UAV ĐÃ TẢI LÊN */}
+                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <Image size={15} color="#f59e0b" />
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Ảnh UAV đã tải lên</span>
+                        {data?.length > 0 && <span style={{ marginLeft: "auto", fontSize: 11, color: "#64748b", fontWeight: 500 }}>{data.length} ảnh</span>}
                     </div>
-
-                    <div style={{ height: 12, background: "#f1f5f9", borderRadius: 10, overflow: "hidden" }}>
-                        <div
-                            style={{
-                                height: "100%",
-                                width: `${healthyRate}%`,
-                                background: colors.success,
-                                transition: "width 0.5s ease-in-out",
-                            }}
-                        />
-                    </div>
-
-                    <p style={{ margin: 0, fontSize: 11, color: "#94a3b8", textAlign: "right" }}>
-                        * Dữ liệu được cập nhật từ lần quét AI gần nhất (ID xử lý: {totalPanels > 0 ? "Đang chạy" : "Không có"}).
-                    </p>
-                </div>
-
-                <div
-                    style={{
-                        minWidth: 260,
-                        flex: "0 1 340px",
-                        background: "#f8fafc",
-                        borderRadius: 14,
-                        border: "1px solid #f1f5f9",
-                        padding: 14,
-                        height: 150,
-                    }}
-                >
-                    <div
-                        style={{
-                            fontSize: 11,
-                            fontWeight: 700,
-                            color: "#64748b",
-                            textTransform: "uppercase",
-                            letterSpacing: "0.6px",
-                            marginBottom: 8,
-                        }}
-                    >
-                        Phân bố bất thường
-                    </div>
-                    <div style={{ height: 110 }}>
-                        <AnomalyBarChart data={chartData} />
+                    <div style={{ flex: 1, minHeight: 0 }}>
+                        <ImageGallery images={data || []} apiBase={API} />
                     </div>
                 </div>
             </div>
 
-            <div
-                style={{
-                    marginTop: 24,
-                    marginBottom: 10,
-                    borderRadius: 16,
-                    overflow: "hidden",
-                    height: 260,
-                    border: "1px solid rgba(226,232,240,0.8)",
-                    boxShadow: "0 8px 30px rgba(0,0,0,0.03)",
-                }}
-            >
-                <img
-                    src={solarFarmAerial}
-                    alt="Solar Farm Ambient Background"
-                    style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                    }}
-                />
+            {/* ── BOTTOM 2-COLUMN SECTION ── */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1.6fr", gap: 16 }}>
+                {/* Col 1: THỐNG KÊ LỖI THEO LOẠI */}
+                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                        <AlertCircle size={15} color="#ef4444" />
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Thống kê lỗi theo loại</span>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+                        {/* Donut */}
+                        <div style={{ flexShrink: 0 }}>
+                            <DonutChart data={donutData} totalLabel={totalFaultCount.toLocaleString()} />
+                        </div>
+
+                        {/* Legend table */}
+                        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "4px 10px", fontSize: 11, color: "#94a3b8", fontWeight: 600, paddingBottom: 4, borderBottom: "1px solid #f1f5f9" }}>
+                                <span>Loại lỗi</span><span></span><span>Số lượng</span><span>Tỷ lệ</span>
+                            </div>
+                            {donutData.length === 0 ? (
+                                <div style={{ color: "#94a3b8", fontSize: 12, textAlign: "center", paddingTop: 16 }}>Chưa có dữ liệu</div>
+                            ) : donutData.map((d, i) => (
+                                <div key={i} style={{ display: "grid", gridTemplateColumns: "14px 1fr auto auto", gap: "0 10px", alignItems: "center", fontSize: 12 }}>
+                                    <div style={{ width: 12, height: 12, borderRadius: 3, background: d.color, flexShrink: 0 }} />
+                                    <span style={{ color: "#334155", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.label}</span>
+                                    <span style={{ color: "#0f172a", fontWeight: 700, textAlign: "right" }}>{d.value.toLocaleString()}</span>
+                                    <span style={{ color: "#64748b", textAlign: "right", minWidth: 42 }}>{((d.value / Math.max(totalFaultCount, 1)) * 100).toFixed(1)}%</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <button
+                        onClick={() => {}}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%", padding: "8px 0", marginTop: 14, borderRadius: 8, border: "1px solid #e2e8f0", background: "transparent", color: "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                    >
+                        Xem chi tiết <ChevronRight size={14} />
+                    </button>
+                </div>
+
+                {/* Col 2: CÔNG SUẤT HAO HỤT THEO LOẠI LỖI */}
+                <div style={{ background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 18, boxShadow: "0 2px 8px rgba(0,0,0,0.04)", display: "flex", flexDirection: "column" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                        <Zap size={15} color="#f59e0b" />
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.6px" }}>Công suất hao hụt theo loại lỗi</span>
+                        {lossUnit && powerLossChartData.length > 0 && (
+                            <span style={{ marginLeft: "auto", fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>Đơn vị: {lossUnit}</span>
+                        )}
+                    </div>
+                    <div style={{ flex: 1, minHeight: 180 }}>
+                        <PowerLossBarChart data={powerLossChartData} />
+                    </div>
+                    {powerLossChartData.length > 0 ? (
+                        <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", fontSize: 11, color: "#92400e", display: "flex", alignItems: "center", gap: 6 }}>
+                            <Zap size={12} color="#f59e0b" />
+                            <span>
+                                <b style={{ color: powerLossChartData[0]?.color }}>{powerLossChartData[0]?.label}</b>
+                                {" "}là lỗi gây thất thoát lớn nhất —{" "}
+                                <b>{powerLossChartData[0]?.value?.toFixed(lossUnit === "W" ? 0 : 2)} {lossUnit}</b>
+                            </span>
+                        </div>
+                    ) : (
+                        <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 8, background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: 11, color: "#94a3b8", textAlign: "center" }}>
+                            Chưa có dữ liệu công suất hao hụt
+                        </div>
+                    )}
+                </div>
+
             </div>
+
+            <style>{`
+                @keyframes shimmerLoad {
+                    0% { transform: translateX(-100%); }
+                    100% { transform: translateX(100%); }
+                }
+            `}</style>
         </div>
     );
 }
