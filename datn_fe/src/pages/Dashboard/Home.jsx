@@ -12,6 +12,7 @@ import {
     AlertTriangle,
     Eye,
     X,
+    XCircle,
     ChevronLeft,
     ChevronRight,
     TrendingUp,
@@ -24,16 +25,16 @@ import { colors } from "../../constants/theme";
 import { PageHeader } from "../../components/layout/PageHeader";
 import { KpiCard } from "../../components/ui/KpiCard";
 import { ActionButton } from "../../components/ui/ActionButton";
-import { 
-    fetchLatestBatch, 
-    analyzeAll, 
-    getAnalyzeProgress, 
-    uploadDroneData, 
-    processThermal, 
-    updateBatchMetadata, 
-    reanalyze, 
-    resetSystem, 
-    updateAiModel 
+import {
+    fetchLatestBatch,
+    analyzeAll,
+    getAnalyzeProgress,
+    uploadDroneData,
+    processThermal,
+    updateBatchMetadata,
+    reanalyze,
+    resetSystem,
+    updateAiModel
 } from "../../api";
 import { computeInspectionSummary } from "../../utils/inspectionData";
 import solarFarmAerial from "../../assets/solar_farm_aerial.png";
@@ -155,8 +156,7 @@ function PowerLossBarChart({ data }) {
 
 // Image Gallery component
 // Image Gallery component
-function ImageGallery({ images, apiBase }) {
-    const [activeIdx, setActiveIdx] = useState(0);
+function ImageGallery({ images, apiBase, activeIdx, setActiveIdx }) {
     const [thumbPage, setThumbPage] = useState(0);
     const [leftHover, setLeftHover] = useState(false);
     const [rightHover, setRightHover] = useState(false);
@@ -256,8 +256,8 @@ function ImageGallery({ images, apiBase }) {
                         background: !canScrollLeft
                             ? "rgba(15, 23, 42, 0.4)"
                             : leftHover
-                            ? "rgba(15, 23, 42, 0.95)"
-                            : "rgba(15, 23, 42, 0.8)",
+                                ? "rgba(15, 23, 42, 0.95)"
+                                : "rgba(15, 23, 42, 0.8)",
                         border: "1px solid rgba(255, 255, 255, 0.15)",
                         borderRadius: 6,
                         width: 24,
@@ -322,8 +322,8 @@ function ImageGallery({ images, apiBase }) {
                         background: !canScrollRight
                             ? "rgba(15, 23, 42, 0.4)"
                             : rightHover
-                            ? "rgba(15, 23, 42, 0.95)"
-                            : "rgba(15, 23, 42, 0.8)",
+                                ? "rgba(15, 23, 42, 0.95)"
+                                : "rgba(15, 23, 42, 0.8)",
                         border: "1px solid rgba(255, 255, 255, 0.15)",
                         borderRadius: 6,
                         width: 24,
@@ -358,7 +358,7 @@ function AnomalyBarChart({ data }) {
     }
 
     const max = Math.max(...data.map((d) => d.value), 1);
-    const barColors = ["#f97316","#ef4444","#06b6d4","#eab308","#a855f7","#10b981","#0ea5e9","#f59e0b"];
+    const barColors = ["#f97316", "#ef4444", "#06b6d4", "#eab308", "#a855f7", "#10b981", "#0ea5e9", "#f59e0b"];
     const MAX_BAR_HEIGHT = 64;
 
     return (
@@ -932,13 +932,13 @@ function QualityReviewModal({ qualityData, onConfirm, onCancel, isRunningAI }) {
 // ─────────────────────────────────────────
 // Project Metadata & Panel Power Modal
 // ─────────────────────────────────────────
-function ProjectMetadataModal({ 
-    metadata, 
-    onChange, 
-    onSave, 
-    onClose, 
-    isNewProject = false, 
-    isLoading = false 
+function ProjectMetadataModal({
+    metadata,
+    onChange,
+    onSave,
+    onClose,
+    isNewProject = false,
+    isLoading = false
 }) {
     return (
         <div style={{
@@ -981,13 +981,13 @@ function ProjectMetadataModal({
 
                 {/* Content - Inputs */}
                 <div style={{ flex: 1, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
-                    
+
                     {/* Tên dự án */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Tên dự án</label>
-                        <input 
-                            type="text" 
-                            value={metadata.projectName || ""} 
+                        <input
+                            type="text"
+                            value={metadata.projectName || ""}
                             onChange={(e) => onChange("projectName", e.target.value)}
                             placeholder="Ví dụ: Binh Nguyen Solar Farm Phase 1"
                             style={inputStyle}
@@ -998,9 +998,9 @@ function ProjectMetadataModal({
                         {/* Địa điểm */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Địa điểm</label>
-                            <input 
-                                type="text" 
-                                value={metadata.location || ""} 
+                            <input
+                                type="text"
+                                value={metadata.location || ""}
                                 onChange={(e) => onChange("location", e.target.value)}
                                 placeholder="Ví dụ: Ninh Thuan, Viet Nam"
                                 style={inputStyle}
@@ -1010,9 +1010,9 @@ function ProjectMetadataModal({
                         {/* Thời gian quét */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Thời gian quét</label>
-                            <input 
-                                type="text" 
-                                value={metadata.scanTime || ""} 
+                            <input
+                                type="text"
+                                value={metadata.scanTime || ""}
                                 onChange={(e) => onChange("scanTime", e.target.value)}
                                 placeholder="Ví dụ: 2026-06-02"
                                 style={inputStyle}
@@ -1024,9 +1024,9 @@ function ProjectMetadataModal({
                         {/* Đơn vị quét */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Đơn vị quét</label>
-                            <input 
-                                type="text" 
-                                value={metadata.operator || ""} 
+                            <input
+                                type="text"
+                                value={metadata.operator || ""}
                                 onChange={(e) => onChange("operator", e.target.value)}
                                 placeholder="Ví dụ: EPC Solar JSC"
                                 style={inputStyle}
@@ -1036,9 +1036,9 @@ function ProjectMetadataModal({
                         {/* Thiết bị quét */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Thiết bị quét</label>
-                            <input 
-                                type="text" 
-                                value={metadata.device || ""} 
+                            <input
+                                type="text"
+                                value={metadata.device || ""}
                                 onChange={(e) => onChange("device", e.target.value)}
                                 placeholder="Ví dụ: DJI Matrice 300 RTK"
                                 style={inputStyle}
@@ -1050,9 +1050,9 @@ function ProjectMetadataModal({
                         {/* Phạm vi quét */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Phạm vi quét</label>
-                            <input 
-                                type="text" 
-                                value={metadata.scope || ""} 
+                            <input
+                                type="text"
+                                value={metadata.scope || ""}
                                 onChange={(e) => onChange("scope", e.target.value)}
                                 placeholder="Ví dụ: Inverter Block 01 - 04"
                                 style={inputStyle}
@@ -1062,9 +1062,9 @@ function ProjectMetadataModal({
                         {/* Công suất tấm pin */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#0ea5e9" }}>Công suất tấm pin (W)</label>
-                            <input 
-                                type="text" 
-                                value={metadata.panelPower === undefined || metadata.panelPower === null ? "" : metadata.panelPower} 
+                            <input
+                                type="text"
+                                value={metadata.panelPower === undefined || metadata.panelPower === null ? "" : metadata.panelPower}
                                 onChange={(e) => {
                                     const val = e.target.value;
                                     if (val === "" || /^[0-9]*\.?[0-9]*$/.test(val)) {
@@ -1086,9 +1086,9 @@ function ProjectMetadataModal({
                         {/* Công suất hệ thống */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Công suất hệ thống</label>
-                            <input 
-                                type="text" 
-                                value={metadata.systemCapacity || ""} 
+                            <input
+                                type="text"
+                                value={metadata.systemCapacity || ""}
                                 onChange={(e) => onChange("systemCapacity", e.target.value)}
                                 placeholder="Ví dụ: 1.2 MWp"
                                 style={inputStyle}
@@ -1098,9 +1098,9 @@ function ProjectMetadataModal({
                         {/* Người phụ trách */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Người phụ trách</label>
-                            <input 
-                                type="text" 
-                                value={metadata.supervisor || ""} 
+                            <input
+                                type="text"
+                                value={metadata.supervisor || ""}
                                 onChange={(e) => onChange("supervisor", e.target.value)}
                                 placeholder="Ví dụ: Nguyễn Văn A"
                                 style={inputStyle}
@@ -1112,9 +1112,9 @@ function ProjectMetadataModal({
                         {/* Loại dữ liệu */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Loại dữ liệu</label>
-                            <input 
-                                type="text" 
-                                value={metadata.dataType || ""} 
+                            <input
+                                type="text"
+                                value={metadata.dataType || ""}
                                 onChange={(e) => onChange("dataType", e.target.value)}
                                 placeholder="Mặc định: UAV thermal image"
                                 style={inputStyle}
@@ -1124,9 +1124,9 @@ function ProjectMetadataModal({
                         {/* Model AI sử dụng */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Model AI sử dụng</label>
-                            <input 
-                                type="text" 
-                                value={metadata.aiModel || ""} 
+                            <input
+                                type="text"
+                                value={metadata.aiModel || ""}
                                 onChange={(e) => onChange("aiModel", e.target.value)}
                                 placeholder="Mặc định: YOLOv8-Solar-M300"
                                 style={inputStyle}
@@ -1138,9 +1138,9 @@ function ProjectMetadataModal({
                         {/* Phiên bản hệ thống */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                             <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Phiên bản hệ thống</label>
-                            <input 
-                                type="text" 
-                                value={metadata.systemVersion || ""} 
+                            <input
+                                type="text"
+                                value={metadata.systemVersion || ""}
                                 onChange={(e) => onChange("systemVersion", e.target.value)}
                                 placeholder="Mặc định: O&M Suite v2.4"
                                 style={inputStyle}
@@ -1154,8 +1154,8 @@ function ProjectMetadataModal({
                     {/* Ghi chú */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Ghi chú</label>
-                        <textarea 
-                            value={metadata.notes || ""} 
+                        <textarea
+                            value={metadata.notes || ""}
                             onChange={(e) => onChange("notes", e.target.value)}
                             placeholder="Nhập ghi chú thêm..."
                             style={{
@@ -1174,8 +1174,8 @@ function ProjectMetadataModal({
                     display: "flex", justifyContent: "flex-end", gap: 12,
                     background: "rgba(15,23,42,0.4)"
                 }}>
-                    <button 
-                        onClick={onClose} 
+                    <button
+                        onClick={onClose}
                         style={{
                             padding: "9px 18px", borderRadius: 8, background: "transparent",
                             border: "1px solid rgba(255,255,255,0.15)", color: "#94a3b8",
@@ -1184,8 +1184,8 @@ function ProjectMetadataModal({
                     >
                         {isNewProject ? "Bỏ qua & Đóng" : "Đóng"}
                     </button>
-                    <button 
-                        onClick={onSave} 
+                    <button
+                        onClick={onSave}
                         disabled={isLoading}
                         style={{
                             padding: "9px 24px", borderRadius: 8,
@@ -1447,6 +1447,12 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
         systemVersion: "O&M Suite v2.4"
     });
     const [showMetadataModal, setShowMetadataModal] = useState(false);
+    const [activeImageIdx, setActiveImageIdx] = useState(0);
+    const [showImageDetailModal, setShowImageDetailModal] = useState(false);
+
+    React.useEffect(() => {
+        setActiveImageIdx(0);
+    }, [data]);
     const [isSavingMetadata, setIsSavingMetadata] = useState(false);
 
     const fileInputRef = useRef(null);
@@ -1621,7 +1627,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 ai_model: projectMetadata.aiModel,
                 system_version: projectMetadata.systemVersion
             });
-            
+
             if (res.data.error) {
                 alert("Lỗi: " + res.data.error);
             } else {
@@ -1753,7 +1759,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
             analyzeForm.append("scan_time", projectMetadata.scanTime);
             analyzeForm.append("operator", projectMetadata.operator);
             analyzeForm.append("device", projectMetadata.device);
-            
+
             const scopeData = {
                 s: projectMetadata.scope || "",
                 sc: projectMetadata.systemCapacity || "",
@@ -1798,7 +1804,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
     const handleCancelModal = () => {
         if (!isAnalyzing) setQualityData(null);
     };
- 
+
     const handleUpdateModel = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -1868,20 +1874,20 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
     // ── Màu sắc chuẩn cho từng nhóm lỗi (phân biệt hotspot đơn/đa) ──
     const FAULT_COLORS = {
         "hotspot single cell": "#ef4444",   // Đỏ tươi — Hotspot đơn
-        "hotspot multi cell":  "#ff6b35",   // Cam — Hotspot đa
-        "crack":               "#f59e0b",   // Vàng cam — Crack
-        "shading":             "#8b5cf6",   // Tím — Shading
-        "diode":               "#06b6d4",   // Cyan — Diode
+        "hotspot multi cell": "#ff6b35",   // Cam — Hotspot đa
+        "crack": "#f59e0b",   // Vàng cam — Crack
+        "shading": "#8b5cf6",   // Tím — Shading
+        "diode": "#06b6d4",   // Cyan — Diode
     };
     const getFaultColor = (group) => FAULT_COLORS[group.toLowerCase()] || "#94a3b8";
 
     // Tên hiển thị đẹp hơn cho từng nhóm
     const FAULT_LABELS = {
         "hotspot single cell": "hotspot single cell",
-        "hotspot multi cell":  "hotspot multi_cell",
-        "crack":               "Crack",
-        "shading":             "Shading",
-        "diode":               "Diode",
+        "hotspot multi cell": "hotspot multi_cell",
+        "crack": "Crack",
+        "shading": "Shading",
+        "diode": "Diode",
     };
     const getFaultLabel = (group) => FAULT_LABELS[group.toLowerCase()] || group;
 
@@ -1981,6 +1987,161 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                     isNewProject={!batchId}
                     isLoading={isSavingMetadata}
                 />
+            )}
+
+            {/* Full Image Detail Modal - hiển thị kích thước gốc tự nhiên, tránh bị zoom/crop */}
+            {showImageDetailModal && data && data[activeImageIdx] && (
+                <div
+                    style={{
+                        position: "fixed",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        background: "rgba(15, 23, 42, 0.9)",
+                        zIndex: 9999,
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: 24,
+                        backdropFilter: "blur(8px)",
+                    }}
+                    onClick={() => setShowImageDetailModal(false)}
+                >
+                    <div
+                        style={{
+                            position: "relative",
+                            maxWidth: "90%",
+                            maxHeight: "85%",
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            background: "#1e293b",
+                            borderRadius: 12,
+                            padding: 16,
+                            border: "1px solid rgba(255,255,255,0.1)",
+                            boxShadow: "0 25px 50px -12px rgba(0,0,0,0.5)",
+                        }}
+                        onClick={e => e.stopPropagation()}
+                    >
+                        {/* Header */}
+                        <div style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            width: "100%",
+                            marginBottom: 12,
+                            color: "#fff"
+                        }}>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "#cbd5e1" }}>
+                                {data[activeImageIdx].filename}
+                            </span>
+                            <button
+                                onClick={() => setShowImageDetailModal(false)}
+                                style={{
+                                    background: "transparent",
+                                    border: "none",
+                                    color: "#94a3b8",
+                                    cursor: "pointer",
+                                    padding: 4,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    transition: "color 0.15s"
+                                }}
+                                onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
+                                onMouseLeave={e => e.currentTarget.style.color = "#94a3b8"}
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        {/* Image area with nav arrows overlay */}
+                        <div style={{
+                            position: "relative",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            background: "#0f172a",
+                            borderRadius: 8,
+                            maxHeight: "75vh",
+                        }}>
+                            <img
+                                src={`${API}/data/precalib/${data[activeImageIdx].filename}`}
+                                alt={data[activeImageIdx].filename}
+                                style={{
+                                    maxWidth: "100%",
+                                    maxHeight: "70vh",
+                                    objectFit: "contain",
+                                    borderRadius: 4,
+                                    display: "block"
+                                }}
+                            />
+
+                            {/* Nav arrows inside modal */}
+                            {data.length > 1 && (
+                                <>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); setActiveImageIdx(i => Math.max(0, i - 1)); }}
+                                        disabled={activeImageIdx === 0}
+                                        style={{
+                                            position: "absolute",
+                                            left: 12,
+                                            background: "rgba(15,23,42,0.6)",
+                                            border: "none",
+                                            borderRadius: "50%",
+                                            width: 36,
+                                            height: 36,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            color: activeImageIdx === 0 ? "rgba(255,255,255,0.3)" : "#fff",
+                                            cursor: activeImageIdx === 0 ? "not-allowed" : "pointer",
+                                            fontSize: 20,
+                                            transition: "background 0.2s",
+                                        }}
+                                        onMouseEnter={e => { if (activeImageIdx !== 0) e.currentTarget.style.background = "rgba(15,23,42,0.9)"; }}
+                                        onMouseLeave={e => { if (activeImageIdx !== 0) e.currentTarget.style.background = "rgba(15,23,42,0.6)"; }}
+                                    >
+                                        ‹
+                                    </button>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); setActiveImageIdx(i => Math.min(data.length - 1, i + 1)); }}
+                                        disabled={activeImageIdx === data.length - 1}
+                                        style={{
+                                            position: "absolute",
+                                            right: 12,
+                                            background: "rgba(15,23,42,0.6)",
+                                            border: "none",
+                                            borderRadius: "50%",
+                                            width: 36,
+                                            height: 36,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "center",
+                                            color: activeImageIdx === data.length - 1 ? "rgba(255,255,255,0.3)" : "#fff",
+                                            cursor: activeImageIdx === data.length - 1 ? "not-allowed" : "pointer",
+                                            fontSize: 20,
+                                            transition: "background 0.2s",
+                                        }}
+                                        onMouseEnter={e => { if (activeImageIdx !== data.length - 1) e.currentTarget.style.background = "rgba(15,23,42,0.9)"; }}
+                                        onMouseLeave={e => { if (activeImageIdx !== data.length - 1) e.currentTarget.style.background = "rgba(15,23,42,0.6)"; }}
+                                    >
+                                        ›
+                                    </button>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", width: "100%", fontSize: 11, color: "#94a3b8" }}>
+                            <span>Chỉ số: {activeImageIdx + 1} / {data.length}</span>
+                            <span>Kích thước gốc (Tỷ lệ thực tế)</span>
+                        </div>
+                    </div>
+                </div>
             )}
 
             {/* ── HIDDEN FILE INPUTS ── */}
@@ -2130,15 +2291,36 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                     return <InfoPanel rows={infoRows} onEdit={() => setShowMetadataModal(true)} isAnyLoading={isAnyLoading} />;
                 })()}
 
-                {/* Col 3: ẢNH UAV ĐÃ TẢI LÊN */}
+                {/* Col 3: ẢNH ĐÃ QUA TIỀN XỬ LÝ */}
                 <div className="middle-card-uav" style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, boxSizing: "border-box" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <Image size={15} color="#f59e0b" />
                         <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Ảnh đã qua tiền xử lý</span>
+                        {data?.length > 0 && (
+                            <button
+                                onClick={() => setShowImageDetailModal(true)}
+                                style={{
+                                    marginLeft: 12,
+                                    padding: "2px 8px",
+                                    borderRadius: 4,
+                                    border: "1px solid #cbd5e1",
+                                    background: "#f8fafc",
+                                    color: "#334155",
+                                    fontSize: 10,
+                                    fontWeight: 600,
+                                    cursor: "pointer",
+                                    transition: "all 0.15s",
+                                }}
+                                onMouseEnter={e => { e.currentTarget.style.borderColor = "#0ea5e9"; e.currentTarget.style.background = "#f0f9ff"; e.currentTarget.style.color = "#0ea5e9"; }}
+                                onMouseLeave={e => { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.color = "#334155"; }}
+                            >
+                                xem chi tiết
+                            </button>
+                        )}
                         {data?.length > 0 && <span style={{ marginLeft: "auto", fontSize: 11, color: "#64748b", fontWeight: 500 }}>{data.length} ảnh</span>}
                     </div>
                     <div style={{ flex: 1, minHeight: 0 }}>
-                        <ImageGallery images={data || []} apiBase={API} />
+                        <ImageGallery images={data || []} apiBase={API} activeIdx={activeImageIdx} setActiveIdx={setActiveImageIdx} />
                     </div>
                 </div>
             </div>
