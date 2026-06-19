@@ -161,7 +161,7 @@ function ImageGallery({ images, apiBase }) {
     const [leftHover, setLeftHover] = useState(false);
     const [rightHover, setRightHover] = useState(false);
 
-    const PAGE_SIZE = 8;
+    const PAGE_SIZE = 9;
     const totalPages = Math.ceil(images.length / PAGE_SIZE);
 
     React.useEffect(() => {
@@ -2134,7 +2134,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 <div className="middle-card-uav" style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, boxSizing: "border-box" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <Image size={15} color="#f59e0b" />
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Ảnh UAV đã tải lên</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Ảnh đã qua tiền xử lý</span>
                         {data?.length > 0 && <span style={{ marginLeft: "auto", fontSize: 11, color: "#64748b", fontWeight: 500 }}>{data.length} ảnh</span>}
                     </div>
                     <div style={{ flex: 1, minHeight: 0 }}>
