@@ -274,9 +274,9 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
     const translateDefect = (cls) => {
         if (!cls) return "Điểm bất thường";
         const c = cls.toLowerCase();
-        if (c.includes("hotspot_single") || c.includes("single_cell") || c.includes("single-cell")) return "Hotspot (Đơn)";
-        if (c.includes("hotspot_multi") || c.includes("multi_cell") || c.includes("multicell") || c.includes("multi-cell")) return "Hotspot (Đa)";
-        if (c.includes("hotspot") || c.includes("hot")) return "Hotspot (Đơn)";
+        if (c.includes("hotspot_single") || c.includes("single_cell") || c.includes("single-cell")) return "hotspot single cell";
+        if (c.includes("hotspot_multi") || c.includes("multi_cell") || c.includes("multicell") || c.includes("multi-cell")) return "hotspot multi_cell";
+        if (c.includes("hotspot") || c.includes("hot")) return "hotspot single cell";
         if (c.includes("crack") || c.includes("nut")) return "Nứt (Crack)";
         if (
             c.includes("shading") ||
@@ -610,11 +610,11 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ width: 12, height: 4, borderRadius: 2, backgroundColor: '#ff3b30' }} />
-                    <span>hotspot_single_cell</span>
+                    <span>hotspot single cell</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ width: 12, height: 4, borderRadius: 2, backgroundColor: '#ff2d55' }} />
-                    <span>hotspot_multi_cell</span>
+                    <span>hotspot multi_cell</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ width: 12, height: 4, borderRadius: 2, backgroundColor: '#f59e0b' }} />
@@ -1245,8 +1245,8 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                 {[
                                     { key: "all", label: "Tất cả" },
                                     { key: "normal", label: "Bình thường", color: "#22c55e" },
-                                    { key: "hotspot_single", label: "hotspot_single_cell", color: "#ff3b30" },
-                                    { key: "hotspot_multi", label: "hotspot_multi_cell", color: "#ff2d55" },
+                                    { key: "hotspot_single", label: "hotspot single cell", color: "#ff3b30" },
+                                    { key: "hotspot_multi", label: "hotspot multi_cell", color: "#ff2d55" },
                                     { key: "crack", label: "crack", color: "#f59e0b" },
                                     { key: "shading", label: "shading", color: "#8b5cf6" },
                                 ].map(item => (

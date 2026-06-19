@@ -58,8 +58,8 @@ AERIAL_PATH = find_asset("solar_farm_aerial.png") or "datn_fe/src/assets/solar_f
 # Các bản dịch tiếng Việt
 # ─────────────────────────────────────────
 VI_DEFECT_MAP = {
-    "hotspot_single_cell": "Điểm nóng đơn bào (hotspot_single_cell)",
-    "hotspot_multi_cell":  "Điểm nóng đa bào (hotspot_multi_cell)",
+    "hotspot_single_cell": "hotspot single cell",
+    "hotspot_multi_cell":  "hotspot multi_cell",
     "shading":             "Bóng che (shading)",
     "soiling":             "Bám bẩn (soiling)",
     "crack":               "Vết nứt (crack)",

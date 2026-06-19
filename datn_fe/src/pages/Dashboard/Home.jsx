@@ -9,10 +9,10 @@ import {
     Play,
     Cpu,
     CheckCircle,
-    XCircle,
     AlertTriangle,
     Eye,
     X,
+    ChevronLeft,
     ChevronRight,
     TrendingUp,
     Zap,
@@ -154,8 +154,20 @@ function PowerLossBarChart({ data }) {
 }
 
 // Image Gallery component
+// Image Gallery component
 function ImageGallery({ images, apiBase }) {
     const [activeIdx, setActiveIdx] = useState(0);
+    const [thumbPage, setThumbPage] = useState(0);
+    const [leftHover, setLeftHover] = useState(false);
+    const [rightHover, setRightHover] = useState(false);
+
+    const PAGE_SIZE = 8;
+    const totalPages = Math.ceil(images.length / PAGE_SIZE);
+
+    React.useEffect(() => {
+        const activePage = Math.floor(activeIdx / PAGE_SIZE);
+        setThumbPage(activePage);
+    }, [activeIdx]);
 
     if (!images || images.length === 0) {
         return (
@@ -168,6 +180,23 @@ function ImageGallery({ images, apiBase }) {
 
     const currentImg = images[activeIdx];
     const imgSrc = `${apiBase}/data/precalib/${currentImg.filename}`;
+
+    const visibleImages = images.slice(thumbPage * PAGE_SIZE, (thumbPage + 1) * PAGE_SIZE);
+    const paddedImages = [...visibleImages];
+    while (paddedImages.length < PAGE_SIZE) {
+        paddedImages.push(null);
+    }
+
+    const handlePrevThumb = () => {
+        setThumbPage(prev => Math.max(0, prev - 1));
+    };
+
+    const handleNextThumb = () => {
+        setThumbPage(prev => Math.min(totalPages - 1, prev + 1));
+    };
+
+    const canScrollLeft = thumbPage > 0;
+    const canScrollRight = thumbPage < totalPages - 1;
 
     return (
         <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 8 }}>
@@ -215,27 +244,101 @@ function ImageGallery({ images, apiBase }) {
                 )}
             </div>
 
-            {/* Thumbnails strip */}
-            <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, flexShrink: 0 }}>
-                {images.slice(0, 8).map((img, i) => (
-                    <div
-                        key={i}
-                        onClick={() => setActiveIdx(i)}
-                        style={{
-                            flexShrink: 0, width: 52, height: 36, borderRadius: 6,
-                            overflow: "hidden", cursor: "pointer",
-                            border: i === activeIdx ? "2px solid #0ea5e9" : "2px solid transparent",
-                            background: "#0f172a", transition: "border 0.2s"
-                        }}
-                    >
-                        <img
-                            src={`${apiBase}/data/precalib/${img.filename}`}
-                            alt=""
-                            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                            onError={e => { e.target.style.display = "none"; }}
-                        />
-                    </div>
-                ))}
+            {/* Thumbnails strip with nav arrows */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                {/* Left arrow */}
+                <button
+                    onClick={handlePrevThumb}
+                    disabled={!canScrollLeft}
+                    onMouseEnter={() => setLeftHover(true)}
+                    onMouseLeave={() => setLeftHover(false)}
+                    style={{
+                        background: !canScrollLeft
+                            ? "rgba(15, 23, 42, 0.4)"
+                            : leftHover
+                            ? "rgba(15, 23, 42, 0.95)"
+                            : "rgba(15, 23, 42, 0.8)",
+                        border: "1px solid rgba(255, 255, 255, 0.15)",
+                        borderRadius: 6,
+                        width: 24,
+                        height: 36,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: !canScrollLeft ? "rgba(255, 255, 255, 0.2)" : "#fff",
+                        cursor: !canScrollLeft ? "not-allowed" : "pointer",
+                        transition: "all 0.2s",
+                        padding: 0,
+                    }}
+                >
+                    <ChevronLeft size={16} />
+                </button>
+
+                {/* Thumbnails container */}
+                <div style={{ display: "flex", gap: 6, flex: 1, justifyContent: "flex-start", overflow: "hidden", height: 36 }}>
+                    {paddedImages.map((img, idx) => {
+                        const actualIdx = thumbPage * PAGE_SIZE + idx;
+                        if (!img) {
+                            return (
+                                <div
+                                    key={`placeholder-${idx}`}
+                                    style={{
+                                        flexShrink: 0, width: 52, height: 36, borderRadius: 6,
+                                        border: "2px solid transparent",
+                                        background: "transparent"
+                                    }}
+                                />
+                            );
+                        }
+                        return (
+                            <div
+                                key={actualIdx}
+                                onClick={() => setActiveIdx(actualIdx)}
+                                style={{
+                                    flexShrink: 0, width: 52, height: 36, borderRadius: 6,
+                                    overflow: "hidden", cursor: "pointer",
+                                    border: actualIdx === activeIdx ? "2px solid #0ea5e9" : "2px solid transparent",
+                                    background: "#0f172a", transition: "border 0.2s"
+                                }}
+                            >
+                                <img
+                                    src={`${apiBase}/data/precalib/${img.filename}`}
+                                    alt=""
+                                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                                    onError={e => { e.target.style.display = "none"; }}
+                                />
+                            </div>
+                        );
+                    })}
+                </div>
+
+                {/* Right arrow */}
+                <button
+                    onClick={handleNextThumb}
+                    disabled={!canScrollRight}
+                    onMouseEnter={() => setRightHover(true)}
+                    onMouseLeave={() => setRightHover(false)}
+                    style={{
+                        background: !canScrollRight
+                            ? "rgba(15, 23, 42, 0.4)"
+                            : rightHover
+                            ? "rgba(15, 23, 42, 0.95)"
+                            : "rgba(15, 23, 42, 0.8)",
+                        border: "1px solid rgba(255, 255, 255, 0.15)",
+                        borderRadius: 6,
+                        width: 24,
+                        height: 36,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: !canScrollRight ? "rgba(255, 255, 255, 0.2)" : "#fff",
+                        cursor: !canScrollRight ? "not-allowed" : "pointer",
+                        transition: "all 0.2s",
+                        padding: 0,
+                    }}
+                >
+                    <ChevronRight size={16} />
+                </button>
             </div>
         </div>
     );
@@ -1774,8 +1877,8 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
 
     // Tên hiển thị đẹp hơn cho từng nhóm
     const FAULT_LABELS = {
-        "hotspot single cell": "Hotspot (Đơn)",
-        "hotspot multi cell":  "Hotspot (Đa)",
+        "hotspot single cell": "hotspot single cell",
+        "hotspot multi cell":  "hotspot multi_cell",
         "crack":               "Crack",
         "shading":             "Shading",
         "diode":               "Diode",
@@ -2028,7 +2131,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 })()}
 
                 {/* Col 3: ẢNH UAV ĐÃ TẢI LÊN */}
-                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, height: "100%", boxSizing: "border-box" }}>
+                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, height: 400, boxSizing: "border-box" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <Image size={15} color="#f59e0b" />
                         <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Ảnh UAV đã tải lên</span>

@@ -190,8 +190,8 @@ export default function ReportPage({ data, batchId }) {
     };
 
     const FAULT_LABELS = {
-        "hotspot single cell": "Hotspot (Đơn)",
-        "hotspot multi cell":  "Hotspot (Đa)",
+        "hotspot single cell": "hotspot single cell",
+        "hotspot multi cell":  "hotspot multi_cell",
         "crack":               "Crack",
         "shading":             "Shading",
         "diode":               "Diode",
@@ -351,8 +351,8 @@ export default function ReportPage({ data, batchId }) {
                                     .reduce((acc, [, val]) => acc + val, 0);
 
                                 const legendItems = [
-                                    { group: "hotspot single cell", label: "Hotspot (Đơn)", color: "#ef4444" },
-                                    { group: "hotspot multi cell", label: "Hotspot (Đa)", color: "#ff6b35" },
+                                    { group: "hotspot single cell", label: "hotspot single cell", color: "#ef4444" },
+                                    { group: "hotspot multi cell", label: "hotspot multi_cell", color: "#ff6b35" },
                                     { group: "crack", label: "Crack", color: "#f59e0b" },
                                     { group: "shading", label: "Shading", color: "#8b5cf6" },
                                     { group: "diode", label: "Diode", color: "#06b6d4" },
