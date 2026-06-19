@@ -2241,7 +2241,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 /* Middle 3-Column Grid */
                 .middle-grid-container {
                     display: grid;
-                    grid-template-columns: 1fr 1fr 1fr;
+                    grid-template-columns: 1fr 1.1fr 2.3fr;
                     gap: 16px;
                     margin-bottom: 16px;
                 }
@@ -2253,21 +2253,21 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
 
                 /* Middle Card (UAV Image Gallery Card) */
                 .middle-card-uav {
-                    height: 400px;
+                    height: 420px;
                 }
                 @media (max-height: 900px), (max-width: 1400px) {
                     .middle-card-uav {
-                        height: 350px;
+                        height: 380px;
                     }
                 }
                 @media (max-height: 768px), (max-width: 1200px) {
                     .middle-card-uav {
-                        height: 320px;
+                        height: 340px;
                     }
                 }
                 @media (max-width: 1024px) {
                     .middle-card-uav {
-                        height: 350px;
+                        height: 380px;
                     }
                 }
 
