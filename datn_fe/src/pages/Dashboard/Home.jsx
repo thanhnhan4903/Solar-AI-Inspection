@@ -283,7 +283,7 @@ function ImageGallery({ images, apiBase }) {
                                 <div
                                     key={`placeholder-${idx}`}
                                     style={{
-                                        flexShrink: 0, width: 52, height: 36, borderRadius: 6,
+                                        flex: "1 1 0px", maxWidth: 52, height: 36, borderRadius: 6,
                                         border: "2px solid transparent",
                                         background: "transparent"
                                     }}
@@ -295,7 +295,7 @@ function ImageGallery({ images, apiBase }) {
                                 key={actualIdx}
                                 onClick={() => setActiveIdx(actualIdx)}
                                 style={{
-                                    flexShrink: 0, width: 52, height: 36, borderRadius: 6,
+                                    flex: "1 1 0px", maxWidth: 52, height: 36, borderRadius: 6,
                                     overflow: "hidden", cursor: "pointer",
                                     border: actualIdx === activeIdx ? "2px solid #0ea5e9" : "2px solid transparent",
                                     background: "#0f172a", transition: "border 0.2s"
@@ -2023,7 +2023,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
             </div>
 
             {/* ── KPI CARDS ── */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
+            <div className="kpi-grid-container">
                 {[
                     { icon: <Image size={18} />, label: "TỔNG ẢNH UAV", value: (data?.length || 0).toLocaleString(), unit: "ảnh", accent: "#8b5cf6" },
                     { icon: <LayoutGrid size={18} />, label: "TỔNG PANEL", value: totalPanels.toLocaleString(), unit: "panel", accent: "#0ea5e9" },
@@ -2046,7 +2046,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
             </div>
 
             {/* ── MIDDLE 3-COLUMN SECTION ── */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+            <div className="middle-grid-container">
                 {/* Col 1: TẢI DỮ LIỆU UAV */}
                 <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 10, height: "100%", boxSizing: "border-box" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -2131,7 +2131,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 })()}
 
                 {/* Col 3: ẢNH UAV ĐÃ TẢI LÊN */}
-                <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, height: 400, boxSizing: "border-box" }}>
+                <div className="middle-card-uav" style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)", display: "flex", flexDirection: "column", gap: 8, boxSizing: "border-box" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <Image size={15} color="#f59e0b" />
                         <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>Ảnh UAV đã tải lên</span>
@@ -2144,7 +2144,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
             </div>
 
             {/* ── BOTTOM 2-COLUMN SECTION ── */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1.6fr", gap: 16 }}>
+            <div className="bottom-grid-container">
                 {/* Col 1: THỐNG KÊ LỖI THEO LOẠI */}
                 <div style={{ background: "#fff", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.03)" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
@@ -2218,6 +2218,69 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 @keyframes shimmerLoad {
                     0% { transform: translateX(-100%); }
                     100% { transform: translateX(100%); }
+                }
+
+                /* KPI Grid */
+                .kpi-grid-container {
+                    display: grid;
+                    grid-template-columns: repeat(4, 1fr);
+                    gap: 12px;
+                    margin-bottom: 16px;
+                }
+                @media (max-width: 1200px) {
+                    .kpi-grid-container {
+                        grid-template-columns: repeat(2, 1fr);
+                    }
+                }
+                @media (max-width: 640px) {
+                    .kpi-grid-container {
+                        grid-template-columns: 1fr;
+                    }
+                }
+
+                /* Middle 3-Column Grid */
+                .middle-grid-container {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr 1fr;
+                    gap: 16px;
+                    margin-bottom: 16px;
+                }
+                @media (max-width: 1024px) {
+                    .middle-grid-container {
+                        grid-template-columns: 1fr;
+                    }
+                }
+
+                /* Middle Card (UAV Image Gallery Card) */
+                .middle-card-uav {
+                    height: 400px;
+                }
+                @media (max-height: 900px), (max-width: 1400px) {
+                    .middle-card-uav {
+                        height: 350px;
+                    }
+                }
+                @media (max-height: 768px), (max-width: 1200px) {
+                    .middle-card-uav {
+                        height: 320px;
+                    }
+                }
+                @media (max-width: 1024px) {
+                    .middle-card-uav {
+                        height: 350px;
+                    }
+                }
+
+                /* Bottom 2-Column Grid */
+                .bottom-grid-container {
+                    display: grid;
+                    grid-template-columns: 1fr 1.6fr;
+                    gap: 16px;
+                }
+                @media (max-width: 1024px) {
+                    .bottom-grid-container {
+                        grid-template-columns: 1fr;
+                    }
                 }
             `}</style>
         </div>
