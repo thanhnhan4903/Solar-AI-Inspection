@@ -489,8 +489,9 @@ class ReportGenerator:
         pdf.write(7.5, "Phần dưới đây trình bày thông tin chi tiết từng tấm pin bị lỗi, bao gồm các thông số ghi nhận O&M, hình ảnh nhiệt phóng to được định vị làm nổi bật lỗi tương ứng, ảnh quang học bối cảnh và bảng dữ liệu chi tiết của lỗi.")
         pdf.ln(12)
 
-        def draw_defect_row_local(pdf, columns_data):
-            widths = [35, 40, 25, 30, 25]
+        def draw_defect_row_local(pdf, columns_data, widths=None):
+            if widths is None:
+                widths = [35, 40, 25, 30, 25]
             cell_lines = []
             for txt, w in zip(columns_data, widths):
                 cell_lines.append(get_wrapped_lines(pdf, str(txt), w - 4))
@@ -611,62 +612,62 @@ class ReportGenerator:
             pdf.multi_cell(110, 5, notes, align="L")
             pdf.ln(3)
             
-            # Chi tiết từng lỗi trong tấm pin
-            for d_idx, d in enumerate(defects):
-                if pdf.get_y() > 210:
+            # 3. Vẽ ảnh overview (Chứa viền panel màu vàng và tất cả các lỗi màu xanh lá, có đánh số thứ tự)
+            panel_crops = cropped_images.get(idx, {})
+            temp_overview_thermal = panel_crops.get("thermal", "")
+            temp_overview_rgb = panel_crops.get("rgb", "")
+            
+            overview_success = os.path.exists(temp_overview_thermal) and os.path.exists(temp_overview_rgb)
+            
+            if overview_success:
+                if pdf.get_y() > 220:
                     pdf.add_page()
-                    
-                if len(defects) > 1:
-                    pdf._f("B", 11)
-                    pdf.set_text_color(14, 165, 233)
-                    pdf.cell(0, 6, f" Chi tiết lỗi #{d_idx + 1}: {VI_DEFECT_MAP.get(d.get('class_name'), d.get('class_name'))}", new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(1)
-                    
-                defect_crops = cropped_images.get(idx, {}).get(d_idx, {})
-                temp_thermal_path = defect_crops.get("thermal", "")
-                temp_rgb_path = defect_crops.get("rgb", "")
-                crop_success = os.path.exists(temp_thermal_path) and os.path.exists(temp_rgb_path)
-
+                
                 image_y = pdf.get_y() + 1
-                if crop_success:
-                    IMG_W = 73
-                    pdf.image(temp_thermal_path, x=35, y=image_y, w=IMG_W, h=30)
-                    pdf.image(temp_rgb_path, x=117, y=image_y, w=IMG_W, h=30)
-                    
-                    pdf.set_draw_color(226, 232, 240)
-                    pdf.set_line_width(0.15)
-                    
-                    # Chú thích ảnh nhiệt
-                    pdf.rect(35, image_y + 30.5, IMG_W, 5, style='D')
-                    pdf.set_xy(35, image_y + 30.5)
-                    pdf._f("I", 8)
-                    pdf.set_text_color(71, 85, 105)
-                    pdf.cell(IMG_W, 4, "Ảnh nhiệt phóng to vùng lỗi", align="C")
-                    
-                    # Chú thích ảnh RGB
-                    pdf.rect(117, image_y + 30.5, IMG_W, 5, style='D')
-                    pdf.set_xy(117, image_y + 30.5)
-                    pdf.cell(IMG_W, 4, "Ảnh quang học bối cảnh", align="C", new_x="LMARGIN", new_y="NEXT")
-                    
-                    pdf.set_y(image_y + 37)
-                else:
-                    pdf.ln(2)
-                    
-                # Bảng thông số chi tiết lỗi
-                pdf.ln(1)
-                pdf.set_xy(35, pdf.get_y())
-                pdf._f("B", 10)
-                pdf.set_fill_color(30, 41, 59)
-                pdf.set_text_color(255, 255, 255)
+                IMG_W = 73
+                pdf.image(temp_overview_thermal, x=35, y=image_y, w=IMG_W, h=30)
+                pdf.image(temp_overview_rgb, x=117, y=image_y, w=IMG_W, h=30)
+                
                 pdf.set_draw_color(226, 232, 240)
                 pdf.set_line_width(0.15)
                 
-                pdf.cell(35, 8.5, "Loại lỗi", 1, 0, "C", fill=True)
-                pdf.cell(40, 8.5, "Mức độ & Khuyến nghị", 1, 0, "C", fill=True)
-                pdf.cell(25, 8.5, "Hao hụt", 1, 0, "C", fill=True)
-                pdf.cell(30, 8.5, "Tỷ lệ diện tích", 1, 0, "C", fill=True)
-                pdf.cell(25, 8.5, "Vị trí", 1, 1, "C", fill=True)
+                # Chú thích ảnh nhiệt
+                pdf.rect(35, image_y + 30.5, IMG_W, 5, style='D')
+                pdf.set_xy(35, image_y + 30.5)
+                pdf._f("I", 8)
+                pdf.set_text_color(71, 85, 105)
+                pdf.cell(IMG_W, 4, "Ảnh nhiệt phóng to vùng lỗi", align="C")
                 
+                # Chú thích ảnh RGB
+                pdf.rect(117, image_y + 30.5, IMG_W, 5, style='D')
+                pdf.set_xy(117, image_y + 30.5)
+                pdf.cell(IMG_W, 4, "Ảnh quang học bối cảnh", align="C", new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_y(image_y + 37)
+            else:
+                pdf.ln(2)
+
+            # 4. Bảng thông số chi tiết lỗi (Hiển thị tất cả các lỗi của tấm pin hiện tại)
+            if pdf.get_y() > 220:
+                pdf.add_page()
+                
+            pdf.ln(2)
+            pdf.set_xy(35, pdf.get_y())
+            pdf._f("B", 10)
+            pdf.set_fill_color(30, 41, 59)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_draw_color(226, 232, 240)
+            pdf.set_line_width(0.15)
+            
+            # Cột: Ký hiệu, Loại lỗi, Mức độ & Khuyến nghị, Hao hụt, Tỷ lệ diện tích
+            widths_table = [15, 35, 50, 27, 28]
+            pdf.cell(widths_table[0], 8.5, "Ký hiệu", 1, 0, "C", fill=True)
+            pdf.cell(widths_table[1], 8.5, "Loại lỗi", 1, 0, "C", fill=True)
+            pdf.cell(widths_table[2], 8.5, "Mức độ & Khuyến nghị", 1, 0, "C", fill=True)
+            pdf.cell(widths_table[3], 8.5, "Hao hụt", 1, 0, "C", fill=True)
+            pdf.cell(widths_table[4], 8.5, "Tỷ lệ diện tích", 1, 1, "C", fill=True)
+            
+            for d_idx, d in enumerate(defects):
                 raw_cname = d.get("class_name") or d.get("type", "")
                 defect_type_str = VI_DEFECT_MAP.get(raw_cname, raw_cname)
                 
@@ -683,21 +684,19 @@ class ReportGenerator:
                     area_ratio_str = f"{round(area_ratio, 2)}% diện tích\ntấm pin"
                 else:
                     area_ratio_str = "Chưa cập nhật"
-                    
-                loc_val = d.get("location_in_panel", "center")
-                location_str = translate_location(loc_val)
                 
                 draw_defect_row_local(
                     pdf,
                     [
+                        f"#{d_idx + 1}",
                         defect_type_str,
                         severity_rec_str,
                         power_loss_str,
-                        area_ratio_str,
-                        location_str
-                    ]
+                        area_ratio_str
+                    ],
+                    widths=widths_table
                 )
-                pdf.ln(5)
+            pdf.ln(5)
                 
         return sec_1_page, sec_2_page, sec_3_page, sec_4_page
 
@@ -986,127 +985,210 @@ class ReportGenerator:
         cropped_images = {}
         for idx, (p, p_detail) in enumerate(faulty_panels):
             defects = p_detail.get("defects", [])
+            
+            # Sắp xếp các lỗi từ trên xuống dưới, từ trái sang phải
+            def get_defect_center(d):
+                center = d.get("center")
+                if center and len(center) == 2:
+                    return float(center[0]), float(center[1])
+                d_b = d.get("bbox") or d.get("box")
+                if d_b and len(d_b) == 4:
+                    return (d_b[0] + d_b[2]) / 2.0, (d_b[1] + d_b[3]) / 2.0
+                d_p = d.get("polygon")
+                if d_p and len(d_p) >= 1:
+                    xs = [pt[0] for pt in d_p]
+                    ys = [pt[1] for pt in d_p]
+                    return sum(xs) / len(xs), sum(ys) / len(ys)
+                return 0.0, 0.0
+
+            defects = sorted(defects, key=lambda d: (get_defect_center(d)[1], get_defect_center(d)[0]))
+            p_detail["defects"] = defects
+
+            def get_non_overlapping_pos(drawn_boxes, start_x, start_y, text, font, font_scale, thickness, img_w, img_h):
+                import math
+                (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+                for r in range(0, 60, 6):
+                    if r == 0:
+                        tx, ty = start_x, start_y
+                        tx = max(5, min(img_w - tw - 5, tx))
+                        ty = max(th + 5, min(img_h - 5, ty))
+                        box = [tx - 2, ty - th - 2, tx + tw + 2, ty + 2]
+                        overlap = False
+                        for db in drawn_boxes:
+                            if not (box[2] < db[0] or box[0] > db[2] or box[3] < db[1] or box[1] > db[3]):
+                                overlap = True
+                                break
+                        if not overlap:
+                            return tx, ty, box
+                    else:
+                        for angle in range(0, 360, 45):
+                            rad = math.radians(angle)
+                            tx = int(start_x + r * math.cos(rad))
+                            ty = int(start_y + r * math.sin(rad))
+                            tx = max(5, min(img_w - tw - 5, tx))
+                            ty = max(th + 5, min(img_h - 5, ty))
+                            box = [tx - 2, ty - th - 2, tx + tw + 2, ty + 2]
+                            overlap = False
+                            for db in drawn_boxes:
+                                if not (box[2] < db[0] or box[0] > db[2] or box[3] < db[1] or box[1] > db[3]):
+                                    overlap = True
+                                    break
+                            if not overlap:
+                                return tx, ty, box
+                return start_x, start_y - 10, [start_x - 2, start_y - 12 - th, start_x + tw + 2, start_y - 8]
+
             local_id = p.panel.local_id
             
             thermal_filename = p.image.filename
             rgb_filename = thermal_to_rgb.get(thermal_filename)
-            thermal_path = os.path.join("data/results", thermal_filename)
+            
+            # Load clean original thermal image
+            thermal_path = os.path.join("data/precalib", thermal_filename)
+            if not os.path.exists(thermal_path):
+                thermal_path = os.path.join("data/raw", thermal_filename)
+                
             rgb_path = os.path.join("data/raw", rgb_filename) if rgb_filename else None
             
-            cropped_images[idx] = {}
-            for d_idx, d in enumerate(defects):
-                d_bbox = d.get("bbox") or d.get("box", [])
-                d_poly = d.get("polygon", [])
-                
-                temp_thermal_path = ""
-                temp_rgb_path = ""
-                crop_success = False
-                
-                if os.path.exists(thermal_path):
-                    try:
-                        t_img = cv2.imread(thermal_path)
-                        if t_img is not None:
-                            h_t, w_t = t_img.shape[:2]
-                            
-                            # Xác định bbox của lỗi
-                            if d_bbox and len(d_bbox) == 4:
-                                dx1, dy1, dx2, dy2 = [int(v) for v in d_bbox]
-                            elif d_poly and len(d_poly) >= 3:
-                                xs = [int(pt[0]) for pt in d_poly]
-                                ys = [int(pt[1]) for pt in d_poly]
-                                dx1, dy1, dx2, dy2 = min(xs), min(ys), max(xs), max(ys)
-                            else:
-                                p_bbox = p_detail.get("bbox", [])
-                                if p_bbox and len(p_bbox) == 4:
-                                    dx1, dy1, dx2, dy2 = [int(v) for v in p_bbox]
-                                else:
-                                    dx1, dy1, dx2, dy2 = 0, 0, w_t, h_t
-                                    
-                            dw = dx2 - dx1
-                            dh = dy2 - dy1
-                            dcx = (dx1 + dx2) // 2
-                            dcy = (dy1 + dy2) // 2
-                            
-                            # Tính kích thước crop (3 lần kích thước lỗi, tối thiểu 150x120)
-                            crop_w = int(max(dw * 3, 150))
-                            crop_h = int(max(dh * 3, 120))
-                            crop_w = min(crop_w, w_t)
-                            crop_h = min(crop_h, h_t)
-                            
-                            x1_c = max(0, dcx - crop_w // 2)
-                            y1_c = max(0, dcy - crop_h // 2)
-                            x2_c = min(w_t, x1_c + crop_w)
-                            y2_c = min(h_t, y1_c + crop_h)
-                            
-                            if x2_c - x1_c < crop_w:
-                                x1_c = max(0, x2_c - crop_w)
-                            if y2_c - y1_c < crop_h:
-                                y1_c = max(0, y2_c - crop_h)
-                                
-                            t_drawn = t_img.copy()
-                            sev = d.get("severity", "minor").lower()
-                            color_map = {
-                                "very_minor": (0, 255, 255),
-                                "minor": (0, 255, 255),
-                                "moderate": (0, 165, 255),
-                                "severe": (0, 0, 255),
-                                "replace": (0, 0, 180)
-                            }
-                            bgr_color = color_map.get(sev, (0, 0, 255))
-                            
-                            # Vẽ viền màu nổi bật lỗi
-                            if d_poly and len(d_poly) >= 3:
-                                pts = np.array(d_poly, dtype=np.int32)
-                                cv2.polylines(t_drawn, [pts], isClosed=True, color=bgr_color, thickness=2)
-                            else:
-                                cv2.rectangle(t_drawn, (dx1, dy1), (dx2, dy2), bgr_color, 2)
-                                
-                            crop_t = t_drawn[y1_c:y2_c, x1_c:x2_c]
-                            if crop_t is not None and crop_t.size > 0:
-                                temp_thermal_path = os.path.join(temp_dir, f"t_{local_id}_{idx}_{d_idx}.jpg")
-                                cv2.imwrite(temp_thermal_path, crop_t)
-                                
-                            # Cắt ảnh RGB bối cảnh (tâm panel, có viền xanh lá)
-                            p_bbox = p_detail.get("bbox", [])
-                            if p_bbox and len(p_bbox) == 4 and rgb_path and os.path.exists(rgb_path):
-                                r_img = cv2.imread(rgb_path)
-                                if r_img is not None:
-                                    h_r, w_r = r_img.shape[:2]
-                                    px1, py1, px2, py2 = [int(v) for v in p_bbox]
-                                    pcx = (px1 + px2) // 2
-                                    pcy = (py1 + py2) // 2
-                                    
-                                    scale_x = w_r / w_t
-                                    scale_y = h_r / h_t
-                                    
-                                    crop_w_r = int(w_t * 0.5 * scale_x)
-                                    crop_h_r = int(h_t * 0.5 * scale_y)
-                                    
-                                    x1_r = max(0, int(pcx * scale_x) - crop_w_r // 2)
-                                    y1_r = max(0, int(pcy * scale_y) - crop_h_r // 2)
-                                    x2_r = min(w_r, x1_r + crop_w_r)
-                                    y2_r = min(h_r, y1_r + crop_h_r)
-                                    
-                                    r_drawn = r_img.copy()
-                                    rx1, ry1 = int(px1 * scale_x), int(py1 * scale_y)
-                                    rx2, ry2 = int(px2 * scale_x), int(py2 * scale_y)
-                                    cv2.rectangle(r_drawn, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
-                                    
-                                    crop_r = r_drawn[y1_r:y2_r, x1_r:x2_r]
-                                    if crop_r is not None and crop_r.size > 0:
-                                        temp_rgb_path = os.path.join(temp_dir, f"r_{local_id}_{idx}_{d_idx}.jpg")
-                                        cv2.imwrite(temp_rgb_path, crop_r)
-                                        
-                            crop_success = os.path.exists(temp_thermal_path) and os.path.exists(temp_rgb_path)
-                    except Exception as e:
-                        logger.warning(f"Error cropping for defect {d_idx} on panel {local_id}: {e}")
-                        crop_success = False
+            # 1. Xác định kích thước ảnh thermal và tính toán crop box cố định cho panel
+            w_t, h_t = 640, 360  # fallback
+            if os.path.exists(thermal_path):
+                try:
+                    t_img_temp = cv2.imread(thermal_path)
+                    if t_img_temp is not None:
+                        h_t, w_t = t_img_temp.shape[:2]
+                except Exception:
+                    pass
+
+            p_bbox = p_detail.get("bbox", [])
+            if p_bbox and len(p_bbox) == 4:
+                px1, py1, px2, py2 = [int(v) for v in p_bbox]
+            else:
+                px1, py1, px2, py2 = 0, 0, w_t, h_t
+
+            pw = px2 - px1
+            ph = py2 - py1
+            pcx = (px1 + px2) // 2
+            pcy = (py1 + py2) // 2
+
+            # Tính crop thermal cho panel (2.5 lần kích thước panel)
+            crop_w = int(max(pw * 2.5, 150))
+            crop_h = int(max(ph * 2.5, 120))
+            crop_w = min(crop_w, w_t)
+            crop_h = min(crop_h, h_t)
+
+            x1_c = max(0, pcx - crop_w // 2)
+            y1_c = max(0, pcy - crop_h // 2)
+            x2_c = min(w_t, x1_c + crop_w)
+            y2_c = min(h_t, y1_c + crop_h)
+
+            if x2_c - x1_c < crop_w:
+                x1_c = max(0, x2_c - crop_w)
+            if y2_c - y1_c < crop_h:
+                y1_c = max(0, y2_c - crop_h)
+
+            # 2. Tạo ảnh overview thermal & RGB (chỉ vẽ viền panel + vẽ tất cả các lỗi có đánh số màu xanh lá)
+            temp_overview_thermal_path = ""
+            temp_overview_rgb_path = ""
+            overview_success = False
+
+            if os.path.exists(thermal_path):
+                try:
+                    t_img = cv2.imread(thermal_path)
+                    if t_img is not None:
+                        t_overview = t_img.copy()
                         
-                if crop_success:
-                    cropped_images[idx][d_idx] = {
-                        "thermal": temp_thermal_path,
-                        "rgb": temp_rgb_path
-                    }
+                        # Vẽ viền panel hiện tại (màu vàng)
+                        p_poly = p_detail.get("polygon") or p_detail.get("outer_polygon", [])
+                        if p_poly and len(p_poly) >= 3:
+                            pts_p = np.array(p_poly, dtype=np.int32)
+                            cv2.polylines(t_overview, [pts_p], isClosed=True, color=(0, 255, 255), thickness=2)
+                            label_x = int(min(pt[0] for pt in p_poly))
+                            label_y = int(min(pt[1] for pt in p_poly)) - 4
+                            cv2.putText(t_overview, local_id, (max(5, label_x), max(15, label_y)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+                        elif p_bbox and len(p_bbox) == 4:
+                            cv2.rectangle(t_overview, (px1, py1), (px2, py2), (0, 255, 255), 2)
+                            cv2.putText(t_overview, local_id, (px1, py1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+
+                        # Vẽ tất cả các lỗi trong tấm pin này, có đánh số thứ tự (Viền màu đỏ BGR: (0, 0, 255), Chữ màu xanh lá BGR: (0, 255, 0))
+                        drawn_boxes = []
+                        for d_i, d_obj in enumerate(defects):
+                            d_p = d_obj.get("polygon", [])
+                            d_b = d_obj.get("bbox") or d_obj.get("box", [])
+                            
+                            start_x, start_y = 0, 0
+                            if d_p and len(d_p) >= 3:
+                                pts_d = np.array(d_p, dtype=np.int32)
+                                cv2.polylines(t_overview, [pts_d], isClosed=True, color=(0, 0, 255), thickness=2)
+                                start_x = int(min(pt[0] for pt in d_p))
+                                start_y = int(min(pt[1] for pt in d_p)) - 4
+                            elif d_b and len(d_b) == 4:
+                                dx1, dy1, dx2, dy2 = [int(v) for v in d_b]
+                                cv2.rectangle(t_overview, (dx1, dy1), (dx2, dy2), (0, 0, 255), 2)
+                                start_x = dx1
+                                start_y = dy1 - 4
+                            else:
+                                center = d_obj.get("center", [0, 0])
+                                start_x, start_y = int(center[0]), int(center[1])
+                                
+                            text = f"#{d_i + 1}"
+                            tx, ty, box = get_non_overlapping_pos(
+                                drawn_boxes, start_x, start_y, text,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1, w_t, h_t
+                            )
+                            drawn_boxes.append(box)
+                            
+                            # Nếu nhãn bị dịch chuyển nhiều, vẽ đường chỉ dẫn màu xanh lá
+                            import math
+                            dist = math.sqrt((tx - start_x)**2 + (ty - start_y)**2)
+                            if dist > 4:
+                                (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                                cv2.line(t_overview, (start_x, start_y), (tx + tw // 2, ty - th // 2), (0, 255, 0), 1, cv2.LINE_AA)
+                                cv2.circle(t_overview, (start_x, start_y), 2, (0, 255, 0), -1, cv2.LINE_AA)
+                                
+                            cv2.putText(t_overview, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+
+                        crop_t_overview = t_overview[y1_c:y2_c, x1_c:x2_c]
+                        if crop_t_overview is not None and crop_t_overview.size > 0:
+                            temp_overview_thermal_path = os.path.join(temp_dir, f"t_overview_{local_id}_{idx}.jpg")
+                            cv2.imwrite(temp_overview_thermal_path, crop_t_overview)
+                except Exception as e:
+                    logger.warning(f"Error creating overview thermal for panel {local_id}: {e}")
+
+            if rgb_path and os.path.exists(rgb_path):
+                try:
+                    r_img = cv2.imread(rgb_path)
+                    if r_img is not None:
+                        h_r, w_r = r_img.shape[:2]
+                        scale_x = w_r / w_t
+                        scale_y = h_r / h_t
+
+                        crop_w_r = int(w_t * 0.5 * scale_x)
+                        crop_h_r = int(h_t * 0.5 * scale_y)
+
+                        x1_r = max(0, int(pcx * scale_x) - crop_w_r // 2)
+                        y1_r = max(0, int(pcy * scale_y) - crop_h_r // 2)
+                        x2_r = min(w_r, x1_r + crop_w_r)
+                        y2_r = min(h_r, y1_r + crop_h_r)
+
+                        r_drawn = r_img.copy()
+                        rx1, ry1 = int(px1 * scale_x), int(py1 * scale_y)
+                        rx2, ry2 = int(px2 * scale_x), int(py2 * scale_y)
+                        cv2.rectangle(r_drawn, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+
+                        crop_r_overview = r_drawn[y1_r:y2_r, x1_r:x2_r]
+                        if crop_r_overview is not None and crop_r_overview.size > 0:
+                            temp_overview_rgb_path = os.path.join(temp_dir, f"r_overview_{local_id}_{idx}.jpg")
+                            cv2.imwrite(temp_overview_rgb_path, crop_r_overview)
+                except Exception as e:
+                    logger.warning(f"Error creating overview RGB for panel {local_id}: {e}")
+
+            overview_success = os.path.exists(temp_overview_thermal_path) and os.path.exists(temp_overview_rgb_path)
+
+            if overview_success:
+                cropped_images[idx] = {
+                    "thermal": temp_overview_thermal_path,
+                    "rgb": temp_overview_rgb_path
+                }
 
         metadata_fields = [
             ("Tên dự án:",       project_name),
