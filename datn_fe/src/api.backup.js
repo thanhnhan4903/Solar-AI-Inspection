@@ -1,7 +1,6 @@
-﻿import axios from 'axios';
+import axios from 'axios';
 
-const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? "";
-const API_BASE_URL = `${API_ORIGIN}/api/v1`;
+const API_BASE_URL = "http://127.0.0.1:8000/api/v1";
 
 // Cấu hình axios để gọi API
 const api = axios.create({
@@ -24,7 +23,7 @@ export const updateAiModel = (formData) => api.post("/update-ai-model", formData
 
 export const getMatchPairs = () => api.get(`/match-pairs`);
 export const downloadReportUrl = (batchId) => `${API_BASE_URL}/download-report/${batchId}`;
-export const IMAGE_URL = `${API_ORIGIN}/data/results/`;
+export const IMAGE_URL = "http://127.0.0.1:8000/data/processed/";
 
 export const loginUser = async (username, password) => {
     return await api.post("/login", { username, password });

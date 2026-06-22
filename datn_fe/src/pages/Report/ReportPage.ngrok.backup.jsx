@@ -528,7 +528,7 @@ export default function ReportPage({ data, batchId }) {
                                                     <div style={{ border: "2px solid #fee2e2", borderRadius: 8, overflow: "hidden", aspectRatio: "5/4", background: "#000" }}>
                                                         {hasBbox ? (
                                                             <img 
-                                                                src={`/api/v1/panel-image?filename=${p.imageFilename}&x1=${x1}&y1=${y1}&x2=${x2}&y2=${y2}&polygon=${p.polygon ? p.polygon.join(',') : ''}`}
+                                                                src={`http://127.0.0.1:8000/api/v1/panel-image?filename=${p.imageFilename}&x1=${x1}&y1=${y1}&x2=${x2}&y2=${y2}&polygon=${p.polygon ? p.polygon.join(',') : ''}`}
                                                                 style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                                                 alt={`Thermal ${p.local_id}`}
                                                                 onError={(e) => { e.target.src = "https://images.unsplash.com/photo-1508514177221-188b1cf16e9d?auto=format&fit=crop&w=300&q=80"; }}
@@ -545,7 +545,7 @@ export default function ReportPage({ data, batchId }) {
                                                     <div style={{ border: "2px solid #dcfce7", borderRadius: 8, overflow: "hidden", aspectRatio: "5/4", background: "#000" }}>
                                                         {hasBbox && p.rgbImage ? (
                                                             <img 
-                                                                src={`/api/v1/panel-image?filename=${p.rgbImage}&x1=${x1}&y1=${y1}&x2=${x2}&y2=${y2}`}
+                                                                src={`http://127.0.0.1:8000/api/v1/panel-image?filename=${p.rgbImage}&x1=${x1}&y1=${y1}&x2=${x2}&y2=${y2}`}
                                                                 style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                                                 alt={`RGB ${p.local_id}`}
                                                                 onError={(e) => { e.target.src = "https://images.unsplash.com/photo-1508514177221-188b1cf16e9d?auto=format&fit=crop&w=300&q=80"; }}

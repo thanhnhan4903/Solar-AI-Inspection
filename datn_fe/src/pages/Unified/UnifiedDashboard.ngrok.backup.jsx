@@ -104,8 +104,8 @@ function panelHasDefectGroup(panel, group) {
 
 // ✅ Đổi sang precalib/ — polygon được tính trên ảnh precalib,
 // nên overlay phải dùng cùng ảnh để không bị lệch.
-const IMAGE_BASE_URL = "/data/precalib/";
-const RAW_IMAGE_BASE_URL = "/data/raw/";
+const IMAGE_BASE_URL = "http://127.0.0.1:8000/data/precalib/";
+const RAW_IMAGE_BASE_URL = "http://127.0.0.1:8000/data/raw/";
 
 // FitBounds component
 function FitBounds({ gridData, focusTarget }) {

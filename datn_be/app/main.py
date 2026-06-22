@@ -438,7 +438,16 @@ async def process_images():
 
         # Đọc ảnh để phân biệt ảnh nhiệt (Thermal) và ảnh quang học (RGB) bằng độ phân giải
         import cv2 as _cv2
-        raw_img = _cv2.imread(src_path)
+        if not os.path.exists(src_path) or os.path.getsize(src_path) == 0:
+            logger.warning(f"Bo qua file anh bi trong hoac khong ton tai: {src_path}")
+            continue
+
+        try:
+            raw_img = _cv2.imread(src_path)
+        except Exception as e:
+            logger.error(f"Loi khi doc file anh {src_path}: {e}")
+            continue
+
         if raw_img is None:
             continue
             
@@ -1278,23 +1287,23 @@ def get_mock_gis():
 # ================================
 @app.get("/api/v1/download-report/{batch_id}")
 async def download_report(batch_id: int, db: Session = Depends(get_db)):
-    ai_results = db.query(models.AiResult).join(models.Image).filter(
-        models.Image.batch_id == batch_id
-    ).all()
+    ai_results = []
+    if batch_id > 0:
+        ai_results = db.query(models.AiResult).join(models.Image).filter(
+            models.Image.batch_id == batch_id
+        ).all()
     
-    if not ai_results:
-        return {"error": "Không tìm thấy dữ liệu báo cáo"}
-
     report_name = f"Report_Batch_{batch_id}.pdf"
     report_path = os.path.join("data", report_name)
     
     ReportGenerator.generate_inspection_report(batch_id, ai_results, report_path)
 
-    existing_report = db.query(models.Report).filter(models.Report.batch_id == batch_id).first()
-    if not existing_report:
-        db_report = models.Report(batch_id=batch_id, file_path=report_path)
-        db.add(db_report)
-        db.commit()
+    if batch_id > 0:
+        existing_report = db.query(models.Report).filter(models.Report.batch_id == batch_id).first()
+        if not existing_report:
+            db_report = models.Report(batch_id=batch_id, file_path=report_path)
+            db.add(db_report)
+            db.commit()
 
     return FileResponse(path=report_path, filename=report_name, media_type='application/pdf')
 

@@ -174,7 +174,24 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
         }
     };
 
-    const currentItem = items[currentIndex];
+    const currentItem = (items && items.length > 0 && currentIndex < items.length) ? items[currentIndex] : {
+        local_id: '---',
+        row: '—',
+        col: '—',
+        filename: 'Không có dữ liệu',
+        defects: [{
+            type: 'Không có lỗi',
+            confidence: 0,
+            area_ratio_percent: 0,
+            class_name: 'healthy',
+            thermal_validation_status: 'not_run'
+        }],
+        annotated_image_url: '',
+        image_url: '',
+        panel: {
+            geometry_source: 'N/A'
+        }
+    };
 
     return (
         <div style={{
@@ -200,7 +217,7 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                             Duyệt lỗi phát hiện (Manual Review)
                         </h2>
                         <p style={{ margin: '4px 0 0 0', color: '#94a3b8', fontSize: 13 }}>
-                            Đợt kiểm tra #{batchId} • Xem xét và xác nhận các dị thường nhiệt phát hiện bởi AI
+                            Đợt kiểm tra #{batchId || '---'} • Xem xét và xác nhận các dị thường nhiệt phát hiện bởi AI
                         </p>
                     </div>
                     <button 
@@ -225,24 +242,14 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                             <div className="spinner" style={{ marginRight: 12 }}></div>
                             Đang tải danh sách lỗi...
                         </div>
-                    ) : items.length === 0 ? (
+                    ) : hasFetchError ? (
                         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', padding: 40 }}>
-                            {hasFetchError ? (
-                                <>
-                                    <AlertTriangle size={48} style={{ color: '#ef4444', marginBottom: 16 }} />
-                                    <h3 style={{ color: '#f8fafc', margin: '0 0 8px 0' }}>Lỗi tải dữ liệu kiểm tra</h3>
-                                    <p style={{ margin: 0, textAlign: 'center', maxWidth: 500, lineHeight: 1.5 }}>
-                                        Đợt kiểm tra #{batchId} không tìm thấy trên hệ thống (có thể DB đã được thiết lập lại hoặc cập nhật đợt mới).<br/>
-                                        Hãy <strong>nhấn F5 (Tải lại trang)</strong> để cập nhật phiên làm việc mới nhất.
-                                    </p>
-                                </>
-                            ) : (
-                                <>
-                                    <Check size={48} style={{ color: '#10b981', marginBottom: 16 }} />
-                                    <h3 style={{ color: '#f8fafc', margin: '0 0 8px 0' }}>Không tìm thấy lỗi nào cần duyệt</h3>
-                                    <p style={{ margin: 0, textAlign: 'center' }}>Hệ thống không phát hiện tấm pin bị lỗi hoặc đợt kiểm tra chưa hoàn tất.</p>
-                                </>
-                            )}
+                            <AlertTriangle size={48} style={{ color: '#ef4444', marginBottom: 16 }} />
+                            <h3 style={{ color: '#f8fafc', margin: '0 0 8px 0' }}>Lỗi tải dữ liệu kiểm tra</h3>
+                            <p style={{ margin: 0, textAlign: 'center', maxWidth: 500, lineHeight: 1.5 }}>
+                                Đợt kiểm tra #{batchId || '---'} không tìm thấy trên hệ thống (có thể DB đã được thiết lập lại hoặc cập nhật đợt mới).<br/>
+                                Hãy <strong>nhấn F5 (Tải lại trang)</strong> để cập nhật phiên làm việc mới nhất.
+                            </p>
                         </div>
                     ) : (
                         <>
@@ -262,27 +269,41 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                 </div>
                                 
                                 <div style={{
-                                    flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                                     borderRadius: 16, overflow: 'hidden', border: '1px solid #1e293b',
-                                    backgroundColor: '#090d16', position: 'relative', minHeight: 300
+                                    backgroundColor: '#090d16', position: 'relative', minHeight: 300, padding: 24
                                 }}>
-                                    {/* Mặc định hiển thị ảnh thermal custom vẽ */}
-                                    <img 
-                                        src={`http://127.0.0.1:8000${currentItem.annotated_image_url}`} 
-                                        alt="Thermal Highlight" 
-                                        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                                        onError={(e) => {
-                                            // Fallback to precalib image
-                                            e.target.src = `http://127.0.0.1:8000${currentItem.image_url}`;
-                                        }}
-                                    />
-                                    <div style={{
-                                        position: 'absolute', bottom: 12, left: 12,
-                                        backgroundColor: 'rgba(15, 23, 42, 0.8)',
-                                        padding: '4px 10px', borderRadius: 8, fontSize: 11, color: '#cbd5e1'
-                                    }}>
-                                        AI Source: {currentItem.panel.geometry_source}
-                                    </div>
+                                    {items && items.length > 0 ? (
+                                        <>
+                                            {/* Mặc định hiển thị ảnh thermal custom vẽ */}
+                                            <img 
+                                                src={`http://127.0.0.1:8000${currentItem.annotated_image_url}`} 
+                                                alt="Thermal Highlight" 
+                                                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                                                onError={(e) => {
+                                                    // Fallback to precalib image
+                                                    e.target.src = `http://127.0.0.1:8000${currentItem.image_url}`;
+                                                }}
+                                            />
+                                            {currentItem.panel && (
+                                                <div style={{
+                                                    position: 'absolute', bottom: 12, left: 12,
+                                                    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+                                                    padding: '4px 10px', borderRadius: 8, fontSize: 11, color: '#cbd5e1'
+                                                }}>
+                                                    AI Source: {currentItem.panel.geometry_source}
+                                                </div>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <div style={{ textAlign: 'center', color: '#94a3b8' }}>
+                                            <Check size={48} style={{ color: '#10b981', marginBottom: 16, display: 'inline-block' }} />
+                                            <h3 style={{ color: '#f8fafc', margin: '0 0 8px 0', fontSize: 16 }}>Không tìm thấy lỗi nào cần duyệt</h3>
+                                            <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, maxWidth: 300 }}>
+                                                Hệ thống không phát hiện tấm pin bị lỗi hoặc đợt kiểm tra chưa hoàn tất.
+                                            </p>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
@@ -428,68 +449,74 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                                         {/* Đã xác nhận */}
                                         <button 
+                                            disabled={items.length === 0}
                                             onClick={() => setSelectedStatus('confirmed_defect')}
                                             style={{
                                                 padding: '12px 16px', borderRadius: 12, border: '1px solid',
                                                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                cursor: 'pointer', transition: 'all 0.2s', textAlign: 'left',
-                                                borderColor: selectedStatus === 'confirmed_defect' ? '#ef4444' : '#334155',
-                                                backgroundColor: selectedStatus === 'confirmed_defect' ? 'rgba(239, 68, 68, 0.15)' : '#1e293b',
-                                                color: selectedStatus === 'confirmed_defect' ? '#fca5a5' : '#94a3b8'
+                                                cursor: items.length === 0 ? 'not-allowed' : 'pointer',
+                                                borderColor: items.length === 0 ? '#334155' : (selectedStatus === 'confirmed_defect' ? '#ef4444' : '#334155'),
+                                                backgroundColor: items.length === 0 ? '#1e293b' : (selectedStatus === 'confirmed_defect' ? 'rgba(239, 68, 68, 0.15)' : '#1e293b'),
+                                                color: items.length === 0 ? '#64748b' : (selectedStatus === 'confirmed_defect' ? '#fca5a5' : '#94a3b8'),
+                                                opacity: items.length === 0 ? 0.4 : 1
                                             }}
                                         >
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                                <AlertCircle size={16} style={{ color: '#ef4444' }} />
+                                                <AlertCircle size={16} style={{ color: items.length === 0 ? '#64748b' : '#ef4444' }} />
                                                 <div>
                                                     <div style={{ fontWeight: 600, fontSize: 14 }}>Đã xác nhận</div>
                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>Xác nhận tấm pin có bất thường nhiệt này</div>
                                                 </div>
                                             </div>
-                                            {selectedStatus === 'confirmed_defect' && <Check size={16} style={{ color: '#ef4444' }} />}
+                                            {(items.length > 0 && selectedStatus === 'confirmed_defect') && <Check size={16} style={{ color: '#ef4444' }} />}
                                         </button>
 
                                         {/* Cần kiểm tra lại */}
                                         <button 
+                                            disabled={items.length === 0}
                                             onClick={() => setSelectedStatus('needs_review')}
                                             style={{
                                                 padding: '12px 16px', borderRadius: 12, border: '1px solid',
                                                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                cursor: 'pointer', transition: 'all 0.2s', textAlign: 'left',
-                                                borderColor: selectedStatus === 'needs_review' ? '#f59e0b' : '#334155',
-                                                backgroundColor: selectedStatus === 'needs_review' ? 'rgba(245, 158, 11, 0.15)' : '#1e293b',
-                                                color: selectedStatus === 'needs_review' ? '#fde047' : '#94a3b8'
+                                                cursor: items.length === 0 ? 'not-allowed' : 'pointer',
+                                                borderColor: items.length === 0 ? '#334155' : (selectedStatus === 'needs_review' ? '#f59e0b' : '#334155'),
+                                                backgroundColor: items.length === 0 ? '#1e293b' : (selectedStatus === 'needs_review' ? 'rgba(245, 158, 11, 0.15)' : '#1e293b'),
+                                                color: items.length === 0 ? '#64748b' : (selectedStatus === 'needs_review' ? '#fde047' : '#94a3b8'),
+                                                opacity: items.length === 0 ? 0.4 : 1
                                             }}
                                         >
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                                <AlertTriangle size={16} style={{ color: '#f59e0b' }} />
+                                                <AlertTriangle size={16} style={{ color: items.length === 0 ? '#64748b' : '#f59e0b' }} />
                                                 <div>
                                                     <div style={{ fontWeight: 600, fontSize: 14 }}>Cần kiểm tra lại</div>
                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>Cần khảo sát hiện trường thực tế để xác nhận</div>
                                                 </div>
                                             </div>
-                                            {selectedStatus === 'needs_review' && <Check size={16} style={{ color: '#f59e0b' }} />}
+                                            {(items.length > 0 && selectedStatus === 'needs_review') && <Check size={16} style={{ color: '#f59e0b' }} />}
                                         </button>
 
                                         {/* Bỏ qua */}
                                         <button 
+                                            disabled={items.length === 0}
                                             onClick={() => setSelectedStatus('false_positive')}
                                             style={{
                                                 padding: '12px 16px', borderRadius: 12, border: '1px solid',
                                                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                cursor: 'pointer', transition: 'all 0.2s', textAlign: 'left',
-                                                borderColor: selectedStatus === 'false_positive' ? '#94a3b8' : '#334155',
-                                                backgroundColor: selectedStatus === 'false_positive' ? 'rgba(148, 163, 184, 0.15)' : '#1e293b',
-                                                color: selectedStatus === 'false_positive' ? '#e2e8f0' : '#94a3b8'
+                                                cursor: items.length === 0 ? 'not-allowed' : 'pointer',
+                                                borderColor: items.length === 0 ? '#334155' : (selectedStatus === 'false_positive' ? '#94a3b8' : '#334155'),
+                                                backgroundColor: items.length === 0 ? '#1e293b' : (selectedStatus === 'false_positive' ? 'rgba(148, 163, 184, 0.15)' : '#1e293b'),
+                                                color: items.length === 0 ? '#64748b' : (selectedStatus === 'false_positive' ? '#e2e8f0' : '#94a3b8'),
+                                                opacity: items.length === 0 ? 0.4 : 1
                                             }}
                                         >
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                                <Trash2 size={16} style={{ color: '#94a3b8' }} />
+                                                <Trash2 size={16} style={{ color: items.length === 0 ? '#64748b' : '#94a3b8' }} />
                                                 <div>
                                                     <div style={{ fontWeight: 600, fontSize: 14 }}>Bỏ qua (False Positive)</div>
                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>AI nhận nhầm (phản xạ nhiệt, bụi bẩn, bóng che...)</div>
                                                 </div>
                                             </div>
-                                            {selectedStatus === 'false_positive' && <Check size={16} style={{ color: '#94a3b8' }} />}
+                                            {(items.length > 0 && selectedStatus === 'false_positive') && <Check size={16} style={{ color: '#94a3b8' }} />}
                                         </button>
                                     </div>
                                 </div>
@@ -501,12 +528,15 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                             ƯU TIÊN XỬ LÝ
                                         </label>
                                         <select
+                                            disabled={items.length === 0}
                                             value={maintenancePriority}
                                             onChange={(e) => setMaintenancePriority(e.target.value)}
                                             style={{
                                                 width: '100%', backgroundColor: '#1e293b',
                                                 border: '1px solid #334155', borderRadius: 12, padding: '10px 14px',
-                                                color: '#cbd5e1', fontSize: 13, outline: 'none'
+                                                color: items.length === 0 ? '#64748b' : '#cbd5e1', fontSize: 13, outline: 'none',
+                                                cursor: items.length === 0 ? 'not-allowed' : 'default',
+                                                opacity: items.length === 0 ? 0.5 : 1
                                             }}
                                         >
                                             <option value="low">Thấp</option>
@@ -521,13 +551,16 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                         </label>
                                         <input 
                                             type="text"
+                                            disabled={items.length === 0}
                                             value={reviewerName}
                                             onChange={(e) => setReviewerName(e.target.value)}
                                             placeholder="Tên kỹ sư duyệt"
                                             style={{
                                                 width: '100%', backgroundColor: '#1e293b',
                                                 border: '1px solid #334155', borderRadius: 12, padding: '10px 14px',
-                                                color: '#cbd5e1', fontSize: 13, outline: 'none', boxSizing: 'border-box'
+                                                color: items.length === 0 ? '#64748b' : '#cbd5e1', fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                                                cursor: items.length === 0 ? 'not-allowed' : 'text',
+                                                opacity: items.length === 0 ? 0.5 : 1
                                             }}
                                         />
                                     </div>
@@ -539,13 +572,16 @@ export default function DefectReviewModal({ isOpen, onClose, batchId, onRefresh 
                                         GHI CHÚ KIỂM TRA (TÙY CHỌN)
                                     </label>
                                     <textarea 
+                                        disabled={items.length === 0}
                                         value={reviewNote}
                                         onChange={(e) => setReviewNote(e.target.value)}
                                         placeholder="Nhập lý do phản xạ, yêu cầu kiểm tra kỹ hơn, hoặc ghi chú bảo trì..."
                                         style={{
                                             width: '100%', height: 75, backgroundColor: '#1e293b',
                                             border: '1px solid #334155', borderRadius: 12, padding: '10px 14px',
-                                            color: '#cbd5e1', fontSize: 13, resize: 'none', outline: 'none'
+                                            color: items.length === 0 ? '#64748b' : '#cbd5e1', fontSize: 13, resize: 'none', outline: 'none',
+                                            cursor: items.length === 0 ? 'not-allowed' : 'text',
+                                            opacity: items.length === 0 ? 0.5 : 1
                                         }}
                                     />
                                 </div>
