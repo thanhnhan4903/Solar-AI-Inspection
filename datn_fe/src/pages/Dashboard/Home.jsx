@@ -1108,48 +1108,7 @@ function ProjectMetadataModal({
                         </div>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                        {/* Loại dữ liệu */}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Loại dữ liệu</label>
-                            <input
-                                type="text"
-                                value={metadata.dataType || ""}
-                                onChange={(e) => onChange("dataType", e.target.value)}
-                                placeholder="Mặc định: UAV thermal image"
-                                style={inputStyle}
-                            />
-                        </div>
 
-                        {/* Model AI sử dụng */}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Model AI sử dụng</label>
-                            <input
-                                type="text"
-                                value={metadata.aiModel || ""}
-                                onChange={(e) => onChange("aiModel", e.target.value)}
-                                placeholder="Mặc định: YOLOv8-Solar-M300"
-                                style={inputStyle}
-                            />
-                        </div>
-                    </div>
-
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                        {/* Phiên bản hệ thống */}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <label style={{ fontSize: 12, fontWeight: 600, color: "#94a3b8" }}>Phiên bản hệ thống</label>
-                            <input
-                                type="text"
-                                value={metadata.systemVersion || ""}
-                                onChange={(e) => onChange("systemVersion", e.target.value)}
-                                placeholder="Mặc định: O&M Suite v2.4"
-                                style={inputStyle}
-                            />
-                        </div>
-
-                        {/* Spacer */}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }} />
-                    </div>
 
                     {/* Ghi chú */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1441,10 +1400,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
         panelPower: 600,
         systemCapacity: "",
         supervisor: "",
-        notes: "",
-        dataType: "UAV thermal image",
-        aiModel: "YOLOv8-Solar-M300",
-        systemVersion: "O&M Suite v2.4"
+        notes: ""
     });
     const [showMetadataModal, setShowMetadataModal] = useState(false);
     const [activeImageIdx, setActiveImageIdx] = useState(0);
@@ -1536,10 +1492,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                             panelPower: res.data.panel_power || 600,
                             systemCapacity: res.data.system_capacity || "",
                             supervisor: res.data.supervisor || "",
-                            notes: res.data.notes || "",
-                            dataType: res.data.data_type || "UAV thermal image",
-                            aiModel: res.data.ai_model || "YOLOv8-Solar-M300",
-                            systemVersion: res.data.system_version || "O&M Suite v2.4"
+                            notes: res.data.notes || ""
                         });
                     }
                 } catch (e) {
@@ -1556,10 +1509,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                     panelPower: 600,
                     systemCapacity: "",
                     supervisor: "",
-                    notes: "",
-                    dataType: "UAV thermal image",
-                    aiModel: "YOLOv8-Solar-M300",
-                    systemVersion: "O&M Suite v2.4"
+                    notes: ""
                 });
             }
         };
@@ -1581,10 +1531,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                             panelPower: res.data.panel_power || 600,
                             systemCapacity: res.data.system_capacity || "",
                             supervisor: res.data.supervisor || "",
-                            notes: res.data.notes || "",
-                            dataType: res.data.data_type || "UAV thermal image",
-                            aiModel: res.data.ai_model || "YOLOv8-Solar-M300",
-                            systemVersion: res.data.system_version || "O&M Suite v2.4"
+                            notes: res.data.notes || ""
                         });
                     }
                 }).catch(console.error);
@@ -1603,9 +1550,8 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
 
     const handleSaveMetadata = async () => {
         if (!batchId) {
-            // Đây là đợt tải dự án mới, lưu tạm vào state rồi đóng để chạy AI
+            // Đây là đợt tải dự án mới, lưu tạm vào state rồi đóng để mở bảng kiểm soát chất lượng
             setShowMetadataModal(false);
-            await handleRunAI();
             return;
         }
 
@@ -1622,10 +1568,7 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 panel_power: parseFloat(projectMetadata.panelPower) || 600,
                 system_capacity: projectMetadata.systemCapacity,
                 supervisor: projectMetadata.supervisor,
-                notes: projectMetadata.notes,
-                data_type: projectMetadata.dataType,
-                ai_model: projectMetadata.aiModel,
-                system_version: projectMetadata.systemVersion
+                notes: projectMetadata.notes
             });
 
             if (res.data.error) {
@@ -1765,9 +1708,9 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                 sc: projectMetadata.systemCapacity || "",
                 sv: projectMetadata.supervisor || "",
                 nt: projectMetadata.notes || "",
-                dt: projectMetadata.dataType || "UAV thermal image",
-                am: projectMetadata.aiModel || "YOLOv8-Solar-M300",
-                sys: projectMetadata.systemVersion || "O&M Suite v2.4"
+                dt: "UAV thermal image",
+                am: "YOLOv8-Solar-M300",
+                sys: "O&M Suite v2.4"
             };
             analyzeForm.append("scope", JSON.stringify(scopeData));
             analyzeForm.append("panel_power", projectMetadata.panelPower);
@@ -2283,9 +2226,6 @@ export default function Home({ data, batchId, onAnalysisComplete, onReset, onVie
                         { icon: "👤", label: "Người vận hành", value: projectMetadata.supervisor || "—" },
                         { icon: "⚡", label: "Công suất pin", value: projectMetadata.panelPower ? `${projectMetadata.panelPower} W` : "—" },
                         { icon: "🔌", label: "Công suất hệ thống", value: projectMetadata.systemCapacity || "—" },
-                        { icon: "📊", label: "Loại dữ liệu", value: projectMetadata.dataType || "—" },
-                        { icon: "🤖", label: "Model AI", value: projectMetadata.aiModel || "—" },
-                        { icon: "💻", label: "Hệ thống", value: projectMetadata.systemVersion || "—" },
                         { icon: "📝", label: "Ghi chú", value: projectMetadata.notes || "Kiểm tra định kỳ tháng 6", fullWidth: true },
                     ];
                     return <InfoPanel rows={infoRows} onEdit={() => setShowMetadataModal(true)} isAnyLoading={isAnyLoading} />;

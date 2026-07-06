@@ -29,19 +29,7 @@ def _simplify_coords(points: List[List[float]], max_vertices: int = 6) -> List[L
     if len(points) <= max_vertices:
         return points
         
-    pts = np.array(points, dtype=np.float32)
-    arc_len = cv2.arcLength(pts, True)
-    
-    # Tăng dần epsilon để nén đa giác
-    for factor in [0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05]:
-        epsilon = factor * arc_len
-        approx = cv2.approxPolyDP(pts, epsilon, True)
-        approx = approx.reshape(-1, 2)
-        if len(approx) <= max_vertices:
-            if len(approx) >= 3:
-                return approx.tolist()
-            break
-            
+    # Tạm thời tắt tính năng nén polygon bằng approxPolyDP để trả về mask gốc của YOLO theo yêu cầu của user
     return points
 
 
@@ -310,86 +298,102 @@ def assign_defects_to_panels(
             p_geom_best = panel_geoms[best_panel_idx]
             panel_area = p_geom_best.area
 
-            # Clip defect polygon bằng panel polygon (chỉ khi đã gán hợp lệ)
-            if p_geom_best is not None and d_geom is not None:
-                try:
-                    inter = p_geom_best.intersection(d_geom)
-                    if not inter.is_empty:
+            # Hard Clip defect polygon bằng panel polygon
+            clipped_poly = d.get("polygon", [])
+            clipped_display_poly = d.get("display_polygon", [])
+            clipped_analysis_poly = d.get("analysis_polygon", [])
+            
+            clipped_to_panel = False
+            clip_source = d.get("polygon_source", "yolo_segmentation")
+            
+            if p_geom_best is not None:
+                # Helper function to clip a polygon list against panel
+                def _clip_polygon_pts(pts_list, simplify_tol=32):
+                    if not pts_list: return []
+                    geom = _build_shapely_polygon(pts_list)
+                    if geom is None: return pts_list
+                    try:
+                        inter = p_geom_best.intersection(geom)
+                        if inter.is_empty: return []
                         if inter.geom_type == "Polygon":
-                            raw_coords = [list(pt) for pt in inter.exterior.coords]
-                            clipped_poly = _simplify_coords(raw_coords, max_vertices=32)
+                            raw = [list(pt) for pt in inter.exterior.coords]
+                            return _simplify_coords(raw, max_vertices=simplify_tol)
                         elif inter.geom_type == "MultiPolygon":
-                            largest_poly = max(inter.geoms, key=lambda g: g.area)
-                            raw_coords = [list(pt) for pt in largest_poly.exterior.coords]
-                            clipped_poly = _simplify_coords(raw_coords, max_vertices=32)
+                            largest = max(inter.geoms, key=lambda g: g.area)
+                            raw = [list(pt) for pt in largest.exterior.coords]
+                            return _simplify_coords(raw, max_vertices=simplify_tol)
+                    except Exception:
+                        pass
+                    return pts_list
 
-                        clipped_geom = _build_shapely_polygon(clipped_poly)
-                        if clipped_geom is not None:
-                            actual_intersection_area = clipped_geom.area
-                        else:
-                            actual_intersection_area = inter.area
-                except Exception:
-                    pass
-
-            # Clip display_polygon if present
-            d_display_poly_pts = d.get("display_polygon", [])
-            d_display_geom = _build_shapely_polygon(d_display_poly_pts)
-            if p_geom_best is not None and d_display_geom is not None:
-                try:
-                    inter_disp = p_geom_best.intersection(d_display_geom)
-                    if not inter_disp.is_empty:
-                        if inter_disp.geom_type == "Polygon":
-                            raw_coords_disp = [list(pt) for pt in inter_disp.exterior.coords]
-                            clipped_display_poly = _simplify_coords(raw_coords_disp, max_vertices=32)
-                        elif inter_disp.geom_type == "MultiPolygon":
-                            largest_poly_disp = max(inter_disp.geoms, key=lambda g: g.area)
-                            raw_coords_disp = [list(pt) for pt in largest_poly_disp.exterior.coords]
-                            clipped_display_poly = _simplify_coords(raw_coords_disp, max_vertices=32)
-                except Exception:
-                    clipped_display_poly = d_display_poly_pts
+                # Clip each representation
+                clipped_poly = _clip_polygon_pts(d.get("polygon", []), 32)
+                clipped_display_poly = _clip_polygon_pts(d.get("display_polygon", []), 32)
+                clipped_analysis_poly = _clip_polygon_pts(d.get("analysis_polygon", []), 16)
+                
+                clipped_geom = _build_shapely_polygon(clipped_analysis_poly)
+                if clipped_geom is not None:
+                    actual_intersection_area = clipped_geom.area
+                else:
+                    actual_intersection_area = 0.0
+                    
+                clipped_to_panel = True
+                clip_source = "panel_intersection"
             else:
-                clipped_display_poly = clipped_poly
+                clipped_geom = d_geom
+                if clipped_geom is not None:
+                    actual_intersection_area = clipped_geom.area
+                else:
+                    actual_intersection_area = 0.0
 
-            # Clip analysis_polygon if present
-            d_analysis_poly_pts = d.get("analysis_polygon", [])
-            d_analysis_geom = _build_shapely_polygon(d_analysis_poly_pts)
-            if p_geom_best is not None and d_analysis_geom is not None:
-                try:
-                    inter_anal = p_geom_best.intersection(d_analysis_geom)
-                    if not inter_anal.is_empty:
-                        if inter_anal.geom_type == "Polygon":
-                            raw_coords_anal = [list(pt) for pt in inter_anal.exterior.coords]
-                            clipped_analysis_poly = _simplify_coords(raw_coords_anal, max_vertices=16)
-                        elif inter_anal.geom_type == "MultiPolygon":
-                            largest_poly_anal = max(inter_anal.geoms, key=lambda g: g.area)
-                            raw_coords_anal = [list(pt) for pt in largest_poly_anal.exterior.coords]
-                            clipped_analysis_poly = _simplify_coords(raw_coords_anal, max_vertices=16)
-                except Exception:
-                    clipped_analysis_poly = d_analysis_poly_pts
+            # If area becomes too small after clip, skip assigning
+            if actual_intersection_area < 5.0 and p_geom_best is not None:
+                unassigned_defects.append(d)
+                continue
+                
+            # Recalculate bbox from clipped_poly
+            x_coords = [p[0] for p in clipped_poly]
+            y_coords = [p[1] for p in clipped_poly]
+            if x_coords and y_coords:
+                new_bbox = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
             else:
-                clipped_analysis_poly = clipped_poly
+                new_bbox = d.get("bbox") or d.get("box", [])
 
             area_ratio_pct = (actual_intersection_area / panel_area * 100) if panel_area > 0 else 0.0
 
             # Tính vị trí lỗi trong panel
             panel_bbox = best_panel.get("bbox") or best_panel.get("box", [0, 0, 0, 0])
             panel_poly = best_panel.get("polygon", [])
-            loc_info = localize_defect_inside_panel(d_center, panel_bbox, panel_poly)
+            loc_info = localize_defect_inside_panel(
+                d_center, panel_bbox, panel_poly,
+                defect_polygon=clipped_poly,
+                defect_class=d.get("class_name")
+            )
 
             severity = classify_severity(d.get("class_name", ""), area_ratio_pct)
-            recommendation = recommendation_from_severity(severity)
+            recommendation = recommendation_from_severity(severity, d.get("class_name", ""), area_ratio_pct)
+            
+            need_review_geometry = False
+            if clip_source == "bbox_fallback" and area_ratio_pct > 40.0 and "single" in d.get("class_name", "").lower():
+                need_review_geometry = True
 
             defect_entry = {
                 "class_name": d.get("class_name", ""),
                 "confidence": d.get("confidence", 0.0),
-                "bbox": d.get("bbox") or d.get("box", []),
+                "bbox": [round(v) for v in new_bbox],
                 "polygon": clipped_poly,
                 "display_polygon": clipped_display_poly,
+
+                "yolo_polygon": d.get("yolo_polygon", []),
+                "raw_yolo_polygon": d.get("raw_yolo_polygon", []),
                 "analysis_polygon": clipped_analysis_poly,
-                "polygon_source": d.get("polygon_source", "yolo_segmentation"),
-                "display_polygon_source": d.get("display_polygon_source", "thermal_contour_refinement"),
-                "analysis_polygon_source": d.get("analysis_polygon_source", "yolo_segmentation_simplified"),
-                "area": round(d.get("area", 0.0), 2),
+                "polygon_source": clip_source,
+                "display_polygon_source": clip_source,
+                "analysis_polygon_source": clip_source,
+                "clipped_to_panel": clipped_to_panel,
+                "low_geometry_confidence": d.get("low_geometry_confidence", False),
+                "need_review_geometry": need_review_geometry,
+                "area": round(actual_intersection_area, 2),
                 "center": d.get("center", [0, 0]),
                 "assigned_panel_id": best_panel.get("id", ""),
                 "assign_method": selected_reason,
@@ -535,13 +539,17 @@ def recalculate_panel_defects(panels: List[Dict[str, Any]], panel_power: float =
             
             # Cập nhật lại severity mới
             severity = classify_severity(d.get("class_name", ""), area_ratio_pct)
-            recommendation = recommendation_from_severity(severity)
+            recommendation = recommendation_from_severity(severity, d.get("class_name", ""), area_ratio_pct)
             d["severity"] = severity
             d["recommendation"] = recommendation
             
             # Cập nhật vị trí
             d_center = d.get("center", [0, 0])
-            loc_info = localize_defect_inside_panel(d_center, panel_bbox, poly_pts)
+            loc_info = localize_defect_inside_panel(
+                d_center, panel_bbox, poly_pts,
+                defect_polygon=d_poly_pts,
+                defect_class=d.get("class_name")
+            )
             d["relative_position"] = {"u": loc_info["u"], "v": loc_info["v"], "u_long": loc_info.get("u_long", loc_info["u"]), "v_short": loc_info.get("v_short", loc_info["v"])}
             d["location_in_panel"] = loc_info["location_in_panel"]
             
@@ -566,7 +574,12 @@ def _build_shapely_polygon(points: List) -> Optional[ShapelyPolygon]:
 
 
 def defect_to_shapely(d: Dict[str, Any]) -> Optional[ShapelyPolygon]:
-    poly_pts = d.get("display_polygon") or d.get("polygon") or d.get("analysis_polygon") or []
+    poly_pts = (
+        d.get("display_polygon")
+        or d.get("polygon")
+        or d.get("analysis_polygon")
+        or []
+    )
     return _build_shapely_polygon(poly_pts)
 
 
@@ -649,8 +662,8 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
     
     confidence = max(d.get("confidence", 0.0) for d in group)
     
-    severity_ranks = {"critical": 6, "severe": 5, "high": 4, "medium": 3, "low": 2, "normal": 1, "healthy": 0}
-    severity = max(group, key=lambda d: severity_ranks.get(d.get("severity", "normal").lower(), 1)).get("severity", "normal")
+    severity_ranks = {"level_3_priority": 5, "level_2_inspection": 4, "level_1_monitoring": 3, "recheck_required": 2, "healthy": 1}
+    severity = max(group, key=lambda d: severity_ranks.get(d.get("severity", "healthy").lower(), 1)).get("severity", "healthy")
     
     has_confirmed = any(d.get("thermal_validation_status") == "confirmed_by_relative_thermal" for d in group)
     if has_confirmed:
@@ -658,8 +671,9 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
     else:
         thermal_validation_status = best_conf_d.get("thermal_validation_status")
         
-    scores = [d.get("thermal_validation_score", 0.0) for d in group if d.get("thermal_validation_score") is not None]
-    thermal_validation_score = max(scores) if scores else best_conf_d.get("thermal_validation_score")
+    relative_thermal_delta = best_conf_d.get("relative_thermal_delta")
+    area_ratio_inner = best_conf_d.get("area_ratio_inner")
+    thermal_validation = best_conf_d.get("thermal_validation")
     
     geoms_display = []
     geoms_analysis = []
@@ -679,34 +693,35 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
     
     group_group = defect_class_group(class_name)
     
+    # Merge display polygons using Shapely union
     if geoms_display:
         try:
-            if group_group == "hotspot":
-                union_geom = unary_union([g.buffer(3) for g in geoms_display]).buffer(-3)
-            else:
-                union_geom = unary_union(geoms_display)
-                
-            if union_geom is not None and not union_geom.is_empty:
-                if union_geom.geom_type == "Polygon":
-                    raw_coords = [list(pt) for pt in union_geom.exterior.coords]
-                    merged_display_poly = _simplify_coords(raw_coords, max_vertices=32)
-                elif union_geom.geom_type == "MultiPolygon":
-                    largest_poly = max(union_geom.geoms, key=lambda g: g.area)
-                    raw_coords = [list(pt) for pt in largest_poly.exterior.coords]
-                    merged_display_poly = _simplify_coords(raw_coords, max_vertices=32)
+            union_geom_d = unary_union(geoms_display)
+            if union_geom_d is not None and not union_geom_d.is_empty:
+                if union_geom_d.geom_type == "Polygon":
+                    raw_coords_d = [list(pt) for pt in union_geom_d.exterior.coords]
+                    merged_display_poly = _simplify_coords(raw_coords_d, max_vertices=32)
+                elif union_geom_d.geom_type == "MultiPolygon":
+                    largest_poly_d = max(union_geom_d.geoms, key=lambda g: g.area)
+                    raw_coords_d = [list(pt) for pt in largest_poly_d.exterior.coords]
+                    merged_display_poly = _simplify_coords(raw_coords_d, max_vertices=32)
         except Exception:
             pass
-            
+
     if not merged_display_poly:
-        dp_fallback = best_conf_d.get("display_polygon") or best_conf_d.get("polygon") or []
-        merged_display_poly = dp_fallback
+        merged_display_poly = (
+            best_conf_d.get("display_polygon")
+            or best_conf_d.get("polygon")
+            or []
+        )
+        
+    yolo_polygon = best_conf_d.get("yolo_polygon") or []
+    raw_yolo_polygon = best_conf_d.get("raw_yolo_polygon") or []
+    display_polygon_source = "merged_union"
         
     if geoms_analysis:
         try:
-            if group_group == "hotspot":
-                union_geom_a = unary_union([g.buffer(3) for g in geoms_analysis]).buffer(-3)
-            else:
-                union_geom_a = unary_union(geoms_analysis)
+            union_geom_a = unary_union(geoms_analysis)
                 
             if union_geom_a is not None and not union_geom_a.is_empty:
                 if union_geom_a.geom_type == "Polygon":
@@ -752,7 +767,7 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
     area_ratio_pct = min(100.0, area_ratio_pct)
     
     severity = classify_severity(class_name, area_ratio_pct)
-    recommendation = recommendation_from_severity(severity)
+    recommendation = recommendation_from_severity(severity, class_name, area_ratio_pct)
     
     if d_geom is not None:
         c = d_geom.centroid
@@ -773,7 +788,11 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
         panel_bbox = panel.get("bbox") or panel.get("box", [0, 0, 0, 0])
         panel_poly = panel.get("polygon", [])
         try:
-            loc_info_new = localize_defect_inside_panel(center, panel_bbox, panel_poly)
+            loc_info_new = localize_defect_inside_panel(
+                center, panel_bbox, panel_poly,
+                defect_polygon=polygon,
+                defect_class=class_name
+            )
             loc_info = {
                 "u": loc_info_new["u"],
                 "v": loc_info_new["v"],
@@ -802,9 +821,12 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
         "bbox": [round(v) for v in bbox],
         "polygon": polygon,
         "display_polygon": merged_display_poly,
+
+        "yolo_polygon": yolo_polygon,
+        "raw_yolo_polygon": raw_yolo_polygon,
         "analysis_polygon": merged_analysis_poly,
-        "polygon_source": best_conf_d.get("polygon_source", "yolo_segmentation"),
-        "display_polygon_source": best_conf_d.get("display_polygon_source", "thermal_contour_refinement"),
+        "polygon_source": best_conf_d.get("polygon_source", display_polygon_source),
+        "display_polygon_source": display_polygon_source,
         "analysis_polygon_source": best_conf_d.get("analysis_polygon_source", "yolo_segmentation_simplified"),
         "area": round(area, 2),
         "center": center,
@@ -825,14 +847,28 @@ def create_merged_defect(group: List[Dict[str, Any]], panel: Dict[str, Any] = No
     
     if best_conf_d.get("thermal_validation_status") is not None:
         merged_defect["thermal_validation_status"] = thermal_validation_status
-    if thermal_validation_score is not None:
-        merged_defect["thermal_validation_score"] = thermal_validation_score
+    if relative_thermal_delta is not None:
+        merged_defect["relative_thermal_delta"] = relative_thermal_delta
+    if area_ratio_inner is not None:
+        merged_defect["area_ratio_inner"] = area_ratio_inner
+    if thermal_validation is not None:
+        merged_defect["thermal_validation"] = thermal_validation
         
     return merged_defect
 
 
 def merge_overlapping_panel_defects(panel_defects: List[Dict[str, Any]], panel: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-    if not panel_defects or len(panel_defects) < 2:
+    if not panel_defects:
+        return []
+
+    for d in panel_defects:
+        if "duplicate_removed" not in d:
+            d["duplicate_removed"] = False
+        if "excluded_from_area" not in d:
+            d["excluded_from_area"] = False
+        d["overlap_resolved"] = True
+
+    if len(panel_defects) < 2:
         return panel_defects
         
     def merge_one_pass(defects_list):
@@ -854,12 +890,16 @@ def merge_overlapping_panel_defects(panel_defects: List[Dict[str, Any]], panel: 
                 parent[root_i] = root_j
                 
         for i in range(n):
+            if defects_list[i].get("duplicate_removed"): continue
             for j in range(i + 1, n):
+                if defects_list[j].get("duplicate_removed"): continue
                 if should_merge(defects_list[i], defects_list[j]):
                     union(i, j)
                     
         groups = {}
         for i in range(n):
+            if defects_list[i].get("duplicate_removed"):
+                continue
             root = find(i)
             if root not in groups:
                 groups[root] = []
@@ -872,7 +912,11 @@ def merge_overlapping_panel_defects(panel_defects: List[Dict[str, Any]], panel: 
                 continue
                 
             group = [defects_list[idx] for idx in indices]
-            merged_list.append(create_merged_defect(group, panel))
+            merged = create_merged_defect(group, panel)
+            merged["duplicate_removed"] = False
+            merged["excluded_from_area"] = False
+            merged["overlap_resolved"] = True
+            merged_list.append(merged)
             
         return merged_list
 
@@ -883,153 +927,351 @@ def merge_overlapping_panel_defects(panel_defects: List[Dict[str, Any]], panel: 
             break
         defects = new_defects
         
+    # Cross-class overlap resolution
+    n = len(defects)
+    for i in range(n):
+        if defects[i].get("duplicate_removed"):
+            continue
+        poly_i = defect_to_shapely(defects[i])
+        class_i = defects[i].get("class_name", "").lower()
+        if not poly_i:
+            continue
+
+        for j in range(i + 1, n):
+            if defects[j].get("duplicate_removed"):
+                continue
+            poly_j = defect_to_shapely(defects[j])
+            class_j = defects[j].get("class_name", "").lower()
+            if not poly_j:
+                continue
+                
+            try:
+                inter_area = poly_i.intersection(poly_j).area
+            except Exception:
+                continue
+
+            if inter_area <= 0:
+                continue
+
+            containment_i = inter_area / max(1e-6, poly_i.area)
+            containment_j = inter_area / max(1e-6, poly_j.area)
+
+            # 1. hotspot_single_cell vs hotspot_multi_cell
+            is_single_i = "single" in class_i
+            is_multi_i = "multi" in class_i
+            is_single_j = "single" in class_j
+            is_multi_j = "multi" in class_j
+
+            if is_single_i and is_multi_j:
+                if containment_i > 0.6:
+                    defects[i]["duplicate_removed"] = True
+            elif is_multi_i and is_single_j:
+                if containment_j > 0.6:
+                    defects[j]["duplicate_removed"] = True
+
+            # 2. shading vs hotspot/crack
+            is_shading_i = "shading" in class_i or "soil" in class_i
+            is_shading_j = "shading" in class_j or "soil" in class_j
+            is_severe_i = "crack" in class_i or "hot" in class_i
+            is_severe_j = "crack" in class_j or "hot" in class_j
+
+            if is_shading_i and is_severe_j and containment_i > 0.2:
+                defects[i]["excluded_from_area"] = True
+            elif is_shading_j and is_severe_i and containment_j > 0.2:
+                defects[j]["excluded_from_area"] = True
+
+    # Geometry non-overlap cleanup
+    from shapely.geometry import Polygon
+    occupied_internal_geom = Polygon()
+    
+    # Priority rank: crack (1), hotspot_multi (2), hotspot_single (3), shading (4)
+    def get_priority(d):
+        c = d.get("class_name", "").lower()
+        if "crack" in c: return 1
+        if "multi" in c: return 2
+        if "single" in c: return 3
+        if "shading" in c or "soil" in c: return 4
+        return 5
+        
+    defects.sort(key=lambda d: (get_priority(d), -d.get("confidence", 0.0), -d.get("area", 0.0)))
+    
+    for d in defects:
+        if d.get("duplicate_removed"):
+            continue
+            
+        geom = defect_to_shapely(d)
+        if geom is None or geom.is_empty:
+            d["duplicate_removed"] = True
+            continue
+            
+        is_shading = get_priority(d) == 4
+        
+        try:
+            clean_geom = geom.difference(occupied_internal_geom)
+        except Exception:
+            clean_geom = geom
+            
+        if clean_geom.is_empty or clean_geom.area < 5.0:
+            d["duplicate_removed"] = True
+            d["excluded_from_area"] = True
+            continue
+            
+        # Update polygons
+        if clean_geom.geom_type == "Polygon":
+            raw = [list(pt) for pt in clean_geom.exterior.coords]
+            clean_pts = _simplify_coords(raw, max_vertices=32)
+        elif clean_geom.geom_type == "MultiPolygon":
+            largest = max(clean_geom.geoms, key=lambda g: g.area)
+            raw = [list(pt) for pt in largest.exterior.coords]
+            clean_pts = _simplify_coords(raw, max_vertices=32)
+        else:
+            clean_pts = d.get("polygon", [])
+            
+        if clean_pts:
+            d["polygon"] = clean_pts
+            d["display_polygon"] = clean_pts
+            d["analysis_polygon"] = clean_pts
+            
+            x_coords = [p[0] for p in clean_pts]
+            y_coords = [p[1] for p in clean_pts]
+            if x_coords and y_coords:
+                d["bbox"] = [round(min(x_coords)), round(min(y_coords)), round(max(x_coords)), round(max(y_coords))]
+                
+        if not is_shading:
+            try:
+                occupied_internal_geom = occupied_internal_geom.union(clean_geom)
+            except Exception:
+                pass
+
     return defects
 
 
+def get_substring_zone(defect: Dict[str, Any]) -> Optional[int]:
+    pos = defect.get("relative_position", {})
+    v = pos.get("v")
+    if v is not None:
+        try:
+            v_val = float(v)
+            if v_val < 1/3: return 0
+            elif v_val < 2/3: return 1
+            else: return 2
+        except (ValueError, TypeError):
+            pass
+    loc = defect.get("location_in_panel", "")
+    if "upper" in loc.lower() or "top" in loc.lower(): return 0
+    if "mid" in loc.lower() or "center" in loc.lower(): return 1
+    if "lower" in loc.lower() or "bottom" in loc.lower(): return 2
+    return None
+
+def check_panel_geometry_integrity(panel: Dict[str, Any]) -> None:
+    panel_poly = panel.get("polygon", [])
+    p_geom = _build_shapely_polygon(panel_poly)
+    if not p_geom:
+        return
+        
+    defects = [d for d in panel.get("defects", []) if not d.get("duplicate_removed") and not d.get("excluded_from_area")]
+    n = len(defects)
+    
+    # Check outside
+    for d in defects:
+        d_geom = _build_shapely_polygon(d.get("display_polygon", []))
+        if not d_geom:
+            continue
+        try:
+            diff = d_geom.difference(p_geom)
+            if diff.area > 5.0:
+                logger.warning(f"[GEOMETRY_WARNING] Panel {panel.get('id')} - Defect {d.get('class_name')} extends outside panel by {diff.area:.1f} px^2")
+        except Exception:
+            pass
+            
+    # Check internal overlap
+    for i in range(n):
+        c_i = defects[i].get("class_name", "")
+        if "shading" in c_i or "soil" in c_i:
+            continue
+        g_i = _build_shapely_polygon(defects[i].get("display_polygon", []))
+        if not g_i: continue
+        
+        for j in range(i+1, n):
+            c_j = defects[j].get("class_name", "")
+            if "shading" in c_j or "soil" in c_j:
+                continue
+            g_j = _build_shapely_polygon(defects[j].get("display_polygon", []))
+            if not g_j: continue
+            
+            try:
+                inter = g_i.intersection(g_j)
+                if inter.area > 5.0:
+                    logger.warning(f"[GEOMETRY_WARNING] Panel {panel.get('id')} - Internal defects {c_i} and {c_j} overlap by {inter.area:.1f} px^2")
+            except Exception:
+                pass
+
 def _summarize_panel(panel: Dict[str, Any], PANEL_POWER_W: float = 600.0) -> None:
-    """
-    Tính tổng hợp cho panel sau khi đã gán defects:
-    - Tính sản lượng hao hụt (chia tấm pin làm 3 phần, lỗi mỗi phần trừ 1/3 hiệu suất)
-    - Crack trừ 100%
-    - Shading cảnh báo 6 giờ
-    """
-    defects = panel.get("defects", [])
+    # Filter out duplicate_removed defects
+    defects = [d for d in panel.get("defects", []) if not d.get("duplicate_removed")]
+    panel["defects"] = defects  # Replace the original list
 
     if not defects:
         panel["status"] = "healthy"
         panel["total_defect_area_ratio_percent"] = 0.0
         panel["max_defect_area_ratio_percent"] = 0.0
         panel["worst_severity"] = "healthy"
-        panel["recommendation"] = "Không cần xử lý"
+        panel["recommendation"] = "Không cần xử lý."
         panel["main_defect_class"] = None
         panel["total_panel_loss"] = 0.0
         panel["power_loss_w"] = 0.0
         return
 
-    # Tính toán tổn thất sản lượng theo yêu cầu (chia 3 tấm pin)
-    bbox = panel.get("bbox") or panel.get("box", [0, 0, 0, 0])
-    w = max(bbox[2] - bbox[0], 1)
-    h = max(bbox[3] - bbox[1], 1)
-    is_landscape = w >= h
+    from shapely.ops import unary_union
 
     affected_parts = set()
     has_crack = False
     has_shading = False
+    single_cells = []
+    
+    valid_geoms_for_area = []
 
     for d in defects:
         cls_name = d.get("class_name", "")
         if cls_name == "crack":
             has_crack = True
-        elif cls_name == "shading":
+        elif "shading" in cls_name or "soil" in cls_name:
             has_shading = True
-        elif cls_name in ["hotspot_single_cell", "hotspot_multi_cell"]:
-            pos = d.get("relative_position", {})
-            v = pos.get("v", 0.0)
-            part_idx = min(2, int(v * 3))  # Luôn chia 3 phần theo trục dọc (upper, middle, lower)
-            affected_parts.add(part_idx)
+        elif cls_name == "hotspot_single_cell":
+            single_cells.append(d)
+            
+        if cls_name in ["hotspot_single_cell", "hotspot_multi_cell"]:
+            z = get_substring_zone(d)
+            if z is not None:
+                affected_parts.add(z)
+            else:
+                affected_parts.add(f"unknown_{len(affected_parts)}")
+                
+        # Only add to area union if not excluded
+        if not d.get("excluded_from_area"):
+            geom = defect_to_shapely(d)
+            if geom is not None and not geom.is_empty:
+                valid_geoms_for_area.append(geom)
+
+    if len(single_cells) >= 2:
+        zones = set()
+        zone_counts = {}
+        for d in single_cells:
+            z = get_substring_zone(d)
+            if z is not None:
+                zones.add(z)
+                zone_counts[z] = zone_counts.get(z, 0) + 1
+        
+        if len(zones) >= 2:
+            for d in single_cells:
+                d["severity"] = "level_3_priority"
+                d["recommendation"] = recommendation_from_severity("level_3_priority", "hotspot_single_cell", d.get("area_ratio_percent", 0))
+        elif any(c >= 2 for c in zone_counts.values()):
+            for d in single_cells:
+                if d.get("severity") == "level_1_monitoring":
+                    d["severity"] = "level_2_inspection"
+                    d["recommendation"] = recommendation_from_severity("level_2_inspection", "hotspot_single_cell", d.get("area_ratio_percent", 0))
 
     if has_crack:
         power_loss_w = PANEL_POWER_W
+    elif has_shading and not affected_parts:
+        power_loss_w = 0.0
     else:
-        power_loss_w = len(affected_parts) * (PANEL_POWER_W / 3.0)
+        num_affected = min(3, len(affected_parts))
+        power_loss_w = num_affected * (PANEL_POWER_W / 3.0)
+        
+    if power_loss_w > PANEL_POWER_W: power_loss_w = PANEL_POWER_W
+    if power_loss_w < 0: power_loss_w = 0.0
 
-    shading_warning = "Bị che khuất ~6 giờ" if has_shading else ""
-
-    ratios = [d["area_ratio_percent"] for d in defects]
-    total_ratio = sum(ratios)
-    max_ratio = max(ratios)
-
-    # Severity ranking
-    severity_order = ["very_minor", "minor", "moderate", "severe", "replace"]
-    severities = [d["severity"] for d in defects]
-    worst = max(severities, key=lambda s: severity_order.index(s) if s in severity_order else -1)
-
-    # Ghi đè severity dựa trên logic lỗi
-    if has_crack:
-        worst = "replace"
-    elif len(affected_parts) > 0:
-        worst = "severe"
-    if has_shading and worst in ["healthy", "very_minor", "minor"]:
-        worst = "moderate"
-
+    severity_order = ["healthy", "recheck_required", "level_1_monitoring", "level_2_inspection", "level_3_priority"]
+    severities = [d.get("severity", "healthy") for d in defects]
+    worst = "healthy"
+    for s in severities:
+        if s in severity_order:
+            if severity_order.index(s) > severity_order.index(worst):
+                worst = s
+                
     recommendation = recommendation_from_severity(worst)
-    if shading_warning:
-        if recommendation != "Không cần xử lý":
-            recommendation = f"{recommendation} | {shading_warning}"
-        else:
-            recommendation = shading_warning
 
-    # Class phổ biến nhất
     from collections import Counter
-    class_counts = Counter(d["class_name"] for d in defects)
+    class_counts = Counter(d.get("class_name", "unknown") for d in defects)
     main_class = class_counts.most_common(1)[0][0] if class_counts else None
 
+    # Calculate union area
+    panel_area = 1.0
+    panel_geom = _build_shapely_polygon(panel.get("polygon", []))
+    if panel_geom is not None and panel_geom.area > 0:
+        panel_area = panel_geom.area
+        
+    total_area_ratio_percent = 0.0
+    if valid_geoms_for_area and panel_geom:
+        try:
+            union_geom = unary_union(valid_geoms_for_area)
+            inter = panel_geom.intersection(union_geom)
+            total_area_ratio_percent = (inter.area / panel_area) * 100
+        except Exception:
+            # Fallback to sum if union fails
+            total_area_ratio_percent = sum(d.get("area_ratio_percent", 0.0) for d in defects if not d.get("excluded_from_area"))
+    elif not panel_geom:
+        total_area_ratio_percent = sum(d.get("area_ratio_percent", 0.0) for d in defects if not d.get("excluded_from_area"))
+
+    total_area_ratio_percent = min(100.0, total_area_ratio_percent)
+
+    # Quy tắc nâng mức hao hụt dựa trên tổng diện tích lỗi
+    if total_area_ratio_percent >= 66.66:
+        power_loss_w = max(power_loss_w, PANEL_POWER_W)
+    elif total_area_ratio_percent >= 33.33:
+        power_loss_w = max(power_loss_w, 2 * (PANEL_POWER_W / 3.0))
+
     panel["status"] = "faulty"
-    panel["total_defect_area_ratio_percent"] = round(total_ratio, 4)
-    panel["max_defect_area_ratio_percent"] = round(max_ratio, 4)
+    ratios = [d.get("area_ratio_percent", 0.0) for d in defects]
+    panel["total_defect_area_ratio_percent"] = round(total_area_ratio_percent, 4)
+    panel["max_defect_area_ratio_percent"] = round(max(ratios), 4) if ratios else 0.0
     panel["worst_severity"] = worst
     panel["recommendation"] = recommendation
     panel["main_defect_class"] = main_class
-    # Lưu công suất hao hụt (W) vào total_panel_loss thay vì % diện tích
     panel["total_panel_loss"] = round(power_loss_w, 2)
     panel["power_loss_w"] = round(power_loss_w, 2)
-
+    
+    check_panel_geometry_integrity(panel)
 
 # ─────────────────────────────────────────
 # 2. PHÂN LOẠI SEVERITY THEO AREA RATIO
 # ─────────────────────────────────────────
 
 def classify_severity(defect_class: str, area_ratio_percent: float) -> str:
-    """
-    Phân loại mức độ hư hỏng dựa trên tỉ lệ diện tích lỗi so với diện tích panel.
-
-    Không dùng nhiệt độ °C hay ΔT (không có radiometric metadata).
-    Không hard-code 33.33% cho multi_cell.
-
-    Ngưỡng:
-        < 0.2%   → very_minor (bỏ qua hoặc theo dõi)
-        0.2–1%   → minor (theo dõi)
-        1–3%     → moderate (kiểm tra trực tiếp)
-        3–8%     → severe (ưu tiên bảo trì)
-        >= 8%    → replace (khuyến nghị thay thế)
-
-    Lưu ý: hotspot_multi_cell ảnh hưởng nhiều cell nên tăng 1 bậc severity
-    nếu đang ở mức minor trở lên. Đây là bù trừ kỹ thuật vì multi_cell
-    gây ra bypass bypass diode và ảnh hưởng chuỗi pin. area_ratio vẫn là chỉ số chính.
-    """
-    if area_ratio_percent < 0.2:
-        return "very_minor"
-    elif area_ratio_percent < 1.0:
-        base = "minor"
-    elif area_ratio_percent < 3.0:
-        base = "moderate"
-    elif area_ratio_percent < 8.0:
-        base = "severe"
-    else:
-        return "replace"
-
-    # Tăng 1 bậc cho hotspot_multi_cell (ảnh hưởng nhiều cell, bypass diode)
-    if "multi_cell" in defect_class.lower():
-        upgrade = {"minor": "moderate", "moderate": "severe", "severe": "replace"}
-        return upgrade.get(base, base)
-
-    return base
-
+    cls = defect_class.lower()
+    if cls == "crack":
+        return "level_3_priority"
+    if "shading" in cls:
+        return "recheck_required"
+    if cls == "hotspot_multi_cell":
+        if area_ratio_percent >= 33.33:
+            return "level_3_priority"
+        return "level_2_inspection"
+    if cls == "hotspot_single_cell":
+        return "level_1_monitoring"
+    return "level_1_monitoring"
 
 # ─────────────────────────────────────────
 # 3. RECOMMENDATION TỪ SEVERITY
 # ─────────────────────────────────────────
 
-def recommendation_from_severity(severity: str) -> str:
-    """
-    Sinh text khuyến nghị từ mức độ hư hỏng.
-    """
+def recommendation_from_severity(severity: str, defect_class: str = "", area_ratio_percent: float = 0.0) -> str:
+    cls = defect_class.lower()
+    if severity == "level_2_inspection" and cls == "hotspot_multi_cell" and area_ratio_percent < 16.67:
+        return "Cần kiểm tra lại mask/class và vùng ảnh hưởng."
+        
+    if cls == "crack":
+        return "Ưu tiên kiểm tra hiện trường, đo bổ sung nếu có và xem xét cách ly hoặc thay thế panel."
+    if "shading" in cls:
+        return "Cần chụp lại vào thời điểm khác khi không còn bóng che."
+
     mapping = {
-        "very_minor": "Bỏ qua / Theo dõi",
-        "healthy":    "Không cần xử lý",
-        "minor":      "Theo dõi",
-        "moderate":   "Kiểm tra",
-        "severe":     "Ưu tiên bảo trì",
-        "replace":    "Khuyến nghị thay thế",
+        "healthy": "Không cần xử lý.",
+        "level_1_monitoring": "Theo dõi ở lần kiểm tra định kỳ tiếp theo.",
+        "level_2_inspection": "Đưa vào danh sách O&M kiểm tra hiện trường; chụp gần hơn hoặc đo bổ sung nếu cần.",
+        "level_3_priority": "Ưu tiên kiểm tra và xử lý; đo I–V/EL nếu có; xem xét cách ly hoặc thay thế panel.",
+        "recheck_required": "Cần chụp lại vào thời điểm khác để loại trừ ảnh hưởng che bóng."
     }
-    return mapping.get(severity, "Kiểm tra")
+    return mapping.get(severity, "Không cần xử lý.")

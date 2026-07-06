@@ -153,8 +153,10 @@ function pixelPolyToLeafletScaled(poly, layout) {
   const offY = Number(layout.y);
 
   return poly.map(([x, y]) => {
-    const px = Number(x);
-    const py = Number(y);
+    // Clamp tọa độ pixel vào trong kích thước ảnh gốc
+    // để tránh polygon vượt ra ngoài viền của ImageOverlay.
+    const px = Math.max(0, Math.min(Number(x), srcW));
+    const py = Math.max(0, Math.min(Number(y), srcH));
 
     const mapX = offX + (px / srcW) * dstW;
 
@@ -192,40 +194,69 @@ const getDefectColor = (className) => {
 };
 
 function translateLocationInPanel(location) {
-  const value = String(location || "").toLowerCase();
-
+  if (!location) return "Không xác định";
+  
   const map = {
-    "upper-left": "Góc trên bên trái",
-    "upper-center": "Phía trên giữa",
-    "upper-right": "Góc trên bên phải",
-    "middle-left": "Giữa bên trái",
-    "middle-center": "Trung tâm tấm",
-    "middle-right": "Giữa bên phải",
-    "lower-left": "Góc dưới bên trái",
-    "lower-center": "Phía dưới giữa",
-    "lower-right": "Góc dưới bên phải",
+    "upper-left": "Góc trên trái",
+    "upper-center": "Trên giữa",
+    "upper-right": "Góc trên phải",
+    "middle-left": "Giữa trái",
+    "middle-center": "Trung tâm",
+    "middle-right": "Giữa phải",
+    "lower-left": "Góc dưới trái",
+    "lower-center": "Dưới giữa",
+    "lower-right": "Góc dưới phải",
+    "bottom-left": "Góc dưới trái",
+    "bottom-center": "Dưới giữa",
+    "bottom-right": "Góc dưới phải",
+    "bottom": "Dưới",
+    "top": "Trên",
   };
 
-  return map[value] || location || "Không xác định";
+  const getOrder = (key) => {
+    let v = 2, u = 1;
+    if (key.includes('upper') || key.includes('top')) v = 0;
+    else if (key.includes('middle')) v = 1;
+    else if (key.includes('lower') || key.includes('bottom')) v = 2;
+    
+    if (key.includes('left')) u = 0;
+    else if (key.includes('center')) u = 1;
+    else if (key.includes('right')) u = 2;
+    
+    return v * 10 + u;
+  };
+
+  // Tách các vị trí, loại bỏ khoảng trắng dư thừa, chuyển thành chữ thường, 
+  // lọc các giá trị rỗng, sort theo order rồi mới dịch và nối lại.
+  const parts = location.split(',')
+    .map(p => p.trim().toLowerCase())
+    .filter(p => p.length > 0);
+
+  // Chỉ sort nếu nó chứa các từ khoá chỉ vị trí
+  const hasKeywords = parts.some(p => Object.keys(map).includes(p));
+  
+  if (hasKeywords) {
+    parts.sort((a, b) => getOrder(a) - getOrder(b));
+  }
+
+  // Loại bỏ các vị trí trùng lặp (nếu có do gom nhóm)
+  const uniqueParts = [...new Set(parts)];
+
+  return uniqueParts.map(key => map[key] || key).join(', ');
 }
 
 function translateSeverity(value) {
   const v = String(value || "").toLowerCase();
 
   const map = {
-    "critical": "Rất nghiêm trọng",
-    "severe": "Nghiêm trọng",
-    "high": "Cao",
-    "medium": "Trung bình",
-    "low": "Thấp",
-    "normal": "Bình thường",
-    "replace": "Cần thay thế",
-    "monitor": "Theo dõi",
-    "needs_review": "Cần xem xét",
     "healthy": "Bình thường",
+    "level_1_monitoring": "Mức 1 – Theo dõi",
+    "level_2_inspection": "Mức 2 – Cần kiểm tra",
+    "level_3_priority": "Mức 3 – Ưu tiên xử lý",
+    "recheck_required": "Cần chụp lại",
   };
 
-  return map[v] || value || "Không xác định";
+  return map[v] || "Chưa phân loại";
 }
 
 function getImageRegionFromCartesian(x, y, width, height) {
@@ -265,19 +296,53 @@ function formatConfidence(value) {
   return `${pct.toFixed(1)}%`;
 }
 
+const isValidPolygon = (poly) => {
+  return Array.isArray(poly) && poly.length >= 3;
+};
 
+const SHOW_RAW_YOLO_POLYGON = false;
+
+const getDefectRenderPolygon = (d) => {
+  const isValidPolygon = (p) => Array.isArray(p) && p.length >= 3;
+
+  if (isValidPolygon(d.display_polygon)) {
+    return { polygon: d.display_polygon, source: "display_polygon", sourceLabel: "Polygon đã xử lý" };
+  }
+  if (isValidPolygon(d.polygon)) {
+    return { polygon: d.polygon, source: "polygon", sourceLabel: "Polygon đã xử lý" };
+  }
+  if (isValidPolygon(d.analysis_polygon)) {
+    return { polygon: d.analysis_polygon, source: "analysis_polygon", sourceLabel: "Polygon phân tích" };
+  }
+
+  if (SHOW_RAW_YOLO_POLYGON) {
+    if (isValidPolygon(d.yolo_polygon)) {
+      return { polygon: d.yolo_polygon, source: "yolo_polygon", sourceLabel: "YOLO thô - debug" };
+    }
+    if (isValidPolygon(d.raw_yolo_polygon)) {
+      return { polygon: d.raw_yolo_polygon, source: "raw_yolo_polygon", sourceLabel: "YOLO gốc - debug" };
+    }
+  }
+
+  const bboxPoly = polygonFromBBox(d.bbox || d.box);
+  if (isValidPolygon(bboxPoly)) {
+    return { polygon: bboxPoly, source: "bbox", sourceLabel: "BBox fallback" };
+  }
+
+  return { polygon: null, source: "none", sourceLabel: "Không có polygon hợp lệ" };
+};
 
 export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, batchId, onRefresh }) {
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isReviewOpen, setIsReviewOpen] = useState(false);
     const PANEL_RATED_POWER_W = 400; // Công suất định mức tấm pin 400W
     const translateDefect = (cls) => {
-        if (!cls) return "Điểm bất thường";
+        if (!cls) return "unknown";
         const c = cls.toLowerCase();
-        if (c.includes("hotspot_single") || c.includes("single_cell") || c.includes("single-cell")) return "hotspot single cell";
-        if (c.includes("hotspot_multi") || c.includes("multi_cell") || c.includes("multicell") || c.includes("multi-cell")) return "hotspot multi_cell";
-        if (c.includes("hotspot") || c.includes("hot")) return "hotspot single cell";
-        if (c.includes("crack") || c.includes("nut")) return "Nứt (Crack)";
+        if (c.includes("hotspot_single") || c.includes("single_cell") || c.includes("single-cell")) return "hotspot_single_cell";
+        if (c.includes("hotspot_multi") || c.includes("multi_cell") || c.includes("multicell") || c.includes("multi-cell")) return "hotspot_multi_cell";
+        if (c.includes("hotspot") || c.includes("hot")) return "hotspot_single_cell";
+        if (c.includes("crack") || c.includes("nut")) return "crack";
         if (
             c.includes("shading") ||
             c.includes("shadow") ||
@@ -286,7 +351,7 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
             c.includes("soiling") ||
             c.includes("dirt")
         ) {
-            return "Che bóng";
+            return "shading";
         }
         return cls;
     };
@@ -344,10 +409,10 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
 
                 const mappedDefects = (normalizedP.defects || [])
                   .map((d, idx) => {
-                    const rawPoly = d.display_polygon || d.polygon;
-                    if (!rawPoly || !Array.isArray(rawPoly) || rawPoly.length < 3) {
-                      return null;
-                    }
+                    const renderInfo = getDefectRenderPolygon(d);
+                    const rawPoly = renderInfo.polygon;
+
+                    if (!rawPoly) return null;
 
                     const cleanPoly = rawPoly
                       .map((pt) => Array.isArray(pt) ? pt : null)
@@ -366,6 +431,8 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                       defect_index: idx,
                       raw_polygon_px: cleanPoly,
                       polygon: pixelPolyToLeafletScaled(cleanPoly, layout),
+                      render_source: renderInfo.source,
+                      render_source_label: renderInfo.sourceLabel,
                     };
                   })
                   .filter(Boolean);
@@ -374,6 +441,7 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                     ...normalizedP,
                     source_rgb: img.rgb_image,
                     source_thermal: img.filename,
+                    quality_status: img.quality_status || "ok",
                     imgW, imgH,
                     boxW,
                     boxH,
@@ -494,26 +562,24 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                 }
                             }}
                         >
-                        <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg">
-                            <div className="text-sm font-bold text-sky-400">{p.local_id}</div>
-                            <div className="text-xs">
-                                {isHealthy
-                                    ? "Bình thường"
-                                    : `${translateDefect(p.main_defect_class)} (-${Number(p.total_panel_loss || 0).toFixed(1)} W)`
-                                }
-                            </div>
-                            {p.worst_severity && !isHealthy && (
-                                <div className="text-xs text-orange-300">Mức độ: {p.worst_severity}</div>
-                            )}
-                            {p.review_label && (
-                                <div className="text-xs text-emerald-400 font-bold" style={{ marginTop: 2 }}>
-                                    Duyệt: {p.review_label}
-                                </div>
-                            )}
-                            {p.geometry_source && (
-                                <div className="text-xs text-slate-400" style={{ marginTop: 2, fontStyle: 'italic' }}>
-                                    Polygon: {p.geometry_source === 'v61_line_snap' ? '✓ Line-snap V61' : `⚠ ${p.geometry_source || 'unknown'}`}
-                                </div>
+                        <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg px-3 py-2">
+                            <div className="text-sm font-bold text-sky-400 mb-1">Tấm pin: {p.local_id}</div>
+                            {isHealthy ? (
+                                <div className="text-xs text-emerald-400 font-semibold">Bình thường</div>
+                            ) : (
+                                <>
+                                    <div className="text-xs text-rose-400 font-semibold mb-1">
+                                        Tấm pin có lỗi
+                                    </div>
+                                    <div className="text-xs text-slate-300">
+                                        Giảm phát ước tính: <span className="text-rose-400 font-bold">{Number(p.total_panel_loss || 0).toFixed(1)} W</span>
+                                    </div>
+                                    {p.worst_severity && (
+                                        <div className="text-xs text-orange-300 mt-1">
+                                            Mức độ: {translateSeverity(p.worst_severity)}
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </Tooltip>
                         </Polygon>
@@ -524,21 +590,11 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                     return (p.mappedDefects || []).map((d, di) => {
                         const defectGroup = getDefectGroup(d.class_name);
                         const defectColor = getDefectColorByGroup(defectGroup);
-                        const isNeedsReview = d.thermal_validation_status === "needs_review"
-                            || d.thermal_validation_status === "suspect_false_positive"
-                            || d.thermal_validation_status === "class_mismatch";
-
-                        const dashPatterns = [
-                            "6, 4",
-                            "2, 4",
-                            "10, 4",
-                            "1, 6",
-                            "12, 3",
-                        ];
-
-                        const dashArray = isNeedsReview
-                            ? "6, 6"
-                            : dashPatterns[d.defect_index % dashPatterns.length];
+                        const isNeedsReview = d.thermal_validation_status === "weak_relative_contrast"
+                            || d.thermal_validation_status === "thermal_mismatch_need_review"
+                            || d.thermal_validation_status === "cooler_than_panel_background_recheck"
+                            || d.thermal_validation_status === "shading_need_recheck"
+                            || d.thermal_validation_status === "shape_based_detection_review";
 
                         return (
                             <Polygon
@@ -550,9 +606,9 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                     fillOpacity: 0.06,
                                     weight: 3,
                                     opacity: 1,
-                                    dashArray,
                                     lineCap: "round",
                                     lineJoin: "round",
+                                    smoothFactor: 2, // Làm mượt các điểm ảnh lởm chởm
                                 }}
                                 eventHandlers={{
                                     click: () => {
@@ -560,15 +616,20 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                     }
                                 }}
                             >
-                                <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg">
-                                    <div className="text-sm font-bold text-rose-400">{d.class_name || "unknown"}</div>
-                                    <div className="text-xs">Panel ID: {p.local_id}</div>
-                                    <div className="text-xs">Độ tin cậy nhận diện lỗi YOLO: {d.confidence != null ? formatConfidence(d.confidence) : 'Chưa có dữ liệu'}</div>
-                                    <div className="text-xs">Vị trí: {translateLocationInPanel(d.location_in_panel)}</div>
-                                    <div className="text-xs">Mức độ: {translateSeverity(d.severity) || 'N/A'}</div>
-                                    <div className="text-xs font-semibold">Tỷ lệ vùng lỗi: {d.area_ratio_percent != null ? `${d.area_ratio_percent.toFixed(2)}% diện tích tấm` : 'Chưa có dữ liệu'}</div>
-                                    {d.thermal_validation_score != null && (
-                                        <div className="text-xs text-orange-300 font-semibold">Điểm kiểm chứng: {(d.thermal_validation_score * 100).toFixed(1)}%</div>
+                                <Tooltip sticky className="bg-slate-900 border-none text-white shadow-xl rounded-lg px-3 py-2 flex flex-col gap-1">
+                                    <div className="text-sm font-bold text-rose-400 mb-1">{translateDefect(d.class_name)}</div>
+                                    <div className="text-xs text-slate-300">Tấm pin: <span className="text-sky-400 font-semibold">{p.local_id}</span></div>
+                                    <div className="text-xs text-slate-300">Độ tin cậy YOLO: <span className="text-white font-semibold">{d.confidence != null ? formatConfidence(d.confidence) : 'N/A'}</span></div>
+                                    <div className="text-xs text-slate-300">Vị trí: <span className="text-white font-semibold">{translateLocationInPanel(d.location_in_panel)}</span></div>
+
+                                    {d.yolo_display_area_retention != null && d.yolo_display_area_retention < 1.0 && (
+                                        <div className="text-xs text-slate-400">Độ giữ diện tích: <span className="text-white font-semibold">{(d.yolo_display_area_retention * 100).toFixed(1)}%</span></div>
+                                    )}
+                                    <div className="text-xs text-slate-300">Diện tích lỗi: <span className="text-white font-semibold">{d.area_ratio_percent != null ? `${d.area_ratio_percent.toFixed(2)}%` : 'N/A'}</span></div>
+                                    {d.relative_thermal_delta != null && (
+                                        <div className="text-xs text-orange-300 mt-1 font-semibold">
+                                            Tương phản nhiệt: {d.relative_thermal_delta > 0 ? `+${d.relative_thermal_delta.toFixed(3)}` : d.relative_thermal_delta.toFixed(3)}
+                                        </div>
                                     )}
                                 </Tooltip>
                             </Polygon>
@@ -649,25 +710,26 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
 
                 const scale_t = Math.min(420 / Math.max(cropW_t, 1), 160 / Math.max(cropH_t, 1));
 
-                // 2. RGB Crop: Thêm 150% padding xung quanh tấm pin để hiện bối cảnh rất rộng
-                const padX_r = Math.round(boxW * 1.5);
-                const padY_r = Math.round(boxH * 1.5);
+                // 2. RGB Crop: Căn giữa theo ảnh nhiệt và áp dụng zoom 1.25x (nới 20% so với 1.5x)
+                const cropW_r = cropW_t / 1.25;
+                const cropH_r = cropH_t / 1.25;
 
-                const cropX1_r = Math.max(0, x1 - padX_r);
-                const cropY1_r = Math.max(0, y1 - padY_r);
-                const cropX2_r = Math.min(activePanel.imgW, x2 + padX_r);
-                const cropY2_r = Math.min(activePanel.imgH, y2 + padY_r);
+                const cx_t = (cropX1_t + cropX2_t) / 2;
+                const cy_t = (cropY1_t + cropY2_t) / 2;
 
-                const cropW_r = cropX2_r - cropX1_r;
-                const cropH_r = cropY2_r - cropY1_r;
+                const cropX1_r = Math.max(0, cx_t - cropW_r / 2);
+                const cropY1_r = Math.max(0, cy_t - cropH_r / 2);
+                const cropX2_r = Math.min(activePanel.imgW || 640, cx_t + cropW_r / 2);
+                const cropY2_r = Math.min(activePanel.imgH || 512, cy_t + cropH_r / 2);
 
                 const scale_r = Math.min(420 / Math.max(cropW_r, 1), 160 / Math.max(cropH_r, 1));
 
                 // Định nghĩa màu sắc & nhãn tùy theo mức độ nghiêm trọng
                 const hasDefect = (activePanel.defects || []).length > 0;
-                const severity = hasDefect ? (activePanel.worst_severity || "Lỗi") : "HEALTHY";
-                const isSevere = hasDefect && (severity.toLowerCase() === "severe" || severity.toLowerCase() === "high");
-                const themeColor = hasDefect ? (isSevere ? "#ef4444" : "#f59e0b") : "#22c55e";
+                const severity = hasDefect ? (activePanel.worst_severity || "healthy") : "healthy";
+                const isSevere = hasDefect && severity.toLowerCase() === "level_3_priority";
+                const isWarning = hasDefect && severity.toLowerCase() === "level_2_inspection";
+                const themeColor = hasDefect ? (isSevere ? "#ef4444" : isWarning ? "#f59e0b" : "#3b82f6") : "#22c55e";
                 const glowShadow = hasDefect 
                     ? (isSevere 
                         ? "0 0 15px rgba(239, 68, 68, 0.4)" 
@@ -757,40 +819,42 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
 
                         {/* Header của Control Panel */}
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid rgba(255,255,255,0.08)", paddingBottom: 16, marginBottom: 18 }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                <div style={{ 
-                                    width: 10, height: 10, borderRadius: "50%", 
-                                    background: themeColor, boxShadow: glowShadow,
-                                    animation: "pulse 1.8s infinite"
-                                }} />
-                                <span style={{ color: "#F8FAFC", fontWeight: 800, fontSize: 18, letterSpacing: "0.5px" }}>
-                                    THÔNG TIN TẤM PIN: {activePanel.local_id}
-                                </span>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                    <div style={{ 
+                                        width: 10, height: 10, borderRadius: "50%", 
+                                        background: themeColor, boxShadow: glowShadow,
+                                        animation: "pulse 1.8s infinite"
+                                    }} />
+                                    <span style={{ color: "#F8FAFC", fontWeight: 800, fontSize: 18, letterSpacing: "0.5px" }}>
+                                        THÔNG TIN TẤM PIN: {activePanel.local_id}
+                                    </span>
+                                    {activePanel.quality_status === "warning" && (
+                                        <span style={{
+                                            background: "rgba(245, 158, 11, 0.15)",
+                                            color: "#F59E0B",
+                                            border: "1px solid rgba(245, 158, 11, 0.3)",
+                                            padding: "2px 8px",
+                                            borderRadius: 6,
+                                            fontSize: 10,
+                                            fontWeight: 700,
+                                            letterSpacing: "0.5px",
+                                            boxShadow: "0 0 10px rgba(245, 158, 11, 0.1)"
+                                        }}>
+                                            CẢNH BÁO CHẤT LƯỢNG
+                                        </span>
+                                    )}
+                                </div>
+                                <div style={{ color: "#94a3b8", fontSize: 12, marginLeft: 20, display: "flex", alignItems: "center", gap: 6 }}>
+                                    Ảnh: {activePanel.source_thermal || activePanel.filename || "Không xác định"}
+                                    {activePanel.quality_status === "warning" && (
+                                        <span style={{ color: "#F59E0B", display: "inline-flex", alignItems: "center", gap: 3 }} title="Ảnh chụp có cảnh báo chất lượng (mờ/nhiễu/tương phản thấp)">
+                                            ⚠️ (Ảnh Cảnh Báo)
+                                        </span>
+                                    )}
+                                </div>
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                {activePanel.review_status && (
-                                    <span style={{ 
-                                        color: activePanel.review_status === 'confirmed_defect' ? '#fca5a5' : 
-                                               activePanel.review_status === 'needs_review' ? '#fde047' : 
-                                               activePanel.review_status === 'false_positive' ? '#94a3b8' : '#e2e8f0',
-                                        background: activePanel.review_status === 'confirmed_defect' ? 'rgba(239, 68, 68, 0.15)' : 
-                                                    activePanel.review_status === 'needs_review' ? 'rgba(245, 158, 11, 0.15)' : 
-                                                    activePanel.review_status === 'false_positive' ? 'rgba(148, 163, 184, 0.15)' : 'rgba(255,255,255,0.05)',
-                                        fontWeight: 700, fontSize: 11, padding: "4px 10px", 
-                                        borderRadius: 6, textTransform: "uppercase",
-                                        border: '1px solid ' + (
-                                            activePanel.review_status === 'confirmed_defect' ? 'rgba(239, 68, 68, 0.3)' : 
-                                            activePanel.review_status === 'needs_review' ? 'rgba(245, 158, 11, 0.3)' : 
-                                            activePanel.review_status === 'false_positive' ? 'rgba(148, 163, 184, 0.3)' : 'rgba(255,255,255,0.1)'
-                                        ),
-                                        letterSpacing: "0.5px"
-                                    }}>
-                                        {activePanel.review_status === 'confirmed_defect' ? 'Đã xác nhận' :
-                                         activePanel.review_status === 'needs_review' ? 'Cần kiểm tra lại' :
-                                         activePanel.review_status === 'false_positive' ? 'Bỏ qua' :
-                                         activePanel.review_label || 'Chưa duyệt'}
-                                    </span>
-                                )}
                                 <span style={{ 
                                     color: "#FFFFFF", background: themeColor, 
                                     fontWeight: 700, fontSize: 11, padding: "4px 10px", 
@@ -861,13 +925,13 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                             const locationList = Array.from(grouped.locations);
                                             const location_in_panel = locationList.length > 0 ? locationList.join(", ") : "Trung tâm";
                                             
-                                            const severity_order = ["very_minor", "minor", "moderate", "severe", "replace"];
+                                            const severity_order = ["healthy", "recheck_required", "level_1_monitoring", "level_2_inspection", "level_3_priority"];
                                             const severityList = Array.from(grouped.severities);
                                             const severity = severityList.length > 0
                                                 ? severityList.reduce((worst, current) => {
                                                     return severity_order.indexOf(current) > severity_order.indexOf(worst) ? current : worst;
-                                                  }, "very_minor")
-                                                : "Trung bình";
+                                                  }, "healthy")
+                                                : "healthy";
 
                                             const avgConfidence = grouped.confidences.length > 0
                                                 ? (grouped.confidences.reduce((a, b) => a + b, 0) / grouped.confidences.length)
@@ -903,8 +967,9 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                                             <span style={{ fontSize: 12, fontWeight: 700, color: "#94A3B8" }}>Mức độ: </span>
                                                             {(() => {
                                                                 const sev = String(d.severity || "").toLowerCase();
-                                                                const isHighSev = ["critical", "severe", "high", "replace"].includes(sev);
-                                                                const sevColor = isHighSev ? "#ef4444" : "#f59e0b";
+                                                                const isHighSev = sev === "level_3_priority";
+                                                                const isMedSev = sev === "level_2_inspection";
+                                                                const sevColor = isHighSev ? "#ef4444" : (isMedSev ? "#f59e0b" : "#3b82f6");
                                                                 return (
                                                                     <span 
                                                                         className="px-2 py-1 rounded-md text-xs font-bold" 
@@ -914,7 +979,7 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                                                             border: `1px solid ${sevColor}50` 
                                                                         }}
                                                                     >
-                                                                        {translateSeverity(d.severity || "Trung bình")}
+                                                                        {translateSeverity(d.severity || "healthy")}
                                                                     </span>
                                                                 );
                                                             })()}
@@ -925,9 +990,7 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                                             </div>
                                                         )}
                                                     </div>
-                                                    <div style={{ width: "100%", height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 3, marginTop: 12, overflow: "hidden" }}>
-                                                        <div style={{ width: `${Math.min(100, ratio)}%`, height: "100%", background: themeColor, borderRadius: 3 }} />
-                                                    </div>
+
                                                 </div>
                                             );
                                         });
@@ -971,20 +1034,6 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                         </span>
                                     </div>
                                     <div>
-                                        <span style={{ color: "#94a3b8" }}>Ưu tiên xử lý: </span>
-                                        <span style={{
-                                            fontWeight: 700,
-                                            color: activePanel.maintenance_priority === 'urgent' ? '#ef4444' :
-                                                   activePanel.maintenance_priority === 'high' ? '#f97316' :
-                                                   activePanel.maintenance_priority === 'medium' ? '#fbbf24' : '#10b981'
-                                        }}>
-                                            {activePanel.maintenance_priority === 'urgent' ? 'Khẩn cấp' :
-                                             activePanel.maintenance_priority === 'high' ? 'Cao' :
-                                             activePanel.maintenance_priority === 'medium' ? 'Trung bình' :
-                                             activePanel.maintenance_priority === 'low' ? 'Thấp' : 'Trung bình'}
-                                        </span>
-                                    </div>
-                                    <div>
                                         <span style={{ color: "#94a3b8" }}>Người duyệt: </span>
                                         <span style={{ fontWeight: 600 }}>{activePanel.reviewer_name || "Chưa cập nhật"}</span>
                                     </div>
@@ -1013,57 +1062,106 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                                     <Thermometer size={14} /> Kiểm chứng nhiệt tương đối
                                 </h3>
                                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                                    {activePanel.defects.filter(d => d.thermal_validation_status).map((d, idx) => {
+                                    {activePanel.defects
+                                        .filter(d => d.thermal_validation_status)
+                                        .sort((a, b) => {
+                                            const vA = a.relative_position?.v ?? 0;
+                                            const vB = b.relative_position?.v ?? 0;
+                                            
+                                            const getZone = (v) => {
+                                                if (v < 0.333) return 0;
+                                                if (v < 0.666) return 1;
+                                                return 2;
+                                            };
+                                            
+                                            const zoneA = getZone(vA);
+                                            const zoneB = getZone(vB);
+                                            
+                                            if (zoneA !== zoneB) return zoneA - zoneB; // Từ trên xuống theo 3 zone
+                                            
+                                            const uA = a.relative_position?.u ?? 0;
+                                            const uB = b.relative_position?.u ?? 0;
+                                            return uA - uB; // Từ trái qua phải
+                                        })
+                                        .map((d, idx) => {
                                         const tvStatus = d.thermal_validation_status;
                                         if (tvStatus === 'not_run') return null;
 
-                                        const statusMeta = {
-                                            confirmed_by_relative_thermal: { label: 'Đã xác nhận bằng tương phản nhiệt', color: '#10b981', bg: 'rgba(16,185,129,0.08)', icon: '✔' },
-                                            needs_review:                  { label: 'Cần xem xét',                       color: '#f59e0b', bg: 'rgba(245,158,11,0.08)',  icon: '⚠' },
-                                            class_mismatch:                { label: 'Nghi ngờ sai loại lỗi',             color: '#f97316', bg: 'rgba(249,115,22,0.08)',  icon: '⚠' },
-                                            suspect_false_positive:        { label: 'Nghi ngờ nhận nhầm',                color: '#ef4444', bg: 'rgba(239,68,68,0.08)',   icon: '✗' },
-                                            insufficient_pixels:           { label: 'Không đủ dữ liệu ảnh',             color: '#64748b', bg: 'rgba(100,116,139,0.08)', icon: '?' },
-                                            not_run:                       { label: 'Chưa chạy',                        color: '#64748b', bg: 'rgba(100,116,139,0.08)', icon: '-' },
+                                        const getTvMeta = (status, delta) => {
+                                            const formatDelta = (val) => {
+                                                if (val == null) return "Chưa có dữ liệu";
+                                                const num = Number(val);
+                                                return num > 0 ? `+${num.toFixed(3)}` : num.toFixed(3);
+                                            };
+                                            
+                                            let deltaText = "Chưa có dữ liệu";
+                                            if (delta != null) {
+                                                if (delta > 0.05) deltaText = "Vùng lỗi sáng/nóng hơn nền panel";
+                                                else if (delta < -0.05) deltaText = "Vùng lỗi tối/lạnh hơn nền panel";
+                                                else deltaText = "Tương phản nhiệt tương đối chưa rõ";
+                                            }
+
+                                            let label = "Chưa có dữ liệu";
+                                            let color = "#94a3b8";
+                                            let bg = "rgba(148,163,184,0.08)";
+                                            let icon = "❓";
+
+                                            if (status === "hotter_than_panel_background") {
+                                                label = "Vùng lỗi nóng hơn nền panel";
+                                                color = "#f87171"; bg = "rgba(248,113,113,0.08)"; icon = "🔥";
+                                            } else if (status === "weak_relative_contrast") {
+                                                label = "Tương phản nhiệt chưa rõ";
+                                                color = "#f59e0b"; bg = "rgba(245,158,11,0.08)"; icon = "⚠️";
+                                            } else if (status === "thermal_mismatch_need_review") {
+                                                label = "Không khớp đặc trưng nhiệt, cần xem xét";
+                                                color = "#f97316"; bg = "rgba(249,115,22,0.08)"; icon = "⚠️";
+                                            } else if (status === "cooler_than_panel_background_recheck") {
+                                                label = "Vùng bị che/tối hơn nền panel, cần chụp lại";
+                                                color = "#38bdf8"; bg = "rgba(56,189,248,0.08)"; icon = "❄️";
+                                            } else if (status === "shading_need_recheck") {
+                                                label = "Che bóng, cần chụp lại";
+                                                color = "#818cf8"; bg = "rgba(129,140,248,0.08)"; icon = "☁️";
+                                            } else if (status === "shape_based_detection_review") {
+                                                label = "Lỗi dựa hình thái, cần duyệt";
+                                                color = "#c084fc"; bg = "rgba(192,132,252,0.08)"; icon = "🔍";
+                                            } else if (status === "not_run") {
+                                                label = "Chưa kiểm chứng";
+                                            }
+
+                                            return { label, color, bg, icon, formatDelta, deltaText };
                                         };
-                                        const sm = statusMeta[tvStatus] || statusMeta.not_run;
-                                        const fmt = (v) => v != null ? Number(v).toFixed(3) : 'N/A';
+
+                                        const sm = getTvMeta(tvStatus, d.relative_thermal_delta);
+
+                                        let defectLabel = translateDefect(d.class_name);
+                                        if (d.class_name && d.class_name.toLowerCase().includes('shad')) {
+                                            defectLabel = "Che bóng / Cần chụp lại";
+                                        }
 
                                         return (
                                             <div key={idx} style={{
                                                 padding: '12px 14px', backgroundColor: sm.bg,
                                                 border: `1px solid ${sm.color}30`, borderRadius: 12
                                             }}>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                                    <span style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 700 }}>Lỗi: {translateDefect(d.class_name)}</span>
-                                                    <span style={{ color: sm.color, fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                                        <span style={{ color: '#cbd5e1', fontSize: 12, fontWeight: 700 }}>Lỗi: {defectLabel}</span>
+                                                        <span style={{ color: '#94a3b8', fontSize: 11 }}>Vị trí: {translateLocationInPanel(d.location_in_panel)}</span>
+                                                    </div>
+                                                    <span style={{ color: sm.color, fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4, textAlign: 'right' }}>
                                                         {sm.icon} {sm.label}
                                                     </span>
                                                 </div>
 
                                                 <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '4px 12px', fontSize: 11 }}>
-                                                    <div style={{ color: '#64748b' }}>Điểm kiểm chứng</div>
+                                                    <div style={{ color: '#64748b' }}>Tương phản nhiệt tương đối</div>
                                                     <div style={{ color: sm.color, fontWeight: 700 }}>
-                                                        {d.thermal_validation_score != null ? (d.thermal_validation_score * 100).toFixed(0) + '%' : 'N/A'}
+                                                        {sm.formatDelta(d.relative_thermal_delta)}
                                                     </div>
 
-                                                    <div style={{ color: '#64748b' }}>Chênh lệch nhiệt (Δhot)</div>
-                                                    <div style={{ color: d.relative_hot_delta >= 0.12 ? '#f87171' : '#cbd5e1', fontWeight: 600 }}>
-                                                        {fmt(d.relative_hot_delta)}
-                                                    </div>
-
-                                                    <div style={{ color: '#64748b' }}>Khử màu lam (Blue suppression)</div>
-                                                    <div style={{ color: d.blue_suppression >= 0.06 ? '#fb923c' : '#cbd5e1', fontWeight: 600 }}>
-                                                        {fmt(d.blue_suppression)}
-                                                    </div>
-
-                                                    <div style={{ color: '#64748b' }}>Độ không đồng nhất (TNI)</div>
-                                                    <div style={{ color: d.tni >= 0.12 ? '#facc15' : '#cbd5e1', fontWeight: 600 }}>
-                                                        {fmt(d.tni)}
-                                                    </div>
-
-                                                    <div style={{ color: '#64748b' }}>Đề xuất / Phân loại tự động</div>
-                                                    <div style={{ color: '#38bdf8', fontWeight: 600 }}>
-                                                        {d.rule_class ? `${translateDefect(d.rule_class)} (${d.suggested_review_status === 'confirmed_defect' ? 'Xác nhận' : 'Xem xét'})` : 'N/A'}
+                                                    <div style={{ color: '#64748b' }}>Kết luận</div>
+                                                    <div style={{ color: '#cbd5e1', fontWeight: 600 }}>
+                                                        {sm.deltaText}
                                                     </div>
                                                 </div>
                                             </div>
@@ -1143,45 +1241,7 @@ export default function UnifiedDashboard({ data, panelPower = 600, focusTarget, 
                             </div>
                         </div>
 
-                        {/* Tech specs/Metadata */}
-                        <div style={{ marginTop: "auto", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 16 }}>
-                            <h4 style={{ color: "#e2e8f0", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-                                <Battery size={14} color="#0EA5E9" /> THÔNG TIN TẤM PIN
-                            </h4>
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)", borderRadius: 10, padding: 10 }}>
-                                <div style={{ fontSize: 11 }}>
-                                    <div style={{ color: "#64748B" }}>Tọa độ tâm (chuẩn hóa)</div>
-                                    <div style={{ color: "#E2E8F0", fontWeight: 600, marginTop: 2 }}>
-                                        x: {(((x1 + x2) / 2) / (activePanel.imgW || 640)).toFixed(3)}, y: {(1 - ((y1 + y2) / 2) / (activePanel.imgH || 512)).toFixed(3)}
-                                    </div>
-                                    <div style={{ color: "#64748B", fontSize: 9, marginTop: 2 }}>
-                                        Hệ Descartes chuẩn hóa [0,1]
-                                    </div>
-                                    <div style={{ color: "#38bdf8", fontWeight: 600, marginTop: 2 }}>
-                                        Khu vực ảnh: {getImageRegionFromCartesian(
-                                            Math.round((x1 + x2) / 2),
-                                            activePanel.imgH ? (activePanel.imgH - Math.round((y1 + y2) / 2)) : Math.round((y1 + y2) / 2),
-                                            activePanel.imgW || 640,
-                                            activePanel.imgH || 512
-                                        )}
-                                    </div>
-                                </div>
-                                <div style={{ fontSize: 11 }}>
-                                    <div style={{ color: "#64748B" }}>Kích thước nguồn</div>
-                                    <div style={{ color: "#E2E8F0", fontWeight: 600, marginTop: 2 }}>
-                                        {activePanel.imgW} x {activePanel.imgH} px
-                                    </div>
-                                </div>
-                                {activePanel.yolo_confidence != null && (
-                                    <div style={{ fontSize: 11, gridColumn: "span 2" }}>
-                                        <div style={{ color: "#64748B" }}>Độ tin cậy nhận diện panel (YOLO)</div>
-                                        <div style={{ color: "#38bdf8", fontWeight: 600, marginTop: 2 }}>
-                                            {(activePanel.yolo_confidence * 100).toFixed(1)}%
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
+                        
                     </div>
                 );
             })()}

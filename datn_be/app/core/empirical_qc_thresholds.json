@@ -1,0 +1,31 @@
+{
+  "threshold_source": "empirical_distribution_from_train_reference_images",
+  "note": "Ngưỡng được hiệu chuẩn thực nghiệm từ phân bố ảnh train/reference. Không phải ngưỡng IEC hay ngưỡng OpenCV phổ quát.",
+  "target_shape": {
+    "width": 640,
+    "height": 512
+  },
+  "num_reference_images": 692,
+  "percentiles": {
+    "warn_low": 5.0,
+    "reject_low": 0.5,
+    "warn_high": 95.0,
+    "reject_high": 99.5,
+    "denoise_high": 90.0
+  },
+  "blur_warn_below": 121.01289367675781,
+  "blur_reject_below": 17.790084838867188,
+  "contrast_warn_below": 42.662113189697266,
+  "contrast_reject_below": 22.792781829833984,
+  "dynamic_range_warn_below": 169.5500030517578,
+  "dynamic_range_reject_below": 77.36499786376953,
+  "noise_warn_above": 23.92720603942871,
+  "noise_reject_above": 29.88382339477539,
+  "low_saturation_warn_above": 0.3251809775829315,
+  "low_saturation_reject_above": 0.6088218688964844,
+  "high_saturation_warn_above": 0.0018350220052525401,
+  "high_saturation_reject_above": 0.005204254295676947,
+  "edge_black_warn_above": 0.6525292992591858,
+  "edge_black_reject_above": 0.805412232875824,
+  "denoise_apply_above": 19.96678924560547
+}

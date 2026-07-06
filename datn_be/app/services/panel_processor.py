@@ -420,22 +420,191 @@ def simplify_defect_polygon(
         poly_arr = np.array(xy_polygon, dtype=np.float32)
         if poly_arr is None or poly_arr.ndim == 0 or len(poly_arr) < 3:
             return []
-        arc_len = cv2.arcLength(poly_arr, True)
-
-        approx = cv2.approxPolyDP(poly_arr, 0.002 * arc_len, True).reshape(-1, 2)
-        if len(approx) > max_vertices:
-            for factor in [0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05]:
-                approx = cv2.approxPolyDP(poly_arr, factor * arc_len, True).reshape(-1, 2)
-                if len(approx) <= max_vertices:
-                    break
-
-        if len(approx) < 3:
-            return poly_arr.tolist()
-        return approx.tolist()
+        # Tạm thời tắt tính năng nén polygon bằng approxPolyDP để trả về mask gốc của YOLO theo yêu cầu của user
+        return poly_arr.tolist()
     except Exception:
         if hasattr(xy_polygon, "tolist"):
             return xy_polygon.tolist()
         return list(xy_polygon) if xy_polygon is not None else []
+
+
+
+# ===========================================================================
+# SECTION 4b — YOLO MASK MORPHOLOGICAL SMOOTHING (NO L*, NO THERMAL)
+# ===========================================================================
+
+def mask_to_display_polygon(
+    mask: np.ndarray,
+    max_vertices: int = 128,
+    fallback_polygon: Optional[List[List[float]]] = None,
+) -> List[List[float]]:
+    """
+    Convert binary mask to display polygon via cv2.findContours.
+
+    Rules:
+      - Pick the largest contour.
+      - Discard contours smaller than 1% of total mask area.
+      - Apply very light approxPolyDP only if needed to stay under max_vertices.
+      - Do NOT use Shapely union/buffer.
+      - Do NOT force below 32 vertices for defects.
+      - Fallback to fallback_polygon if no valid contour found.
+
+    Args:
+        mask:             Binary mask (uint8, 0/255), same coords as image.
+        max_vertices:     Upper limit on output vertices (default 128).
+        fallback_polygon: YOLO polygon to return if conversion fails.
+
+    Returns:
+        List of [x, y] float points.
+    """
+    if fallback_polygon is None:
+        fallback_polygon = []
+
+    if mask is None or mask.size == 0:
+        return fallback_polygon
+
+    try:
+        mask_u8 = (mask > 0).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return fallback_polygon
+
+        # Filter tiny contours (< 1% of total mask area)
+        total_area = int((mask_u8 > 0).sum())
+        min_area = max(4, total_area * 0.01)
+        valid = [c for c in contours if cv2.contourArea(c) >= min_area]
+        if not valid:
+            valid = contours  # Keep all if filter is too strict
+
+        largest = max(valid, key=cv2.contourArea)
+
+        pts = largest.reshape(-1, 2)
+        if len(pts) < 3:
+            return fallback_polygon
+
+        # Light approxPolyDP only if above max_vertices — keep shape faithful
+        if len(pts) > max_vertices:
+            arc = cv2.arcLength(largest, True)
+            # Start very tight; only increase epsilon until under limit
+            for factor in [0.001, 0.002, 0.005, 0.010, 0.020, 0.030]:
+                approx = cv2.approxPolyDP(largest, factor * arc, True)
+                if len(approx) <= max_vertices:
+                    pts = approx.reshape(-1, 2)
+                    break
+            else:
+                pts = largest.reshape(-1, 2)  # Give up, keep original
+
+        return [[float(p[0]), float(p[1])] for p in pts]
+
+    except Exception as e:
+        logger.debug(f"[mask_to_display_polygon] exception: {e}")
+        return fallback_polygon
+
+
+def create_yolo_display_mask(
+    yolo_polygon: List[List[float]],
+    image_shape: Tuple[int, int],
+    class_name: str,
+) -> Tuple[np.ndarray, str, float]:
+    """
+    Apply safe morphological smoothing to the YOLO segmentation mask.
+
+    Principles:
+      - YOLO segmentation is the primary polygon source.
+      - Do NOT use L* or any thermal data to reshape/threshold the mask.
+      - Only light morphological operations are applied.
+      - Result is always constrained back to original YOLO mask footprint.
+      - If smoothing shrinks mask too much, fallback to YOLO raw mask.
+
+    Args:
+        yolo_polygon:  [[x,y], ...] YOLO segmentation polygon in pixel coords.
+        image_shape:   (H, W) of the source image.
+        class_name:    Defect class name (controls aggressiveness).
+
+    Returns:
+        (result_mask, source_tag, area_retention)
+        - result_mask:    uint8 mask (0/255), H×W.
+        - source_tag:     One of "yolo_segmentation", "yolo_segmentation_smoothed",
+                          "yolo_segmentation_eroded_1px".
+        - area_retention: float in [0, 1] — fraction of original YOLO mask area kept.
+    """
+    h, w = image_shape[:2]
+    cls = (class_name or "").lower()
+
+    # ── 1. Draw original YOLO mask ──────────────────────────────────────────
+    yolo_mask = np.zeros((h, w), dtype=np.uint8)
+    try:
+        pts = np.array([[int(round(p[0])), int(round(p[1]))] for p in yolo_polygon], dtype=np.int32)
+        if len(pts) >= 3:
+            cv2.fillPoly(yolo_mask, [pts], 255)
+    except Exception:
+        pass
+
+    area_raw = int((yolo_mask > 0).sum())
+    if area_raw == 0:
+        return yolo_mask, "yolo_segmentation", 1.0
+
+    # ── 2. Crack: no morphological ops — return raw YOLO directly ───────────
+    if "crack" in cls:
+        return yolo_mask, "yolo_segmentation", 1.0
+
+    kernel3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+    # ── 3. Morphological close → fill small gaps/holes ──────────────────────
+    closed = cv2.morphologyEx(yolo_mask, cv2.MORPH_CLOSE, kernel3, iterations=1)
+
+    # ── 4. Morphological open → remove tiny noise specks ────────────────────
+    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel3, iterations=1)
+
+    # ── 5. Clamp back to original YOLO footprint (never expand outside) ─────
+    clean_mask = cv2.bitwise_and(opened, yolo_mask)
+
+    area_clean = int((clean_mask > 0).sum())
+    retention_clean = area_clean / area_raw if area_raw > 0 else 0.0
+
+    # ── 6. Erode 1px to trim slight over-segmentation ───────────────────────
+    eroded_mask = cv2.erode(clean_mask, kernel3, iterations=1)
+    area_eroded = int((eroded_mask > 0).sum())
+    retention_eroded = area_eroded / area_raw if area_raw > 0 else 0.0
+
+    # ── 7. Quality gate per class group ─────────────────────────────────────
+    is_multi_cell  = "multi" in cls
+    is_single_cell = "single" in cls or ("hotspot" in cls and not is_multi_cell)
+    is_hotspot     = "hotspot" in cls or "hot" in cls
+    is_shading     = "shad" in cls or "shadow" in cls or "soil" in cls or "dirt" in cls
+
+    use_eroded = False
+    use_clean  = False
+
+    if is_multi_cell:
+        # Multi-cell hotspot spans multiple cells — protect against shrinkage
+        use_eroded = (retention_eroded >= 0.85)
+    elif is_single_cell or is_hotspot:
+        use_eroded = (retention_eroded >= 0.65)
+    elif is_shading:
+        # Shading covers large diffuse areas — do NOT erode
+        use_eroded = False
+        use_clean  = (retention_clean >= 0.80)
+    else:
+        # Unknown class: conservative
+        use_eroded = (retention_eroded >= 0.70)
+
+    # ── 8. Select result mask ────────────────────────────────────────────────
+    if use_eroded and area_eroded >= 3:
+        result_mask      = eroded_mask
+        source_tag       = "yolo_segmentation_eroded_1px"
+        area_retention   = round(retention_eroded, 4)
+    elif (use_clean or (not use_eroded and not is_shading)) and area_clean >= 3 and retention_clean >= 0.60:
+        result_mask      = clean_mask
+        source_tag       = "yolo_segmentation_smoothed"
+        area_retention   = round(retention_clean, 4)
+    else:
+        # Fallback to raw YOLO mask
+        result_mask      = yolo_mask
+        source_tag       = "yolo_segmentation"
+        area_retention   = 1.0
+
+    return result_mask, source_tag, area_retention
 
 
 def calculate_bbox_iou(box_a: List[float], box_b: List[float]) -> float:
@@ -519,310 +688,7 @@ def deduplicate_defects_by_polygon_iou(defects: List[Dict[str, Any]]) -> List[Di
     return sorted(kept, key=lambda d: d.get("raw_idx", 0))
 
 
-def refine_defect_polygon_by_thermal_contour(
-    image: np.ndarray, defect_polygon: List[List[float]], class_name: str
-) -> List[List[float]]:
-    if defect_polygon is None:
-        return []
-    if not class_name or "crack" in class_name.lower():
-        return defect_polygon
-        
-    try:
-        pts = np.array(defect_polygon, dtype=np.int32)
-        if pts is None or pts.ndim == 0 or len(pts) < 3:
-            return defect_polygon or []
-            
-        x, y, w, h = cv2.boundingRect(pts)
-        img_h, img_w = image.shape[:2]
-        
-        pad = 8
-        x1 = max(0, x - pad)
-        y1 = max(0, y - pad)
-        x2 = min(img_w, x + w + pad)
-        y2 = min(img_h, y + h + pad)
-        
-        if (x2 - x1) <= 0 or (y2 - y1) <= 0:
-            return defect_polygon or []
-            
-        roi = image[y1:y2, x1:x2]
-        if roi.size == 0:
-            return defect_polygon or []
-            
-        if len(roi.shape) == 3:
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = roi.copy()
-            
-        mask = np.zeros(gray.shape, dtype=np.uint8)
-        pts_in_roi = pts - [x1, y1]
-        cv2.fillPoly(mask, [pts_in_roi], 255)
-        
-        # Calculate dynamic min_area threshold to filter small noise contours
-        roi_w = x2 - x1
-        roi_h = y2 - y1
-        roi_area = max(1, roi_w * roi_h)
-        yolo_mask_area = max(1, cv2.countNonZero(mask))
-        
-        min_area_abs = 12
-        min_area_ratio_roi = 0.002
-        min_area_ratio_prior = 0.03
-        
-        min_area = max(
-            min_area_abs,
-            roi_area * min_area_ratio_roi,
-            yolo_mask_area * min_area_ratio_prior
-        )
-        
-        refined_pts_in_roi = None
-        kernel = np.ones((3, 3), dtype=np.uint8)
-        
-        if "hotspot" in class_name.lower():
-            masked_gray = cv2.bitwise_and(gray, gray, mask=mask)
-            vals = gray[mask == 255]
-            if len(vals) > 0:
-                thresh_val = np.percentile(vals, 70)
-                _, thresh = cv2.threshold(masked_gray, thresh_val, 255, cv2.THRESH_BINARY)
-                
-                # Morph close to join slightly separated hot areas and fill holes; no open to avoid losing real small hotspots
-                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-                
-                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-                    if valid_contours:
-                        largest_c = max(valid_contours, key=cv2.contourArea)
-                        refined_pts_in_roi = largest_c.reshape(-1, 2)
-                        
-        elif "shading" in class_name.lower() or "soil" in class_name.lower():
-            masked_gray = cv2.bitwise_and(gray, gray, mask=mask)
-            vals = gray[mask == 255]
-            if len(vals) > 0:
-                thresh_val = np.percentile(vals, 30)
-                _, thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY_INV)
-                thresh = cv2.bitwise_and(thresh, mask)
-                
-                # Morph close to fill holes; no open to avoid losing real shaded shapes
-                thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-                
-                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-                    if valid_contours:
-                        largest_c = max(valid_contours, key=cv2.contourArea)
-                        refined_pts_in_roi = largest_c.reshape(-1, 2)
-                        
-        if refined_pts_in_roi is not None and len(refined_pts_in_roi) >= 3:
-            refined_pts_global = refined_pts_in_roi + [x1, y1]
-            return [[float(pt[0]), float(pt[1])] for pt in refined_pts_global]
-            
-        return defect_polygon or []
-    except Exception as e:
-        logger.debug(f"[refine_defect_polygon_by_thermal_contour] exception: {e}")
-        return defect_polygon or []
 
-
-def split_touching_hotspots_with_watershed(image: np.ndarray, defects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Filter only hotspots
-    hotspots = [d for d in defects if "hotspot" in d.get("class_name", "").lower()]
-    if len(hotspots) < 2:
-        return defects # Nothing to split
-        
-    # Group hotspots by spatial closeness
-    n_hotspots = len(hotspots)
-    parent = list(range(n_hotspots))
-    
-    def find(i):
-        if parent[i] == i:
-            return i
-        parent[i] = find(parent[i])
-        return parent[i]
-        
-    def union(i, j):
-        root_i = find(i)
-        root_j = find(j)
-        if root_i != root_j:
-            parent[root_i] = root_j
-
-    # Build bbox list
-    bboxes = []
-    for h in hotspots:
-        poly = h.get("polygon", [])
-        pts = np.array(poly, dtype=np.int32)
-        if len(pts) >= 3:
-            bx, by, bw, bh = cv2.boundingRect(pts)
-            bboxes.append([bx, by, bx + bw, by + bh])
-        else:
-            bboxes.append([0, 0, 0, 0])
-            
-    # Find overlaps
-    for i in range(n_hotspots):
-        for j in range(i + 1, n_hotspots):
-            box_a = bboxes[i]
-            box_b = bboxes[j]
-            if box_a == [0,0,0,0] or box_b == [0,0,0,0]:
-                continue
-            x1 = max(box_a[0], box_b[0])
-            y1 = max(box_a[1], box_b[1])
-            x2 = min(box_a[2], box_b[2])
-            y2 = min(box_a[3], box_b[3])
-            w = max(0, x2 - x1)
-            h = max(0, y2 - y1)
-            if (w > 0 and h > 0) or (max(box_a[0]-8, box_b[0]) <= min(box_a[2]+8, box_b[2]) and max(box_a[1]-8, box_b[1]) <= min(box_a[3]+8, box_b[3])):
-                union(i, j)
-                
-    # Gather groups
-    groups = {}
-    for i in range(n_hotspots):
-        root = find(i)
-        if root not in groups:
-            groups[root] = []
-        groups[root].append(i)
-        
-    # Process each group with size > 1
-    for root, indices in groups.items():
-        if len(indices) < 2:
-            continue
-            
-        group_hotspots = [hotspots[idx] for idx in indices]
-        
-        # Calculate bounding box of the whole group
-        xs = []
-        ys = []
-        for gh in group_hotspots:
-            for pt in gh.get("polygon", []):
-                xs.append(pt[0])
-                ys.append(pt[1])
-        if not xs or not ys:
-            continue
-            
-        min_x, max_x = int(min(xs)), int(max(xs))
-        min_y, max_y = int(min(ys)), int(max(ys))
-        
-        # Add padding
-        pad = 12
-        img_h, img_w = image.shape[:2]
-        x1 = max(0, min_x - pad)
-        y1 = max(0, min_y - pad)
-        x2 = min(img_w, max_x + pad)
-        y2 = min(img_h, max_y + pad)
-        
-        roi_w = x2 - x1
-        roi_h = y2 - y1
-        if roi_w <= 0 or roi_h <= 0:
-            continue
-            
-        roi_img = image[y1:y2, x1:x2]
-        if roi_img.size == 0:
-            continue
-            
-        if len(roi_img.shape) == 3:
-            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = roi_img.copy()
-            
-        # Draw combined mask of the group's polygons
-        mask = np.zeros(gray.shape, dtype=np.uint8)
-        for gh in group_hotspots:
-            pts = np.array(gh.get("polygon", []), dtype=np.int32) - [x1, y1]
-            if len(pts) >= 3:
-                cv2.fillPoly(mask, [pts], 255)
-                
-        # Calculate dynamic min_area threshold for watershed split filtering
-        roi_area = max(1, roi_w * roi_h)
-        yolo_mask_area = max(1, cv2.countNonZero(mask))
-        
-        min_area_abs = 12
-        min_area_ratio_roi = 0.002
-        min_area_ratio_prior = 0.03
-        
-        min_area = max(
-            min_area_abs,
-            roi_area * min_area_ratio_roi,
-            yolo_mask_area * min_area_ratio_prior
-        )
-                
-        # Extract bright region inside mask using Otsu or percentile
-        vals = gray[mask == 255]
-        if len(vals) == 0:
-            continue
-        thresh_val = np.percentile(vals, 60)
-        _, thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
-        thresh = cv2.bitwise_and(thresh, mask)
-        
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel)
-        
-        dist_transform = cv2.distanceTransform(thresh, cv2.DIST_L2, 5)
-        if dist_transform.max() <= 0:
-            continue
-            
-        _, dist_thresh = cv2.threshold(dist_transform, 0.35 * dist_transform.max(), 255, 0)
-        dist_thresh = np.uint8(dist_thresh)
-        
-        contours, _ = cv2.findContours(dist_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if len(contours) < 2:
-            continue  # Không đủ 2 peaks rõ ràng, bỏ qua split nhóm này
-            
-        markers = np.zeros(thresh.shape, dtype=np.int32)
-        for m_idx, c in enumerate(contours):
-            cv2.drawContours(markers, contours, m_idx, m_idx + 1, -1)
-                
-        markers = markers + 1
-        unknown = cv2.subtract(thresh, cv2.dilate(dist_thresh, kernel))
-        markers[unknown == 255] = 0
-        
-        if len(roi_img.shape) == 2:
-            roi_img_3ch = cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR)
-        else:
-            roi_img_3ch = roi_img.copy()
-            
-        cv2.watershed(roi_img_3ch, markers)
-        
-        split_polygons = []
-        max_label = np.max(markers)
-        for label_val in range(2, max_label + 1):
-            seg_mask = np.uint8(markers == label_val)
-            if np.sum(seg_mask) < 4:
-                continue
-            seg_contours, _ = cv2.findContours(seg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if seg_contours:
-                largest_c = max(seg_contours, key=cv2.contourArea)
-                if cv2.contourArea(largest_c) >= min_area:
-                    approx = largest_c.reshape(-1, 2)
-                    if len(approx) >= 3:
-                        split_polygons.append((approx + [x1, y1]).tolist())
-                    
-        if len(split_polygons) >= 2:
-            matched_indices = set()
-            for sp_poly in split_polygons:
-                pts_sp = np.array(sp_poly, dtype=np.float32)
-                cx_sp = float(np.mean(pts_sp[:, 0]))
-                cy_sp = float(np.mean(pts_sp[:, 1]))
-                
-                best_match_idx = -1
-                best_dist = 9999.0
-                for gh_idx, gh in enumerate(group_hotspots):
-                    if gh_idx in matched_indices:
-                        continue
-                    gh_center = gh.get("center", [0, 0])
-                    dist = ((cx_sp - gh_center[0])**2 + (cy_sp - gh_center[1])**2)**0.5
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_match_idx = gh_idx
-                        
-                if best_match_idx != -1:
-                    matched_indices.add(best_match_idx)
-                    gh = group_hotspots[best_match_idx]
-                    
-                    simplified_sp = simplify_defect_polygon(np.array(sp_poly, dtype=np.float32), max_vertices=32)
-                    gh["display_polygon"] = simplified_sp
-                    gh["polygon"] = simplified_sp
-                    gh["analysis_polygon"] = simplify_defect_polygon(np.array(sp_poly, dtype=np.float32), max_vertices=16)
-                    gh["display_polygon_source"] = "thermal_watershed_split"
-                    gh["polygon_source"] = "thermal_watershed_split"
-                    
-    return defects
 
 
 # ===========================================================================
@@ -1375,39 +1241,50 @@ def process_yolo_predictions(
 
         else:
             # ── DEFECT ──────────────────────────────────────────────────────
-            if confidence < defect_conf or len(xy_polygon) < 3:
+            if confidence < defect_conf:
                 continue
 
-            # Display polygon: simplified to 32 points, then refined
-            defect_poly_32 = simplify_defect_polygon(xy_polygon, max_vertices=32)
-            refined_poly = refine_defect_polygon_by_thermal_contour(orig_img, defect_poly_32, class_name)
-            if refined_poly is None or len(refined_poly) < 3:
-                refined_poly = defect_poly_32 or (xy_polygon.tolist() if xy_polygon is not None else []) or []
+            if xy_polygon is not None and len(xy_polygon) >= 3:
+                yolo_polygon = xy_polygon.tolist()
+                poly_source = "yolo_segmentation"
+                # Analysis polygon: lightly simplified for geometry math
+                analysis_poly = simplify_defect_polygon(
+                    np.array(yolo_polygon, dtype=np.float32), max_vertices=64
+                )
+                if analysis_poly is None or len(analysis_poly) < 3:
+                    analysis_poly = yolo_polygon
+            else:
+                # Fallback to bbox
+                bx1, by1, bx2, by2 = bbox
+                yolo_polygon = [[bx1, by1], [bx2, by1], [bx2, by2], [bx1, by2]]
+                analysis_poly = yolo_polygon
+                poly_source = "bbox_fallback"
+                low_geometry_confidence = True
 
-            # Analysis polygon: simplified to 16 points
-            analysis_poly = simplify_defect_polygon(xy_polygon, max_vertices=16)
-            if analysis_poly is None or len(analysis_poly) < 3:
-                analysis_poly = (xy_polygon.tolist() if xy_polygon is not None else []) or []
-            
-            features = get_polygon_features(refined_poly)
+            features = get_polygon_features(yolo_polygon)
 
             raw_defects.append({
                 "class_name":   class_name,
                 "confidence":   round(confidence, 4),
                 "bbox":         [round(v) for v in features["bbox"]],
-                "polygon":      refined_poly,
-                "display_polygon": refined_poly,
+                "low_geometry_confidence": locals().get("low_geometry_confidence", False),
+                # ── Display fields (pure YOLO) ──
+                "polygon":      yolo_polygon,
+                "display_polygon": yolo_polygon,
+                "yolo_polygon": yolo_polygon,
+                "raw_yolo_polygon": yolo_polygon,
+                # ── Analysis (for area/severity math) ──
                 "analysis_polygon": analysis_poly,
-                "polygon_source": "thermal_contour_refinement",
-                "display_polygon_source": "thermal_contour_refinement",
-                "analysis_polygon_source": "yolo_segmentation_simplified",
+                "polygon_source": poly_source,
+                "display_polygon_source": poly_source,
+                "analysis_polygon_source": poly_source,
                 "area":         features["area"],
                 "center":       features["center"],
                 "category":     "defect",
                 "box":          [round(v) for v in bbox],
                 "raw_idx":      i,
-                "polygon_point_count": len(refined_poly),
-                "raw_polygon_point_count": len(xy_polygon) if xy_polygon is not None else 0,
+                "polygon_point_count": len(yolo_polygon),
+                "raw_polygon_point_count": len(yolo_polygon),
             })
 
     # ── OPTIONAL: Edge-Grid Segmented-4 Refinement ─────────────────────────
@@ -1576,8 +1453,8 @@ def process_yolo_predictions(
     # -- Write panel refine debug JSONL --
     save_panel_refine_debug_jsonl(image_path, raw_panels)
 
-    # -- Split touching hotspots with watershed --
-    split_defects = split_touching_hotspots_with_watershed(orig_img, raw_defects)
+    # -- Split touching hotspots with watershed (DISABLED FOR DISPLAY PRESERVATION) --
+    split_defects = raw_defects # split_touching_hotspots_with_watershed(orig_img, raw_defects)
 
     # -- Deduplicate defects --
     deduped_defects = deduplicate_defects_by_polygon_iou(split_defects)

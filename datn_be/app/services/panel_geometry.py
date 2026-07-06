@@ -809,7 +809,9 @@ def assign_row_col_ids(panels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def localize_defect_inside_panel(
     defect_center: List[float],
     panel_bbox: List[float],
-    panel_polygon: Optional[List[List[float]]] = None
+    panel_polygon: Optional[List[List[float]]] = None,
+    defect_polygon: Optional[List[List[float]]] = None,
+    defect_class: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Tính vị trí tương đối của lỗi (defect) bên trong tấm pin (panel).
@@ -818,6 +820,8 @@ def localize_defect_inside_panel(
         defect_center: [cx, cy] của defect (pixel coords trong ảnh gốc)
         panel_bbox: [x1, y1, x2, y2] của panel (pixel coords trong ảnh gốc)
         panel_polygon: [[x,y], ...] của panel (pixel coords trong ảnh gốc)
+        defect_polygon: [[x,y], ...] của defect (pixel coords trong ảnh gốc)
+        defect_class: tên lớp của defect để áp dụng thuật toán vị trí đặc thù
 
     Returns:
         dict với:
@@ -829,77 +833,122 @@ def localize_defect_inside_panel(
     """
     cx, cy = defect_center
 
-    if not panel_polygon or len(panel_polygon) < 3:
-        x1, y1, x2, y2 = panel_bbox
-        w = max(x2 - x1, 1)
-        h = max(y2 - y1, 1)
-        u = max(0.0, min(1.0, (cx - x1) / w))
-        v = max(0.0, min(1.0, (cy - y1) / h))
-        is_landscape = w >= h
-        u_long = u if is_landscape else v
-        v_short = v if is_landscape else u
-    else:
+    # Bàn cờ xoay
+    has_poly = panel_polygon and len(panel_polygon) >= 3
+    if has_poly:
         pts = np.array(panel_polygon, dtype=np.float32)
         rect = cv2.minAreaRect(pts)
         box = cv2.boxPoints(rect)
         
-        # ────────────────────────────────────────────────────────
-        # CÁCH SỬA: Sắp xếp 4 góc theo thứ tự chuẩn centroid góc quay robust
-        # ────────────────────────────────────────────────────────
         cx_box, cy_box = np.mean(box, axis=0)
         angles = np.arctan2(box[:, 1] - cy_box, box[:, 0] - cx_box)
         sorted_box = box[np.argsort(angles)]
         
-        # Tìm góc Top-Left để roll mảng
         min_x, min_y = np.min(box, axis=0)
         distances = np.linalg.norm(sorted_box - [min_x, min_y], axis=1)
         tl_idx = np.argmin(distances)
         sorted_box = np.roll(sorted_box, -tl_idx, axis=0)
         
         tl, tr, br, bl = sorted_box[0], sorted_box[1], sorted_box[2], sorted_box[3]
-        # ────────────────────────────────────────────────────────
-
         v_horiz = tr - tl
         v_vert = bl - tl
-        
         dot_h = np.dot(v_horiz, v_horiz)
         dot_v = np.dot(v_vert, v_vert)
-        
-        vc = np.array([cx, cy], dtype=np.float32) - tl
-        
-        u_proj = np.dot(vc, v_horiz) / dot_h if dot_h > 0 else 0.5
-        v_proj = np.dot(vc, v_vert) / dot_v if dot_v > 0 else 0.5
-        
-        u = max(0.0, min(1.0, float(u_proj)))
-        v = max(0.0, min(1.0, float(v_proj)))
-        
-        if dot_h >= dot_v:
-            u_long = u
-            v_short = v
+
+    def project_point(x, y):
+        if not has_poly:
+            x1, y1, x2, y2 = panel_bbox
+            w = max(x2 - x1, 1)
+            h = max(y2 - y1, 1)
+            u = max(0.0, min(1.0, (x - x1) / w))
+            v = max(0.0, min(1.0, (y - y1) / h))
+            is_landscape = w >= h
+            u_long = u if is_landscape else v
+            v_short = v if is_landscape else u
         else:
-            u_long = v
-            v_short = u
+            vc = np.array([x, y], dtype=np.float32) - tl
+            u_proj = np.dot(vc, v_horiz) / dot_h if dot_h > 0 else 0.5
+            v_proj = np.dot(vc, v_vert) / dot_v if dot_v > 0 else 0.5
+            u = max(0.0, min(1.0, float(u_proj)))
+            v = max(0.0, min(1.0, float(v_proj)))
+            if dot_h >= dot_v:
+                u_long = u
+                v_short = v
+            else:
+                u_long = v
+                v_short = u
+        return u, v, u_long, v_short
 
-    # Phân vùng horizontal
-    if u < 0.33:
-        h_zone = "left"
-    elif u < 0.66:
-        h_zone = "center"
-    else:
-        h_zone = "right"
+    def get_zone_name(u, v):
+        if u < 0.33:
+            h_zone = "left"
+        elif u < 0.66:
+            h_zone = "center"
+        else:
+            h_zone = "right"
 
-    # Phân vùng vertical
-    if v < 0.33:
-        v_zone = "upper"
-    elif v < 0.66:
-        v_zone = "middle"
+        if v < 0.33:
+            v_zone = "upper"
+        elif v < 0.66:
+            v_zone = "middle"
+        else:
+            v_zone = "lower"
+        return f"{v_zone}-{h_zone}"
+
+    # Project centroid first
+    cu, cv, cu_long, cv_short = project_point(cx, cy)
+    centroid_zone = get_zone_name(cu, cv)
+
+    is_multicell = defect_class and "multi" in defect_class.lower()
+
+    if is_multicell and defect_polygon and len(defect_polygon) >= 3:
+        # Calculate bounding box of the defect polygon
+        x_coords = [pt[0] for pt in defect_polygon]
+        y_coords = [pt[1] for pt in defect_polygon]
+        x1, y1, x2, y2 = min(x_coords), min(y_coords), max(x_coords), max(y_coords)
+        
+        # Sample points inside the bounding box
+        contour = np.array(defect_polygon, dtype=np.float32)
+        inside_points = []
+        for x in np.linspace(x1, x2, 12):
+            for y in np.linspace(y1, y2, 12):
+                if cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0:
+                    inside_points.append((x, y))
+                    
+        # Collect zones for all inside points
+        inside_zones = []
+        for pt in inside_points:
+            pu, pv, _, _ = project_point(pt[0], pt[1])
+            inside_zones.append(get_zone_name(pu, pv))
+            
+        # Count frequency of each zone
+        from collections import Counter
+        counts = Counter(inside_zones)
+        
+        # Centroid zone is always included
+        active_zones = {centroid_zone}
+        total_pts = len(inside_points)
+        if total_pts > 0:
+            for zone, count in counts.items():
+                # A zone is active if it contains at least 25% of the defect's internal area
+                if count / total_pts >= 0.25:
+                    active_zones.add(zone)
+                    
+        # Sort spatially
+        spatial_order = [
+            "upper-left", "upper-center", "upper-right",
+            "middle-left", "middle-center", "middle-right",
+            "lower-left", "lower-center", "lower-right"
+        ]
+        sorted_active_zones = [z for z in spatial_order if z in active_zones]
+        location_str = ", ".join(sorted_active_zones)
     else:
-        v_zone = "lower"
+        location_str = centroid_zone
 
     return {
-        "u": round(u, 3),
-        "v": round(v, 3),
-        "u_long": round(u_long, 3),
-        "v_short": round(v_short, 3),
-        "location_in_panel": f"{v_zone}-{h_zone}",
+        "u": round(cu, 3),
+        "v": round(cv, 3),
+        "u_long": round(cu_long, 3),
+        "v_short": round(cv_short, 3),
+        "location_in_panel": location_str,
     }

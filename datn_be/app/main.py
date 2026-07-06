@@ -74,6 +74,14 @@ with engine.connect() as conn:
     except Exception as e:
         logger.warning(f"Khong the modify column scope sang TEXT (co the dang la SQLite hoac da la TEXT): {e}")
 
+    # Tự động di chuyển thêm cột quality_status vào bảng images nếu chưa có
+    try:
+        conn.execute(text("ALTER TABLE images ADD COLUMN quality_status VARCHAR(50)"))
+        conn.commit()
+        logger.info("Da them cot 'quality_status' vao bang images thanh cong.")
+    except Exception:
+        pass
+
 app = FastAPI(title="AI Solar Inspection API")
 
 # ================================
@@ -329,6 +337,7 @@ async def get_latest_batch(db: Session = Depends(get_db)):
         final_report.append({
             "id": img.filename, # frontend UnifiedDashboard dùng ID như filename
             "filename": img.filename,
+            "quality_status": img.quality_status or "ok",
             "rgb_image": thermal_to_rgb.get(img.filename, img.filename.replace("_thermal", "")),
             "image_width": img_w,
             "image_height": img_h,
@@ -421,7 +430,7 @@ async def process_images():
       warning — 1-2 issues (vẫn có thể chạy AI)
       poor    — ≥3 issues  (khuyến nghị chụp lại)
     """
-    BYPASS_PREPROCESSING = True  # Bypass tiền xử lý để YOLO nhận ảnh gốc như khi test trực tiếp
+    BYPASS_PREPROCESSING = False  # Chạy đầy đủ tiền xử lý (BPR, Denoise, Restore pad, Letterbox)
 
     raw_dir = "data/raw"
     output_dir = "data/precalib"
@@ -624,13 +633,22 @@ def run_analysis_pipeline_task(
     from app.core.database import SessionLocal
     db = SessionLocal()
     try:
-        # Calculate total images and processed count for accurate progress reporting
-        all_thermal_in_precalib = [
-            fn for fn in os.listdir(precalib_dir)
-            if fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
-            and fn not in [p for p in thermal_to_rgb.values()]
-        ]
-        total_images = len(all_thermal_in_precalib)
+        # Calculate total images and processed count for accurate progress reporting (excluding poor quality ones)
+        valid_thermal_in_precalib = []
+        for fn in os.listdir(precalib_dir):
+            if fn.lower().endswith(('.jpg', '.jpeg', '.png')) and fn not in [p for p in thermal_to_rgb.values()]:
+                img_path = os.path.join(precalib_dir, fn)
+                img_cv = cv2.imread(img_path)
+                if img_cv is not None:
+                    try:
+                        q = ImageProcessor.assess_quality(img_cv)
+                        if q.get("quality_status") == "poor":
+                            continue
+                    except Exception:
+                        pass
+                valid_thermal_in_precalib.append(fn)
+
+        total_images = len(valid_thermal_in_precalib)
         processed_count = total_images - len(thermal_files)
 
         progress_state["running"] = True
@@ -661,6 +679,20 @@ def run_analysis_pipeline_task(
 
             img_path = os.path.join(precalib_dir, filename)
             logger.info(f"[analyze-all background] Inference ({idx+1}/{len(thermal_files)}): {img_path}")
+
+            # Đọc ảnh để kiểm tra chất lượng trước khi phân tích
+            img_cv = cv2.imread(img_path)
+            q_status = "ok"
+            if img_cv is not None:
+                try:
+                    quality = ImageProcessor.assess_quality(img_cv)
+                    q_status = quality.get("quality_status", "ok")
+                except Exception as e:
+                    logger.warning(f"Lỗi khi đánh giá chất lượng ảnh {filename}: {e}")
+
+            if q_status == "poor":
+                logger.info(f"  → Bỏ qua hoàn toàn ảnh {filename} do chất lượng kém (poor).")
+                continue
 
             # ── BƯỚC 1: Chạy YOLOv8-seg ──
             raw_detections, yolo_result = ai_engine.detect_and_segment(img_path)
@@ -766,7 +798,8 @@ def run_analysis_pipeline_task(
                 batch_id=batch_id,
                 filename=filename,
                 image_type="Thermal",
-                path=os.path.join(results_dir, filename).replace("\\", "/")
+                path=os.path.join(results_dir, filename).replace("\\", "/"),
+                quality_status=q_status
             )
             db.add(db_image)
             db.flush()
@@ -925,13 +958,23 @@ def start_analysis(
     # Danh sách file đã phân tích
     processed_images = set([img.filename for img in db.query(models.Image).all()])
 
-    # Danh sách file thermal cần xử lý
-    thermal_files = [
-        fn for fn in os.listdir(precalib_dir)
-        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
-        and fn not in rgb_images
-        and fn not in processed_images
-    ]
+    # Danh sách file thermal cần xử lý (lọc bỏ hoàn toàn ảnh chất lượng kém)
+    thermal_files = []
+    for fn in os.listdir(precalib_dir):
+        if (fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
+            and fn not in rgb_images
+            and fn not in processed_images):
+            img_path = os.path.join(precalib_dir, fn)
+            img_cv = cv2.imread(img_path)
+            if img_cv is not None:
+                try:
+                    q = ImageProcessor.assess_quality(img_cv)
+                    if q.get("quality_status") == "poor":
+                        logger.info(f"Loại bỏ hoàn toàn ảnh chất lượng kém khỏi danh sách phân tích: {fn}")
+                        continue
+                except Exception as e:
+                    logger.warning(f"Lỗi khi đánh giá chất lượng ảnh {fn}: {e}")
+            thermal_files.append(fn)
 
     if not thermal_files:
         progress_state.update({
@@ -961,13 +1004,22 @@ def start_analysis(
     db.commit()
     db.refresh(new_batch)
 
-    # Tính toán total và current ban đầu
-    all_thermal_in_precalib = [
-        fn for fn in os.listdir(precalib_dir)
-        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) 
-        and fn not in rgb_images
-    ]
-    total_images = len(all_thermal_in_precalib)
+    # Tính toán total và current ban đầu (loại bỏ hoàn toàn ảnh chất lượng kém)
+    valid_thermal_in_precalib = []
+    for fn in os.listdir(precalib_dir):
+        if fn.lower().endswith(('.jpg', '.jpeg', '.png')) and fn not in rgb_images:
+            img_path = os.path.join(precalib_dir, fn)
+            img_cv = cv2.imread(img_path)
+            if img_cv is not None:
+                try:
+                    q = ImageProcessor.assess_quality(img_cv)
+                    if q.get("quality_status") == "poor":
+                        continue
+                except Exception:
+                    pass
+            valid_thermal_in_precalib.append(fn)
+
+    total_images = len(valid_thermal_in_precalib)
     processed_count = total_images - len(thermal_files)
 
     progress_state.update({
@@ -1085,7 +1137,15 @@ def _serialize_defects(defects: List) -> List:
             "box":               _to_list(d.get("bbox") or d.get("box", [])),
             "polygon":           polygon,
             "display_polygon":   _to_list(d.get("display_polygon") or polygon),
+
+            "yolo_polygon":      _to_list(d.get("yolo_polygon") or []),
+            "raw_yolo_polygon":  _to_list(d.get("raw_yolo_polygon") or []),
             "analysis_polygon":  _to_list(d.get("analysis_polygon") or polygon),
+            "polygon_source":    d.get("polygon_source", "yolo_segmentation"),
+            "display_polygon_source": d.get("display_polygon_source", "yolo_segmentation"),
+            "clipped_to_panel":  d.get("clipped_to_panel", False),
+            "low_geometry_confidence": d.get("low_geometry_confidence", False),
+            "need_review_geometry": d.get("need_review_geometry", False),
             "area":              d.get("area", 0.0),
             "center":            _to_list(d.get("center", [0, 0])),
             "area_ratio_percent": area_ratio_percent,
@@ -1098,18 +1158,11 @@ def _serialize_defects(defects: List) -> List:
             # Backward compat
             "type": class_name,
             "loss": area_ratio_percent,
-            # ── Thermal Validation fields (Relative Spatial-Thermal Contrast) ──
-            "thermal_validation_status":     d.get("thermal_validation_status", "not_run"),
-            "thermal_validation_score":      d.get("thermal_validation_score"),
-            "rule_class":                    d.get("rule_class"),
-            "final_class_suggestion":        d.get("final_class_suggestion"),
-            "relative_hot_delta":            d.get("relative_hot_delta"),
-            "relative_dark_delta":           d.get("relative_dark_delta"),
-            "blue_suppression":              d.get("blue_suppression"),
-            "tni":                           d.get("tni"),
-            "area_ratio_inner":              d.get("area_ratio_inner"),
-            "severity_by_relative_contrast": d.get("severity_by_relative_contrast"),
-            "suggested_review_status":       d.get("suggested_review_status"),
+            # ── Thermal Validation fields (CIE L* Relative Thermal Delta) ──
+            "thermal_validation_status": d.get("thermal_validation_status", "not_run"),
+            "relative_thermal_delta":    d.get("relative_thermal_delta"),
+            "area_ratio_inner":          d.get("area_ratio_inner"),
+            "thermal_validation":        d.get("thermal_validation"),
         })
     return result
 
@@ -1640,6 +1693,7 @@ def get_review_items(batch_id: Optional[int] = None, db: Session = Depends(get_d
             "maintenance_priority": panel_detail.get("maintenance_priority", "medium"),
             "reviewer_name": panel_detail.get("reviewer_name", ""),
             "reviewed_at": panel_detail.get("reviewed_at", ""),
+            "power_loss_w": panel_detail.get("total_panel_loss", 0.0),
         })
 
     items.sort(key=lambda x: (x["image_index"], x["filename"], parse_local_id(x["local_id"])))

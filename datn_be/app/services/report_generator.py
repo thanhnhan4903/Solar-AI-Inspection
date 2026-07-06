@@ -60,17 +60,17 @@ AERIAL_PATH = find_asset("solar_farm_aerial.png") or "datn_fe/src/assets/solar_f
 VI_DEFECT_MAP = {
     "hotspot_single_cell": "hotspot single cell",
     "hotspot_multi_cell":  "hotspot multi_cell",
-    "shading":             "Bóng che (shading)",
+    "shading":             "Che bóng / Cần chụp lại",
     "soiling":             "Bám bẩn (soiling)",
     "crack":               "Vết nứt (crack)",
 }
 
 VI_SEVERITY_MAP = {
-    "very_minor": "Rất nhẹ",
-    "minor":      "Nhẹ",
-    "moderate":   "Cần theo dõi",
-    "severe":     "Ưu tiên bảo trì",
-    "replace":    "Cần thay thế"
+    "healthy": "Bình thường",
+    "level_1_monitoring": "Mức 1 – Theo dõi",
+    "level_2_inspection": "Mức 2 – Cần kiểm tra",
+    "level_3_priority": "Mức 3 – Ưu tiên xử lý",
+    "recheck_required": "Cần chụp lại"
 }
 
 VI_LOC_MAP = {
@@ -92,6 +92,27 @@ VI_LOC_MAP = {
     "bottom": "Phía dưới trung tâm",
     "bottom-right": "Góc dưới bên phải",
 }
+
+def get_defect_color_bgr(class_name):
+    name = str(class_name or "").lower()
+    if "hotspot_multi" in name or "multi_cell" in name or "multicell" in name or "multi-cell" in name:
+        return (85, 45, 255)  # BGR for #ff2d55
+    if "hotspot_single" in name or "single_cell" in name or "single-cell" in name or "hotspot" in name or "hot" in name:
+        return (48, 59, 255)  # BGR for #ff3b30
+    if "crack" in name or "nut" in name:
+        return (11, 158, 245)  # BGR for #f59e0b
+    if "shading" in name or "shadow" in name or "shade" in name or "soil" in name or "soiling" in name or "dirt" in name:
+        return (246, 92, 139)  # BGR for #8b5cf6
+    return (68, 68, 239)  # Default light red
+
+def resize_to_limit(img, max_w=800):
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if w > max_w:
+        new_h = int(h * max_w / w)
+        return cv2.resize(img, (max_w, new_h))
+    return img
 
 def translate_location(loc_str):
     if not loc_str:
@@ -333,9 +354,26 @@ class ReportGenerator:
             "shading": 0,
             "crack": 0
         }
+        stats_severity = {
+            "level_3_priority": 0,
+            "level_2_inspection": 0,
+            "level_1_monitoring": 0,
+            "recheck_required": 0
+        }
         
         for p, p_detail in faulty_panels:
             total_power_loss_w += p_detail.get("total_panel_loss", 0.0)
+            
+            worst_sev = p_detail.get("worst_severity", "level_1_monitoring")
+            if worst_sev == "level_3_priority":
+                stats_severity["level_3_priority"] += 1
+            elif worst_sev == "level_2_inspection":
+                stats_severity["level_2_inspection"] += 1
+            elif worst_sev == "recheck_required":
+                stats_severity["recheck_required"] += 1
+            else:
+                stats_severity["level_1_monitoring"] += 1
+
             for d in p_detail.get("defects", []):
                 cname = d.get("class_name", "")
                 cname_lower = cname.lower() if isinstance(cname, str) else str(cname).lower()
@@ -392,18 +430,18 @@ class ReportGenerator:
         pdf.ln(12)
         
         # Bảng phân phối loại lỗi
-        pdf.set_xy(35, 160)
+        pdf.set_xy(35, 156)
         pdf._f("B", 12)
         pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 10, "Phân loại lỗi phát hiện", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
+        pdf.cell(0, 8, "Phân loại lỗi phát hiện", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
 
         pdf.set_fill_color(15, 23, 42)
         pdf.set_text_color(255, 255, 255)
         pdf._f("B", 10)
-        pdf.cell(80, 8.5, " Loại lỗi", border=1, align="L", fill=True)
-        pdf.cell(35, 8.5, "Số lượng", border=1, align="C", fill=True)
-        pdf.cell(40, 8.5, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(80, 8, " Loại lỗi", border=1, align="L", fill=True)
+        pdf.cell(35, 8, "Số lượng", border=1, align="C", fill=True)
+        pdf.cell(40, 8, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
 
         pdf.set_text_color(15, 23, 42)
         pdf._f("", 10)
@@ -423,9 +461,44 @@ class ReportGenerator:
             else:
                 pdf.set_fill_color(255, 255, 255)
             ratio = round(count / sum_defects * 100, 1) if sum_defects > 0 else 0.0
-            pdf.cell(80, 8.5, f" {label_name}", border=1, align="L", fill=True)
-            pdf.cell(35, 8.5, str(count), border=1, align="C", fill=True)
-            pdf.cell(40, 8.5, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(80, 8, f" {label_name}", border=1, align="L", fill=True)
+            pdf.cell(35, 8, str(count), border=1, align="C", fill=True)
+            pdf.cell(40, 8, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+
+        # Bảng phân loại theo mức độ nghiêm trọng (đồng bộ với Web)
+        pdf.ln(4)
+        pdf.set_x(35)
+        pdf._f("B", 12)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 8, "Phân loại theo mức độ nghiêm trọng", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+        pdf.set_fill_color(15, 23, 42)
+        pdf.set_text_color(255, 255, 255)
+        pdf._f("B", 10)
+        pdf.cell(80, 8, " Mức độ nghiêm trọng", border=1, align="L", fill=True)
+        pdf.cell(35, 8, "Số lượng", border=1, align="C", fill=True)
+        pdf.cell(40, 8, "Tỷ lệ (%)", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_text_color(15, 23, 42)
+        pdf._f("", 10)
+
+        severity_mapping_list = [
+            ("level_3_priority",   "Mức 3 – Ưu tiên xử lý", stats_severity["level_3_priority"]),
+            ("level_2_inspection", "Mức 2 – Cần kiểm tra",  stats_severity["level_2_inspection"]),
+            ("level_1_monitoring", "Mức 1 – Theo dõi",        stats_severity["level_1_monitoring"]),
+            ("recheck_required",   "Cần chụp lại",            stats_severity["recheck_required"]),
+        ]
+
+        for idx_row, (key, label_name, count) in enumerate(severity_mapping_list):
+            if idx_row % 2 == 0:
+                pdf.set_fill_color(248, 250, 252)
+            else:
+                pdf.set_fill_color(255, 255, 255)
+            ratio = round(count / total_faulty * 100, 1) if total_faulty > 0 else 0.0
+            pdf.cell(80, 8, f" {label_name}", border=1, align="L", fill=True)
+            pdf.cell(35, 8, f"{count} tấm", border=1, align="C", fill=True)
+            pdf.cell(40, 8, f"{ratio}%", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
 
         # ─────────────────────────────────────────
         # TRANG 4: BẢN ĐỒ TỔNG THỂ VÀ PHÂN BỐ LỖI
@@ -610,7 +683,17 @@ class ReportGenerator:
             pdf._f("", 10)
             pdf.set_text_color(51, 65, 85)
             pdf.multi_cell(110, 5, notes, align="L")
-            pdf.ln(3)
+            pdf.ln(2)
+            
+            # Cảnh báo chất lượng ảnh nguồn trong tiền xử lý
+            q_status = p.image.quality_status if (p.image and p.image.quality_status) else "ok"
+            if q_status in ["warning", "poor"]:
+                pdf._f("B", 9)
+                pdf.set_text_color(220, 38, 38)  # Red (#dc2626)
+                pdf.cell(0, 5, "Cảnh báo: Ảnh nguồn chất lượng kém/có cảnh báo tiền xử lý. Độ chính xác AI có thể giảm.", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(2)
+            else:
+                pdf.ln(1)
             
             # 3. Vẽ ảnh overview (Chứa viền panel màu vàng và tất cả các lỗi màu xanh lá, có đánh số thứ tự)
             panel_crops = cropped_images.get(idx, {})
@@ -671,19 +754,29 @@ class ReportGenerator:
                 raw_cname = d.get("class_name") or d.get("type", "")
                 defect_type_str = VI_DEFECT_MAP.get(raw_cname, raw_cname)
                 
-                severity_str = VI_SEVERITY_MAP.get(d.get("severity", "minor"), "Nhẹ")
-                rec_str = translate_rec(d.get("recommendation", "Kiểm tra"))
+                severity_str = VI_SEVERITY_MAP.get(d.get("severity", "healthy"), "Bình thường")
+                rec_str = d.get("recommendation", "Không cần xử lý.")
                 severity_rec_str = f"{severity_str}\n({rec_str})"
                 
                 loss_val = p_detail.get("total_panel_loss", 0.0)
-                loss_pct_calc = round((loss_val / panel_power) * 100, 1) if panel_power > 0 else 0.0
-                power_loss_str = f"{loss_val:.1f} W\n({loss_pct_calc:.1f}%)"
+                if d.get("class_name") == "shading":
+                    power_loss_str = "Không tính hao\nhụt do cần\nchụp lại"
+                elif p_detail.get("worst_severity") == "recheck_required":
+                    power_loss_str = "0.0 W\n(0.0%)"
+                else:
+                    loss_pct_calc = round((loss_val / panel_power) * 100, 1) if panel_power > 0 else 0.0
+                    power_loss_str = f"{loss_val:.1f} W\n({loss_pct_calc:.1f}%)"
                 
                 area_ratio = d.get("area_ratio_percent")
                 if area_ratio is not None:
                     area_ratio_str = f"{round(area_ratio, 2)}% diện tích\ntấm pin"
                 else:
                     area_ratio_str = "Chưa cập nhật"
+                    
+                relative_thermal_delta = d.get("relative_thermal_delta")
+                if relative_thermal_delta is not None:
+                    sign = "+" if relative_thermal_delta > 0 else ""
+                    area_ratio_str += f"\n\nTương phản nhiệt\ntương đối:\n{sign}{relative_thermal_delta:.3f}"
                 
                 draw_defect_row_local(
                     pdf,
@@ -731,17 +824,8 @@ class ReportGenerator:
         IMAGES_PER_ROW = 5
         PADDING = 100
 
-        # Đọc thử kích thước của các ảnh hoặc mặc định 640x512
+        # Cố định kích thước lưới hiển thị là 640x512 để giữ file nhẹ, không lấy kích thước ảnh gốc 4K
         img_w, img_h = 640, 512
-        for fname in ordered_filenames:
-            path = os.path.join("data/precalib", fname)
-            if not os.path.exists(path):
-                path = os.path.join("data/raw", fname)
-            if os.path.exists(path):
-                img = cv2.imread(path)
-                if img is not None:
-                    img_h, img_w = img.shape[:2]
-                    break
 
         col_count = min(num_images, IMAGES_PER_ROW)
         row_count = (num_images + IMAGES_PER_ROW - 1) // IMAGES_PER_ROW
@@ -876,6 +960,13 @@ class ReportGenerator:
                 
             cv2.putText(canvas, label, (item_x + 28, legend_y + 34), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (229, 231, 235), 1, cv2.LINE_AA)
 
+        # Resize canvas to max width of 1600 to keep report file size small and stable
+        max_map_w = 1600
+        ch, cw = canvas.shape[:2]
+        if cw > max_map_w:
+            new_h = int(ch * max_map_w / cw)
+            canvas = cv2.resize(canvas, (max_map_w, new_h))
+
         # Lưu ảnh kết quả
         cv2.imwrite(output_map_path, canvas)
         return output_map_path
@@ -953,14 +1044,14 @@ class ReportGenerator:
                     panel_detail = {
                         "status": "faulty",
                         "total_panel_loss": p.loss_pct,
-                        "worst_severity": "minor",
+                        "worst_severity": "level_1_monitoring",
                         "recommendation": "Kiểm tra",
                         "bbox": [],
                         "polygon": [],
                         "defects": [{
                             "class_name": "hotspot_single_cell",
                             "confidence": p.confidence,
-                            "severity": "minor",
+                            "severity": "level_1_monitoring",
                             "recommendation": "Kiểm tra",
                             "relative_position": {"u": 0.5, "v": 0.5},
                             "location_in_panel": "center"
@@ -1097,58 +1188,33 @@ class ReportGenerator:
                     if t_img is not None:
                         t_overview = t_img.copy()
                         
-                        # Vẽ viền panel hiện tại (màu vàng)
+                        # Vẽ viền panel hiện tại (màu xanh lơ #38bdf8 -> BGR: 248, 189, 56)
                         p_poly = p_detail.get("polygon") or p_detail.get("outer_polygon", [])
                         if p_poly and len(p_poly) >= 3:
                             pts_p = np.array(p_poly, dtype=np.int32)
-                            cv2.polylines(t_overview, [pts_p], isClosed=True, color=(0, 255, 255), thickness=2)
-                            label_x = int(min(pt[0] for pt in p_poly))
-                            label_y = int(min(pt[1] for pt in p_poly)) - 4
-                            cv2.putText(t_overview, local_id, (max(5, label_x), max(15, label_y)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+                            cv2.polylines(t_overview, [pts_p], isClosed=True, color=(248, 189, 56), thickness=2)
                         elif p_bbox and len(p_bbox) == 4:
-                            cv2.rectangle(t_overview, (px1, py1), (px2, py2), (0, 255, 255), 2)
-                            cv2.putText(t_overview, local_id, (px1, py1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+                            cv2.rectangle(t_overview, (px1, py1), (px2, py2), (248, 189, 56), 2)
 
-                        # Vẽ tất cả các lỗi trong tấm pin này, có đánh số thứ tự (Viền màu đỏ BGR: (0, 0, 255), Chữ màu xanh lá BGR: (0, 255, 0))
-                        drawn_boxes = []
+                        # Vẽ tất cả các lỗi trong tấm pin này (Sử dụng đúng màu sắc nhóm lỗi, độ dày viền 2)
                         for d_i, d_obj in enumerate(defects):
-                            d_p = d_obj.get("polygon", [])
+                            d_p = d_obj.get("display_polygon") or d_obj.get("polygon") or d_obj.get("analysis_polygon") or []
                             d_b = d_obj.get("bbox") or d_obj.get("box", [])
                             
-                            start_x, start_y = 0, 0
+                            class_name = d_obj.get("class_name") or d_obj.get("type", "")
+                            color = get_defect_color_bgr(class_name)
+                            thickness = 2
+                            
                             if d_p and len(d_p) >= 3:
                                 pts_d = np.array(d_p, dtype=np.int32)
-                                cv2.polylines(t_overview, [pts_d], isClosed=True, color=(0, 0, 255), thickness=2)
-                                start_x = int(min(pt[0] for pt in d_p))
-                                start_y = int(min(pt[1] for pt in d_p)) - 4
+                                cv2.polylines(t_overview, [pts_d], isClosed=True, color=color, thickness=thickness)
                             elif d_b and len(d_b) == 4:
                                 dx1, dy1, dx2, dy2 = [int(v) for v in d_b]
-                                cv2.rectangle(t_overview, (dx1, dy1), (dx2, dy2), (0, 0, 255), 2)
-                                start_x = dx1
-                                start_y = dy1 - 4
-                            else:
-                                center = d_obj.get("center", [0, 0])
-                                start_x, start_y = int(center[0]), int(center[1])
-                                
-                            text = f"#{d_i + 1}"
-                            tx, ty, box = get_non_overlapping_pos(
-                                drawn_boxes, start_x, start_y, text,
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1, w_t, h_t
-                            )
-                            drawn_boxes.append(box)
-                            
-                            # Nếu nhãn bị dịch chuyển nhiều, vẽ đường chỉ dẫn màu xanh lá
-                            import math
-                            dist = math.sqrt((tx - start_x)**2 + (ty - start_y)**2)
-                            if dist > 4:
-                                (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-                                cv2.line(t_overview, (start_x, start_y), (tx + tw // 2, ty - th // 2), (0, 255, 0), 1, cv2.LINE_AA)
-                                cv2.circle(t_overview, (start_x, start_y), 2, (0, 255, 0), -1, cv2.LINE_AA)
-                                
-                            cv2.putText(t_overview, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+                                cv2.rectangle(t_overview, (dx1, dy1), (dx2, dy2), color, thickness)
 
                         crop_t_overview = t_overview[y1_c:y2_c, x1_c:x2_c]
                         if crop_t_overview is not None and crop_t_overview.size > 0:
+                            crop_t_overview = resize_to_limit(crop_t_overview, max_w=800)
                             temp_overview_thermal_path = os.path.join(temp_dir, f"t_overview_{local_id}_{idx}.jpg")
                             cv2.imwrite(temp_overview_thermal_path, crop_t_overview)
                 except Exception as e:
@@ -1162,21 +1228,24 @@ class ReportGenerator:
                         scale_x = w_r / w_t
                         scale_y = h_r / h_t
 
-                        crop_w_r = int(w_t * 0.5 * scale_x)
-                        crop_h_r = int(h_t * 0.5 * scale_y)
+                        cx_raw = pcx * scale_x
+                        cy_raw = pcy * scale_y
+                        w_raw = (x2_c - x1_c) * scale_x
+                        h_raw = (y2_c - y1_c) * scale_y
 
-                        x1_r = max(0, int(pcx * scale_x) - crop_w_r // 2)
-                        y1_r = max(0, int(pcy * scale_y) - crop_h_r // 2)
-                        x2_r = min(w_r, x1_r + crop_w_r)
-                        y2_r = min(h_r, y1_r + crop_h_r)
+                        # Zoom level set to 1.25 (to keep crop a bit wider, 20% slack, than the tight 1.5x)
+                        w_raw_zoomed = w_raw / 1.25
+                        h_raw_zoomed = h_raw / 1.25
 
-                        r_drawn = r_img.copy()
-                        rx1, ry1 = int(px1 * scale_x), int(py1 * scale_y)
-                        rx2, ry2 = int(px2 * scale_x), int(py2 * scale_y)
-                        cv2.rectangle(r_drawn, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+                        x1_r = max(0, int(cx_raw - w_raw_zoomed // 2))
+                        y1_r = max(0, int(cy_raw - h_raw_zoomed // 2))
+                        x2_r = min(w_r, int(cx_raw + w_raw_zoomed // 2))
+                        y2_r = min(h_r, int(cy_raw + h_raw_zoomed // 2))
 
-                        crop_r_overview = r_drawn[y1_r:y2_r, x1_r:x2_r]
+                        # No green panel outline drawn on the RGB image crop per user request
+                        crop_r_overview = r_img[y1_r:y2_r, x1_r:x2_r]
                         if crop_r_overview is not None and crop_r_overview.size > 0:
+                            crop_r_overview = resize_to_limit(crop_r_overview, max_w=800)
                             temp_overview_rgb_path = os.path.join(temp_dir, f"r_overview_{local_id}_{idx}.jpg")
                             cv2.imwrite(temp_overview_rgb_path, crop_r_overview)
                 except Exception as e:
@@ -1200,9 +1269,6 @@ class ReportGenerator:
             ("Công suất tấm pin:", f"{panel_power} W"),
             ("Công suất hệ thống:", system_capacity),
             ("Người phụ trách:", supervisor),
-            ("Loại dữ liệu:",    data_type),
-            ("Model AI sử dụng:", ai_model),
-            ("Phiên bản hệ thống:", system_version),
             ("Ghi chú:",         notes),
         ]
 

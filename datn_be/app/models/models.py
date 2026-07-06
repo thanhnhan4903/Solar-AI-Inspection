@@ -40,6 +40,7 @@ class Image(Base):
     filename = Column(String(255))
     image_type = Column(String(50)) # Thermal, RGB
     path = Column(String(500)) # e.g., data/results/img1.jpg
+    quality_status = Column(String(50), nullable=True) # ok, warning, poor, error
     
     batch = relationship("UploadBatch", back_populates="images")
     ai_results = relationship("AiResult", back_populates="image", cascade="all, delete-orphan")

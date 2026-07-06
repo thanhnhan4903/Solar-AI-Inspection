@@ -16,10 +16,10 @@ export function normalizeDefect(defect = {}) {
     area_ratio_percent: areaRatioPercent,
     loss: areaRatioPercent,
     location_in_panel: defect.location_in_panel || "",
-    severity: defect.severity || "minor",
+    severity: defect.severity || "healthy",
     recommendation: defect.recommendation || "Kiểm tra",
     thermal_validation_status: defect.thermal_validation_status || "not_run",
-    thermal_validation_score: defect.thermal_validation_score || null,
+    relative_thermal_delta: defect.relative_thermal_delta || null,
     suggested_review_status: defect.suggested_review_status || null,
   };
 }
